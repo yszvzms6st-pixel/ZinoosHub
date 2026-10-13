@@ -1273,19 +1273,26 @@ local function runStealTrip()
 	LocalPlayer:SetAttribute("CodexMode", "steal")
 	homeSpot()
 	local grabbed = false
+	local arrived = false
 	local stolenName = target.model.Name
-	local releaseLimit = os.clock() + 0.6
+	local gym = myGym()
+	local bench = gym and gym:FindFirstChild("Bench")
+	local seat = bench and bench:FindFirstChild("Seat")
+	if seat and seat:IsA("Seat") then
+		seat.Disabled = true
+	end
+	local releaseLimit = os.clock() + 1
 	while not releaseGym() and os.clock() < releaseLimit and running() do
-		task.wait(0.1)
+		task.wait(0.05)
 	end
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	if hrp and target.model.Parent and target.prompt and target.prompt.Parent then
+	if hrp and target.model.Parent and target.prompt and target.prompt.Parent and not LocalPlayer:GetAttribute("Benching") then
 		target.prompt.HoldDuration = 0
 		target.prompt.RequiresLineOfSight = false
-		if target.prompt.MaxActivationDistance < 20 then
-			target.prompt.MaxActivationDistance = 20
+		if target.prompt.MaxActivationDistance < 30 then
+			target.prompt.MaxActivationDistance = 30
 		end
 		for _, part in ipairs(target.model:GetDescendants()) do
 			if part:IsA("BasePart") then
@@ -1299,20 +1306,33 @@ local function runStealTrip()
 		local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
 		activeGoal = CFrame.new(stand)
 		STATE.stealGoal = activeGoal
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.CFrame = activeGoal
-		local grabUntil = os.clock() + 0.8
-		while os.clock() < grabUntil and running() and target.prompt.Parent do
+		local arriveUntil = os.clock() + 1
+		while os.clock() < arriveUntil and running() and target.model.Parent do
 			hrp.AssemblyLinearVelocity = Vector3.zero
 			hrp.CFrame = activeGoal
-			fireproximityprompt(target.prompt)
-			if LocalPlayer:GetAttribute("holdingFriend") == true then
-				grabbed = true
+			if (hrp.Position - stand).Magnitude < 18 then
+				arrived = true
 				break
 			end
-			task.wait(0.1)
+			task.wait(0.05)
 		end
-		grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
+		if arrived then
+			local grabUntil = os.clock() + 2
+			while os.clock() < grabUntil and running() and target.prompt.Parent do
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.CFrame = activeGoal
+				fireproximityprompt(target.prompt)
+				if LocalPlayer:GetAttribute("holdingFriend") == true then
+					grabbed = true
+					break
+				end
+				task.wait(0.1)
+			end
+			grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
+		end
+	end
+	if seat and seat.Parent and seat:IsA("Seat") then
+		seat.Disabled = false
 	end
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	local carryingEgg = LocalPlayer:GetAttribute("holdingFriend") == true
@@ -1346,7 +1366,7 @@ local function runStealTrip()
 	activeGoal = nil
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
-	STATE.nextSteal = os.clock() + (grabbed and 12 or 3)
+	STATE.nextSteal = os.clock() + (grabbed and 12 or 8)
 end
 
 local function dismissPurchase()
