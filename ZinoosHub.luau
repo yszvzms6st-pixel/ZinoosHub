@@ -26,7 +26,38 @@ local Net = require(Shared:WaitForChild("Net"))
 local allowLeaveBench = function()
 	return false
 end
-local netFireServer = Net.FireServer
+local function unwrapNetFire(fn)
+	local current = fn
+	if typeof(getupvalues) ~= "function" then
+		return current
+	end
+	for _ = 1, 6 do
+		local ok, ups = pcall(getupvalues, current)
+		if not ok or type(ups) ~= "table" then
+			break
+		end
+		local gate, inner = nil, nil
+		for _, value in pairs(ups) do
+			if typeof(value) == "function" then
+				local calledOk, result = pcall(value)
+				if calledOk and type(result) == "boolean" then
+					gate = value
+				else
+					inner = inner or value
+				end
+			end
+		end
+		if not (gate and inner) then
+			break
+		end
+		current = inner
+	end
+	return current
+end
+local netFireServer = STATE and STATE._rawNetFire
+if typeof(netFireServer) ~= "function" then
+	netFireServer = unwrapNetFire(Net.FireServer)
+end
 Net.FireServer = function(self, remoteName, ...)
 	if remoteName == "LeaveBench" and not allowLeaveBench() then
 		return
@@ -341,6 +372,9 @@ local function installOwnMenu()
 end
 
 STATE.onCleanup(function()
+	if typeof(netFireServer) == "function" then
+		Net.FireServer = netFireServer
+	end
 	local gui = CoreGui:FindFirstChild("ToraScript")
 	local title = gui and gui:FindFirstChildWhichIsA("ImageButton")
 	local menu = title and title:FindFirstChild("Frame")
@@ -486,9 +520,6 @@ local function releaseGym()
 end
 
 local function stepTrain()
-	if STATE.autoTrain ~= true then
-		return
-	end
 	if STATE.liftSteal then
 		releaseGym()
 		local character = LocalPlayer.Character
@@ -502,6 +533,12 @@ local function stepTrain()
 					hrp.CFrame = STATE.stealGoal
 				end
 			end)
+		end
+		return
+	end
+	if STATE.autoTrain ~= true then
+		if LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true then
+			releaseGym()
 		end
 		return
 	end
@@ -781,6 +818,9 @@ function prehistoricEggs()
 end
 
 allowLeaveBench = function()
+	if STATE.autoTrain ~= true then
+		return true
+	end
 	if STATE.trainFocus == "speed" then
 		return true
 	end
@@ -819,6 +859,41 @@ local function betterEgg(a, b)
 	return a
 end
 
+local function streamAround(pos, seconds)
+	local done = false
+	task.spawn(function()
+		pcall(function()
+			LocalPlayer:RequestStreamAroundAsync(pos, seconds)
+		end)
+		done = true
+	end)
+	local limit = os.clock() + seconds + 0.75
+	while not done and os.clock() < limit do
+		if not running() or STATE.autoSteal ~= true then
+			return
+		end
+		task.wait(0.1)
+	end
+end
+
+local function hasEggTool()
+	if LocalPlayer:GetAttribute("holdingFriend") == true then
+		return true
+	end
+	local function scan(container)
+		if not container then
+			return false
+		end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("isEgg") and child:GetAttribute("petUID") then
+				return true
+			end
+		end
+		return false
+	end
+	return scan(LocalPlayer:FindFirstChild("Backpack")) or scan(LocalPlayer.Character)
+end
+
 local function peekPrehistoric()
 	local seen = {}
 	local function consider()
@@ -836,26 +911,22 @@ local function peekPrehistoric()
 	end
 	consider()
 	local best = bestSeen()
-	if not (best and best.model.Parent and best.weight <= 1) then
+	if not (best and best.model.Parent) then
 		for _, pos in ipairs(SCAN_POINTS) do
 			if not running() or STATE.autoSteal ~= true then
 				break
 			end
-			pcall(function()
-				LocalPlayer:RequestStreamAroundAsync(pos, 3)
-			end)
+			streamAround(pos, 3)
 			consider()
 			best = bestSeen()
-			if best and best.model.Parent and best.weight <= 1 then
+			if best and best.model.Parent then
 				break
 			end
 		end
 	end
 	best = bestSeen()
 	if best and not best.model.Parent then
-		pcall(function()
-			LocalPlayer:RequestStreamAroundAsync(best.pos, 3)
-		end)
+		streamAround(best.pos, 3)
 		local nearest = nil
 		local nearestDist = 40
 		for _, egg in ipairs(prehistoricEggs()) do
@@ -877,11 +948,14 @@ local function runStealTrip()
 	if STATE.autoSteal ~= true then
 		return
 	end
-	if LocalPlayer:GetAttribute("holdingFriend") == true then
+	if hasEggTool() and os.clock() >= (STATE.nextPlace or 0) then
 		STATE.liftSteal = true
 		deliverHeld()
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
+		if hasEggTool() then
+			STATE.nextPlace = os.clock() + 8
+		end
 		return
 	end
 	if os.clock() < (STATE.nextSteal or 0) then
@@ -1045,16 +1119,25 @@ local function installHub()
 		{ "Auto Open", "Opens a placed egg when its timer is ready.", "autoOpen", "AutoOpen" },
 		{ "Equip Best", "Equips your best pets when your animals change.", "equipBest", "EquipBest" },
 	}
+	STATE.toggleControls = {}
 	for _, item in ipairs(toggles) do
-		tab:CreateToggle({
+		local toggle = tab:CreateToggle({
 			name = item[1],
 			description = item[2],
 			flag = item[4],
 			value = STATE[item[3]] == true,
 			callback = function(value)
-				STATE[item[3]] = value == true
+				local on = value == true
+				STATE[item[3]] = on
+				if item[3] == "autoTrain" and not on then
+					lastSwitchAt = 0
+					releaseGym()
+				elseif item[3] == "equipBest" and on then
+					STATE.equipRoster = nil
+				end
 			end,
 		})
+		STATE.toggleControls[item[3]] = toggle or window.controls[item[4]]
 	end
 end
 
@@ -1117,24 +1200,30 @@ local function stepOpenEggs()
 	end
 end
 
-local lastRoster = nil
 local lastEquipAt = 0
+
+local function addHatched(parts, pets, prefix)
+	if type(pets) ~= "table" then
+		return
+	end
+	for uid, pet in pairs(pets) do
+		if type(pet) == "table" and pet.hatchAt == nil then
+			parts[#parts + 1] = table.concat({
+				prefix,
+				tostring(uid),
+				tostring(pet.key),
+				tostring(pet.mutation),
+				tostring(pet.weight),
+			}, ":")
+		end
+	end
+end
 
 local function rosterSignature()
 	local parts = {}
 	local data = readData()
-	local pets = data and data.plotPets
-	if type(pets) == "table" then
-		for uid, pet in pairs(pets) do
-			if type(pet) == "table" and pet.hatchAt == nil then
-				parts[#parts + 1] = table.concat({
-					tostring(uid),
-					tostring(pet.key),
-					tostring(pet.mutation),
-				}, ":")
-			end
-		end
-	end
+	addHatched(parts, data and data.plotPets, "plot")
+	addHatched(parts, data and data.backpack, "bag")
 	if #parts == 0 then
 		local live = workspace:FindFirstChild("Live")
 		local owned = live and live:FindFirstChild("PlayerFriends")
@@ -1151,21 +1240,83 @@ local function rosterSignature()
 	return table.concat(parts, "|")
 end
 
+local nextIncomeCheck = 0
+
+local function backpackBeatsPlot()
+	local now = os.clock()
+	if now < nextIncomeCheck then
+		return false
+	end
+	nextIncomeCheck = now + 4
+	local data = readData()
+	if not data then
+		return false
+	end
+	local bestBag = 0
+	local worstPlot = math.huge
+	local anyPlot = false
+	local function scan(list, fromBag)
+		if type(list) ~= "table" then
+			return
+		end
+		for _, pet in pairs(list) do
+			if type(pet) == "table" and pet.hatchAt == nil then
+				local ok, income = pcall(Pets.IncomeFor, pet)
+				income = ok and income or 0
+				if fromBag then
+					if income > bestBag then
+						bestBag = income
+					end
+				else
+					anyPlot = true
+					if income < worstPlot then
+						worstPlot = income
+					end
+				end
+			end
+		end
+	end
+	scan(data.backpack, true)
+	scan(data.plotPets, false)
+	if not anyPlot then
+		return bestBag > 0
+	end
+	return bestBag > worstPlot
+end
+
 local function stepEquipBest()
 	if STATE.equipBest ~= true then
 		return
 	end
 	local signature = rosterSignature()
-	if signature == "" or signature == lastRoster then
+	local better = backpackBeatsPlot()
+	if not better and (signature == "" or signature == STATE.equipRoster) then
 		return
 	end
 	if os.clock() - lastEquipAt < 0.2 then
 		return
 	end
 	lastEquipAt = os.clock()
-	lastRoster = signature
-	STATE.lastRoster = signature
+	STATE.equipRoster = signature
 	Net:FireServer("EquipBestPets")
+end
+
+local function syncToggles()
+	local controls = STATE.toggleControls
+	if type(controls) ~= "table" then
+		return
+	end
+	for key, control in pairs(controls) do
+		if type(control) == "table" and typeof(control.value) == "boolean" and STATE[key] ~= control.value then
+			STATE[key] = control.value
+			if key == "autoTrain" and control.value == false then
+				lastSwitchAt = 0
+				releaseGym()
+			elseif key == "equipBest" and control.value == true then
+				STATE.equipRoster = nil
+			end
+		end
+	end
 end
 
 local function pullHomeIfEmpty()
@@ -1195,6 +1346,7 @@ STATE.connect(RunService.Heartbeat, function()
 	end
 	STATE.train = false
 	STATE.stealing = false
+	syncToggles()
 	stepTrain()
 	task.defer(function()
 		task.defer(pullHomeIfEmpty)
