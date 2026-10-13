@@ -10,6 +10,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
 local UserInputService = game:GetService("UserInputService")
 
+local injectedState = STATE
+local STATE = injectedState
+
 if game.PlaceId ~= 76731343328034 then
 	warn("[Zinoos hub] This only runs in Lift Rock For Eggs.")
 	return
@@ -41,6 +44,20 @@ end
 local hubMarker = Instance.new("Folder")
 hubMarker.Name = "ZinoosHub"
 hubMarker.Parent = CoreGui
+local startupFinished = false
+local mainThread = coroutine.running()
+task.spawn(function()
+	local deadline = os.clock() + 8
+	while not startupFinished do
+		if coroutine.status(mainThread) == "dead" or os.clock() >= deadline then
+			break
+		end
+		task.wait(0.1)
+	end
+	if not startupFinished and hubMarker.Parent then
+		hubMarker:Destroy()
+	end
+end)
 
 do
 	local genv = getgenv()
@@ -137,18 +154,35 @@ local function unwrapNetFire(fn)
 	end
 	return current
 end
-local netFireServer = STATE and STATE._rawNetFire
-if typeof(netFireServer) ~= "function" then
-	netFireServer = unwrapNetFire(Net.FireServer)
-	if typeof(STATE) == "table" and typeof(netFireServer) == "function" then
-		STATE._rawNetFire = netFireServer
+local currentFire = Net.FireServer
+local netFireServer = currentFire
+if typeof(STATE) == "table" and currentFire == STATE._fireWrapper and typeof(STATE._rawNetFire) == "function" then
+	netFireServer = STATE._rawNetFire
+elseif typeof(STATE) == "table" and currentFire == STATE._rawNetFire and typeof(STATE._rawNetFire) == "function" then
+	netFireServer = STATE._rawNetFire
+end
+if typeof(STATE) == "table" and typeof(STATE._rawNetFire) ~= "function" then
+	local rawFire = unwrapNetFire(currentFire)
+	if typeof(rawFire) == "function" then
+		STATE._rawNetFire = rawFire
 	end
 end
-Net.FireServer = function(self, remoteName, ...)
+if typeof(netFireServer) ~= "function" and typeof(STATE) == "table" and typeof(STATE._rawNetFire) == "function" then
+	netFireServer = STATE._rawNetFire
+end
+local fireWrapper
+fireWrapper = function(self, remoteName, ...)
 	if remoteName == "LeaveBench" and not allowLeaveBench() then
 		return
 	end
+	if remoteName == "StartBench" and STATE.liftSteal == true then
+		return
+	end
 	return netFireServer(self, remoteName, ...)
+end
+if typeof(netFireServer) == "function" then
+	Net.FireServer = fireWrapper
+	STATE._fireWrapper = fireWrapper
 end
 local Rebirths = require(Shared.Configs.Rebirths)
 local Gym = require(Shared.Configs.Gym)
@@ -163,7 +197,6 @@ local Format = require(Shared.Format)
 local Grades = require(Shared.Configs.Grades)
 local ClientRegistry = require(LocalPlayer:WaitForChild("PlayerScripts").Client.Lib.ClientRegistry)
 
-local LOOK_POS = Vector3.new(190, 8, -6420)
 local FLOORS = {
 	Meadow = { pos = Vector3.new(198, 19, 153), size = Vector3.new(96, 36, 120) },
 	Desert = { pos = Vector3.new(198, 20, -8), size = Vector3.new(96, 39, 171) },
@@ -205,11 +238,25 @@ for _, spec in pairs(Pets.Specs) do
 end
 local queueRare
 
-local ON_COLOR = Color3.fromRGB(255, 65, 65)
-local OFF_TRACK = Color3.fromRGB(100, 100, 100)
-local OFF_INNER = Color3.fromRGB(20, 20, 20)
-local STRENGTH_SECONDS = 20
-local SPEED_SECONDS = 8
+local ownedConnections = {}
+local function trackConnection(connection)
+	local ok, disconnect = pcall(function()
+		return connection and connection.Disconnect
+	end)
+	if ok and type(disconnect) == "function" then
+		table.insert(ownedConnections, connection)
+	end
+	return connection
+end
+local function disconnectOwned()
+	for index = #ownedConnections, 1, -1 do
+		local connection = ownedConnections[index]
+		ownedConnections[index] = nil
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+end
 
 do
 	local genv = getgenv()
@@ -223,19 +270,27 @@ do
 			return STATE._alive == true
 		end
 	end
-	if typeof(STATE.connect) ~= "function" then
-		STATE._connections = {}
-		function STATE.connect(signal, fn)
-			local connection = signal:Connect(fn)
-			table.insert(STATE._connections, connection)
-			return connection
+	if type(STATE._connections) == "table" and STATE._connections ~= ownedConnections then
+		for index = #STATE._connections, 1, -1 do
+			local connection = STATE._connections[index]
+			STATE._connections[index] = nil
+			pcall(function()
+				connection:Disconnect()
+			end)
 		end
+	end
+	STATE._connections = ownedConnections
+	function STATE.connect(signal, fn)
+		return trackConnection(signal:Connect(fn))
 	end
 	if typeof(STATE.onCleanup) ~= "function" then
 		STATE._cleanups = {}
 		function STATE.onCleanup(fn)
 			table.insert(STATE._cleanups, fn)
 		end
+	end
+	if type(STATE._cleanups) == "table" then
+		table.clear(STATE._cleanups)
 	end
 	if typeof(STATE.override) ~= "function" then
 		function STATE.override(tbl, key, value)
@@ -320,20 +375,20 @@ local token = genv.ZinoosGen
 STATE._alive = false
 STATE._gen = math.floor(os.clock() * 1000)
 local myGen = STATE._gen
-task.wait(2)
+STATE._unloaded = false
+task.wait(0.05)
 local function running()
 	return genv.ZinoosGen == token and STATE._gen == myGen
 end
 STATE.alive = running
 
 STATE.liftSteal = false
-STATE.stealing = false
 STATE.stealGoal = nil
 STATE.nextSteal = 0
 STATE.stashGen = (STATE.stashGen or 0) + 1
 local stashGen = STATE.stashGen
-Net:OnClient("BrockStashStart", function(payload)
-	if STATE.stashGen ~= stashGen or type(payload) ~= "table" or type(payload.cards) ~= "table" then
+trackConnection(Net:OnClient("BrockStashStart", function(payload)
+	if not running() or STATE.stashGen ~= stashGen or type(payload) ~= "table" or type(payload.cards) ~= "table" then
 		return
 	end
 	STATE.stashCards = payload.cards
@@ -341,9 +396,9 @@ Net:OnClient("BrockStashStart", function(payload)
 	for index = 1, tonumber(payload.stage) or 0 do
 		STATE.stashTaken[index] = true
 	end
-end)
-Net:OnClient("BrockStashState", function(payload)
-	if STATE.stashGen ~= stashGen or type(payload) ~= "table" then
+end))
+trackConnection(Net:OnClient("BrockStashState", function(payload)
+	if not running() or STATE.stashGen ~= stashGen or type(payload) ~= "table" then
 		return
 	end
 	for key in pairs(payload.taken or {}) do
@@ -352,53 +407,20 @@ Net:OnClient("BrockStashState", function(payload)
 			STATE.stashTaken[index] = true
 		end
 	end
-end)
-Net:OnClient("BrockStashEnd", function()
-	if STATE.stashGen ~= stashGen then
+end))
+trackConnection(Net:OnClient("BrockStashEnd", function()
+	if not running() or STATE.stashGen ~= stashGen then
 		return
 	end
 	STATE.stashCards = nil
 	STATE.stashTaken = {}
-end)
+end))
 
 local added = {}
 local lastRebirthAt = 0
 local lastSwitchAt = 0
 local popped = setmetatable({}, { __mode = "k" })
 
-local function setToggleVisual(row, on)
-	local track = row:FindFirstChildWhichIsA("ImageLabel")
-	if not track then
-		return
-	end
-	local inner = track:FindFirstChildWhichIsA("ImageLabel")
-	local knob = track:FindFirstChildWhichIsA("Frame")
-	track.ImageColor3 = if on then ON_COLOR else OFF_TRACK
-	if inner then
-		inner.ImageColor3 = if on then ON_COLOR else OFF_INNER
-	end
-	if knob then
-		knob.Size = if on then UDim2.new(1, -8, 1, -8) else UDim2.new(0, 0, 1, -8)
-	end
-end
-
-local function addRow(menu, template, label, key, order)
-	local row = template:Clone()
-	row.Name = "Codex" .. key
-	row.Text = " " .. label
-	row.LayoutOrder = order
-	row.Active = true
-	row.Parent = menu
-	setToggleVisual(row, STATE[key] == true)
-	table.insert(added, row)
-	STATE.connect(row.InputBegan, function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		STATE[key] = not STATE[key]
-		setToggleVisual(row, STATE[key] == true)
-	end)
-end
 
 local function contentHeight(menu)
 	local height = 0
@@ -410,148 +432,6 @@ local function contentHeight(menu)
 	return height
 end
 
-local function installUi()
-	local gui = CoreGui:FindFirstChild("ToraScript")
-	local title = gui and gui:FindFirstChildWhichIsA("ImageButton")
-	local menu = title and title:FindFirstChild("Frame")
-	if not menu then
-		return false
-	end
-	if menu:FindFirstChild("Codextrain") and menu:FindFirstChild("Codexupgrade") and menu:FindFirstChild("Codextrails") then
-		return true
-	end
-
-	for _, child in ipairs(menu:GetChildren()) do
-		if string.sub(child.Name, 1, 5) == "Codex" then
-			child:Destroy()
-		end
-	end
-	table.clear(added)
-
-	local template = nil
-	local youtube = nil
-	for _, child in ipairs(menu:GetChildren()) do
-		if child:IsA("TextLabel") and string.find(child.Text, "Auto Hatch", 1, true) then
-			template = child
-		elseif child:IsA("TextLabel") and string.find(child.Text, "YouTube", 1, true) then
-			youtube = child
-		end
-	end
-	if not template then
-		return false
-	end
-
-	local order = 1
-	for _, child in ipairs(menu:GetChildren()) do
-		if child:IsA("GuiObject") and child ~= youtube then
-			child.LayoutOrder = order
-			order += 1
-		end
-	end
-
-	local height = contentHeight(menu)
-	local labels = {
-		{ "Auto Train", "autoTrain" },
-		{ "Auto Rebirth", "rebirth" },
-		{ "Auto Upgrade", "upgrade" },
-		{ "Auto Trails", "trails" },
-	}
-	for _, item in ipairs(labels) do
-		addRow(menu, template, item[1], item[2], order)
-		order += 1
-	end
-	if youtube then
-		youtube.LayoutOrder = order
-	end
-	menu.Size = UDim2.new(1, 0, 0, height + 31 * #labels)
-	return true
-end
-
-local function installOwnMenu()
-	if CoreGui:FindFirstChild("CodexLiftRock") then
-		return true
-	end
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "CodexLiftRock"
-	gui.ResetOnSpawn = false
-	gui.DisplayOrder = 50
-	gui.Parent = CoreGui
-
-	local panel = Instance.new("Frame")
-	panel.Name = "Panel"
-	panel.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
-	panel.BorderSizePixel = 0
-	panel.Position = UDim2.new(0, 12, 0.35, 0)
-	panel.Size = UDim2.fromOffset(230, 196)
-	panel.Parent = gui
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = panel
-
-	local title = Instance.new("TextLabel")
-	title.BackgroundTransparency = 1
-	title.Font = Enum.Font.GothamBlack
-	title.Text = "LIFT ROCK"
-	title.TextColor3 = Color3.new(1, 1, 1)
-	title.TextSize = 16
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.Position = UDim2.fromOffset(12, 6)
-	title.Size = UDim2.new(1, -24, 0, 28)
-	title.Parent = panel
-
-	local rows = {
-		{ "Auto Train", "autoTrain" },
-		{ "Auto Rebirth", "rebirth" },
-		{ "Auto Upgrade", "upgrade" },
-		{ "Auto Trails", "trails" },
-	}
-	for index, item in ipairs(rows) do
-		local button = Instance.new("TextButton")
-		button.Name = "Codex" .. item[2]
-		button.BackgroundTransparency = 1
-		button.AutoButtonColor = false
-		button.Font = Enum.Font.GothamBold
-		button.Text = "  " .. item[1]
-		button.TextColor3 = Color3.new(1, 1, 1)
-		button.TextSize = 14
-		button.TextXAlignment = Enum.TextXAlignment.Left
-		button.Position = UDim2.fromOffset(8, 32 + (index - 1) * 32)
-		button.Size = UDim2.new(1, -16, 0, 30)
-		button.Parent = panel
-		local mark = Instance.new("Frame")
-		mark.Name = "Mark"
-		mark.AnchorPoint = Vector2.new(1, 0.5)
-		mark.Position = UDim2.new(1, -4, 0.5, 0)
-		mark.Size = UDim2.fromOffset(18, 18)
-		mark.BorderSizePixel = 0
-		mark.Parent = button
-		local markCorner = Instance.new("UICorner")
-		markCorner.CornerRadius = UDim.new(0, 4)
-		markCorner.Parent = mark
-		local function paint()
-			mark.BackgroundColor3 = STATE[item[2]] == true and ON_COLOR or OFF_TRACK
-		end
-		paint()
-		button.MouseButton1Click:Connect(function()
-			STATE[item[2]] = not STATE[item[2]]
-			paint()
-		end)
-		table.insert(added, button)
-	end
-
-	local note = Instance.new("TextLabel")
-	note.BackgroundTransparency = 1
-	note.Font = Enum.Font.Gotham
-	note.Text = "Steal waits for a Prehistoric egg"
-	note.TextColor3 = Color3.fromRGB(180, 180, 180)
-	note.TextSize = 12
-	note.TextXAlignment = Enum.TextXAlignment.Left
-	note.Position = UDim2.fromOffset(12, 164)
-	note.Size = UDim2.new(1, -20, 0, 22)
-	note.Parent = panel
-	table.insert(added, gui)
-	return true
-end
 
 local hubCleanups = {}
 local function hubCleanup(fn)
@@ -568,13 +448,17 @@ local function unloadHub()
 	genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
 	STATE._gen = -1
 	STATE._alive = false
+	disconnectOwned()
 	for index = #hubCleanups, 1, -1 do
-		pcall(hubCleanups[index])
+		local fn = hubCleanups[index]
+		hubCleanups[index] = nil
+		pcall(fn)
 	end
 end
 
 hubCleanup(function()
-	if typeof(netFireServer) == "function" then
+	disconnectOwned()
+	if Net.FireServer == fireWrapper and typeof(netFireServer) == "function" then
 		Net.FireServer = netFireServer
 	end
 	local gui = CoreGui:FindFirstChild("ToraScript")
@@ -646,19 +530,38 @@ local function clearBestNotices()
 	end
 end
 
+local noticeController = nil
+local originalShow = nil
+local showWrapper = nil
 task.defer(function()
-	local notifications = ClientRegistry.TryGet("NotificationController")
-	if not notifications then
+	if not running() then
 		return
 	end
-	local show = notifications.Show
-	STATE.override(notifications, "Show", function(self, text, kind, gradient)
+	local notifications = ClientRegistry.TryGet("NotificationController")
+	if not notifications or typeof(notifications.Show) ~= "function" then
+		return
+	end
+	local currentShow = notifications.Show
+	if currentShow == STATE._showWrapper and typeof(STATE._originalShow) == "function" then
+		currentShow = STATE._originalShow
+	end
+	noticeController = notifications
+	originalShow = currentShow
+	showWrapper = function(self, text, kind, gradient)
 		if hideBestNotice(text) then
 			return
 		end
-		return show(self, text, kind, gradient)
-	end)
+		return originalShow(self, text, kind, gradient)
+	end
+	notifications.Show = showWrapper
+	STATE._showWrapper = showWrapper
+	STATE._originalShow = originalShow
 	clearBestNotices()
+end)
+hubCleanup(function()
+	if noticeController and showWrapper and noticeController.Show == showWrapper and typeof(originalShow) == "function" then
+		noticeController.Show = originalShow
+	end
 end)
 
 local function readData()
@@ -740,18 +643,27 @@ local function releaseGym()
 	return true
 end
 
+local activeGoal = nil
+
+local function pinGoal(part, goal)
+	if not part or typeof(goal) ~= "CFrame" then
+		return
+	end
+	part.AssemblyLinearVelocity = Vector3.zero
+	part.CFrame = goal
+end
+
 local function stepTrain()
 	if STATE.liftSteal then
-		releaseGym()
 		local character = LocalPlayer.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
-		if hrp and activeGoal then
-			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.CFrame = activeGoal
+		local goal = activeGoal
+		if hrp and typeof(goal) == "CFrame" then
+			releaseGym()
+			pinGoal(hrp, goal)
 			task.defer(function()
-				if STATE.liftSteal and hrp.Parent and activeGoal then
-					hrp.AssemblyLinearVelocity = Vector3.zero
-					hrp.CFrame = activeGoal
+				if STATE.liftSteal and hrp.Parent and typeof(activeGoal) == "CFrame" then
+					pinGoal(hrp, activeGoal)
 				end
 			end)
 		end
@@ -920,18 +832,6 @@ end
 
 local prehistoricEggs
 
-local function eggSpot()
-	local eggs = prehistoricEggs()
-	if eggs[1] and eggs[1].model.Parent then
-		STATE.lastEggPos = eggs[1].model:GetPivot().Position
-		return STATE.lastEggPos + Vector3.new(0, 4, 0)
-	end
-	if typeof(STATE.lastEggPos) == "Vector3" then
-		return STATE.lastEggPos + Vector3.new(0, 4, 0)
-	end
-	return Vector3.new(171, 8, -6451)
-end
-
 local function homeSpot()
 	local gym = myGym()
 	local bench = gym and gym:FindFirstChild("Bench")
@@ -1018,7 +918,7 @@ local function zoneChoice(value)
 	return "Prehistoric"
 end
 
-local spottedEggs = {}
+local alertedEggs = setmetatable({}, { __mode = "k" })
 
 local function alertRank()
 	return rarityRank[STATE.webhookRarity] or rarityRank.Divine or 10
@@ -1037,7 +937,25 @@ local function rockIsLifted(id)
 	return rock ~= nil and rock:GetAttribute("LiftedLocal") == true
 end
 
+local function eggLabel(model)
+	local key = model:GetAttribute("Key")
+	local spec = key and Pets.Specs[key]
+	local name = spec and spec.DisplayName
+	if type(name) ~= "string" or name == "" then
+		name = model.Name
+	end
+	if not string.find(name, "Egg", 1, true) then
+		name ..= " Egg"
+	end
+	return name
+end
+
 local function eggRank(model)
+	local key = model:GetAttribute("Key")
+	local spec = key and Pets.Specs[key]
+	if spec and type(spec.Rarity) == "string" and rarityRank[spec.Rarity] then
+		return rarityRank[spec.Rarity]
+	end
 	local petName = string.gsub(model.Name, " Egg$", "")
 	local rank = rarityOfName[petName] or rarityOfName[model.Name]
 	if rank then
@@ -1056,6 +974,58 @@ local function inZone(pos, zone)
 	return math.abs(pos.X - floor.pos.X) <= halfX and math.abs(pos.Z - floor.pos.Z) <= halfZ
 end
 
+local function listSpawnedEggs()
+	local zone = stealZone()
+	local list = {}
+	local function addEgg(egg, fromFront)
+		if not egg:IsA("Model") then
+			return
+		end
+		if not fromFront and egg:GetAttribute("SpawnZone") ~= zone then
+			return
+		end
+		local pos = egg:GetPivot().Position
+		if not fromFront and not inZone(pos, zone) then
+			return
+		end
+		local bonusId = egg:GetAttribute("BonusRock")
+		local rank = eggRank(egg)
+		local mutation = tostring(egg:GetAttribute("Mutation") or "None")
+		list[#list + 1] = {
+			label = eggLabel(egg),
+			rarity = Rarities.Order[rank] or "Unknown",
+			rank = rank,
+			mutation = mutation,
+			worth = rank >= alertRank(),
+			front = fromFront == true,
+			locked = type(bonusId) == "string" and not rockIsLifted(bonusId),
+		}
+	end
+	local live = workspace:FindFirstChild("Live")
+	local folder = live and live:FindFirstChild("Friends")
+	if folder then
+		for _, egg in ipairs(folder:GetChildren()) do
+			addEgg(egg, false)
+		end
+	end
+	local stock = workspace:FindFirstChild("_MeadowStock")
+	if stock then
+		for _, egg in ipairs(stock:GetChildren()) do
+			addEgg(egg, true)
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.worth ~= b.worth then
+			return a.worth
+		end
+		if a.rank ~= b.rank then
+			return a.rank > b.rank
+		end
+		return a.label < b.label
+	end)
+	return list
+end
+
 local function scanPoints(zone)
 	local floor = FLOORS[zone or stealZone()] or FLOORS.Prehistoric
 	local halfZ = floor.size.Z / 2 - 20
@@ -1071,41 +1041,55 @@ end
 
 function prehistoricEggs()
 	local zone = stealZone()
+	local list = {}
+	local function consider(egg, zoneName)
+		if not egg:IsA("Model") then
+			return
+		end
+		if zoneName and egg:GetAttribute("SpawnZone") ~= zoneName then
+			return
+		end
+		local pos = egg:GetPivot().Position
+		if zoneName and not inZone(pos, zoneName) then
+			return
+		end
+		local bonusId = egg:GetAttribute("BonusRock")
+		if type(bonusId) == "string" and not rockIsLifted(bonusId) then
+			return
+		end
+		local prompt = egg:FindFirstChild("StealPrompt", true)
+		local rank = eggRank(egg)
+		if rank >= alertRank() and prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and prompt.MaxActivationDistance > 0 then
+			if queueRare and not alertedEggs[egg] then
+				local accepted = queueRare("Rare egg", eggLabel(egg), nil, "egg|" .. tostring(os.clock()) .. "|" .. egg:GetFullName())
+				if accepted then
+					alertedEggs[egg] = true
+				end
+			end
+			local mutation = egg:GetAttribute("Mutation")
+			local petName = string.gsub(eggLabel(egg), " Egg$", "")
+			list[#list + 1] = {
+				model = egg,
+				prompt = prompt,
+				pos = pos,
+				rarity = rank,
+				weight = weightOfName[petName] or 999,
+				mutation = mutationRank[tostring(mutation)] or 0,
+				label = eggLabel(egg),
+			}
+		end
+	end
 	local live = workspace:FindFirstChild("Live")
 	local folder = live and live:FindFirstChild("Friends")
-	if not folder then
-		return {}
+	if folder then
+		for _, egg in ipairs(folder:GetChildren()) do
+			consider(egg, zone)
+		end
 	end
-	local list = {}
-	for _, egg in ipairs(folder:GetChildren()) do
-		if egg:IsA("Model") and egg:GetAttribute("SpawnZone") == zone then
-			local pos = egg:GetPivot().Position
-			if not inZone(pos, zone) then
-				continue
-			end
-			local bonusId = egg:GetAttribute("BonusRock")
-			if type(bonusId) == "string" and not rockIsLifted(bonusId) then
-				continue
-			end
-			local prompt = egg:FindFirstChild("StealPrompt", true)
-			local rank = eggRank(egg)
-			if rank >= alertRank() and prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and prompt.MaxActivationDistance > 0 then
-				local spotKey = string.format("%d:%d:%s", math.floor(pos.X), math.floor(pos.Z), egg.Name)
-				if not spottedEggs[spotKey] and queueRare then
-					spottedEggs[spotKey] = true
-					queueRare("Rare egg", egg.Name, nil, "spot|" .. spotKey)
-				end
-				local mutation = egg:GetAttribute("Mutation")
-				local petName = string.gsub(egg.Name, " Egg$", "")
-				list[#list + 1] = {
-					model = egg,
-					prompt = prompt,
-					pos = pos,
-					rarity = rank,
-					weight = weightOfName[petName] or weightOfName[egg.Name] or 999,
-					mutation = mutationRank[tostring(mutation)] or 0,
-				}
-			end
+	local stock = workspace:FindFirstChild("_MeadowStock")
+	if stock then
+		for _, egg in ipairs(stock:GetChildren()) do
+			consider(egg, nil)
 		end
 	end
 	table.sort(list, function(a, b)
@@ -1120,8 +1104,6 @@ function prehistoricEggs()
 	return list
 end
 
-local activeGoal = nil
-
 allowLeaveBench = function()
 	if STATE.autoTrain ~= true then
 		return true
@@ -1132,10 +1114,6 @@ allowLeaveBench = function()
 	local eggs = prehistoricEggs()
 	local egg = eggs[1]
 	return STATE.liftSteal == true and egg ~= nil and egg.model.Parent ~= nil
-end
-
-local function placeHeldPet()
-	return deliverHeld()
 end
 
 local function betterEgg(a, b)
@@ -1242,6 +1220,94 @@ local function peekPrehistoric()
 	return nil
 end
 
+local stealRestores = {}
+local function rememberSteal(instance, property)
+	if typeof(instance) ~= "Instance" then
+		return
+	end
+	local ok, value = pcall(function()
+		return instance[property]
+	end)
+	if ok then
+		stealRestores[#stealRestores + 1] = { instance, property, value }
+	end
+end
+local function restoreStealChanges()
+	for index = #stealRestores, 1, -1 do
+		local item = stealRestores[index]
+		stealRestores[index] = nil
+		local instance = item[1]
+		if typeof(instance) == "Instance" and instance.Parent then
+			pcall(function()
+				instance[item[2]] = item[3]
+			end)
+		end
+	end
+end
+hubCleanup(restoreStealChanges)
+
+local function stageCFrame()
+	local gym = myGym()
+	local bench = gym and gym:FindFirstChild("Bench")
+	local seat = bench and bench:FindFirstChild("Seat")
+	if not seat then
+		return nil
+	end
+	local stand = seat.Position + seat.CFrame.LookVector * 16 + Vector3.new(0, 4, 0)
+	return CFrame.new(stand)
+end
+
+local function standOutFront()
+	local goal = stageCFrame()
+	if typeof(goal) ~= "CFrame" then
+		return false
+	end
+	STATE.liftSteal = true
+	activeGoal = goal
+	STATE.stealGoal = goal
+	local limit = os.clock() + 2
+	while os.clock() < limit and running() and STATE.autoSteal == true do
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid.Sit = false
+		end
+		if LocalPlayer:GetAttribute("Benching") then
+			releaseGym()
+		end
+		if hrp then
+			pinGoal(hrp, goal)
+			if not LocalPlayer:GetAttribute("Benching") and (hrp.Position - goal.Position).Magnitude < 8 then
+				return true
+			end
+		end
+		task.wait(0.05)
+	end
+	return false
+end
+
+local function backToBench()
+	local gym = myGym()
+	local bench = gym and gym:FindFirstChild("Bench")
+	local seat = bench and bench:FindFirstChild("Seat")
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if seat and hrp then
+		local back = CFrame.new(seat.Position + Vector3.new(0, 3, 0))
+		STATE.liftSteal = true
+		activeGoal = back
+		STATE.stealGoal = back
+		pinGoal(hrp, back)
+		task.wait(0.25)
+	end
+	activeGoal = nil
+	STATE.liftSteal = false
+	STATE.stealGoal = nil
+	LocalPlayer:SetAttribute("CodexMode", "train")
+end
+
 local function runStealTrip()
 	if STATE.autoSteal ~= true then
 		return
@@ -1259,8 +1325,57 @@ local function runStealTrip()
 	if os.clock() < (STATE.nextSteal or 0) then
 		return
 	end
-	local target = peekPrehistoric()
-	if not target or not target.model.Parent then
+	local phase = ReplicatedStorage:GetAttribute("TimeOfDayPhase")
+	local dayId = ReplicatedStorage:GetAttribute("TimeOfDayEndsAt")
+	if phase ~= "Day" or typeof(dayId) ~= "number" then
+		STATE.liftSteal = false
+		STATE.stealGoal = nil
+		activeGoal = nil
+		LocalPlayer:SetAttribute("CodexMode", "train")
+		return
+	end
+	if STATE.triedDay ~= dayId then
+		STATE.triedDay = dayId
+		STATE.triedKeys = {}
+		STATE.openedDay = nil
+		STATE.streamedDay = nil
+	end
+	if type(STATE.triedKeys) ~= "table" then
+		STATE.triedKeys = {}
+	end
+	local function eggKey(egg)
+		local pos = egg.pos
+		if typeof(pos) ~= "Vector3" and egg.model then
+			pos = egg.model:GetPivot().Position
+		end
+		pos = pos or Vector3.zero
+		return string.format("%s|%d|%d", egg.label or (egg.model and egg.model.Name) or "egg", math.floor(pos.X + 0.5), math.floor(pos.Z + 0.5))
+	end
+	local function freshTarget()
+		for _, egg in ipairs(prehistoricEggs()) do
+			if egg.model.Parent and STATE.triedKeys[eggKey(egg)] ~= true then
+				return egg
+			end
+		end
+		return nil
+	end
+	local opening = STATE.openedDay ~= dayId
+	local target = freshTarget()
+	if not target and opening and STATE.streamedDay ~= dayId then
+		STATE.streamedDay = dayId
+		local peeked = peekPrehistoric()
+		if peeked and peeked.model and peeked.model.Parent and STATE.triedKeys[eggKey(peeked)] ~= true then
+			target = peeked
+		end
+	end
+	if not target and not opening then
+		STATE.liftSteal = false
+		STATE.stealGoal = nil
+		activeGoal = nil
+		LocalPlayer:SetAttribute("CodexMode", "train")
+		return
+	end
+	if not standOutFront() then
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
 		activeGoal = nil
@@ -1268,71 +1383,98 @@ local function runStealTrip()
 		STATE.nextSteal = os.clock() + 8
 		return
 	end
-	STATE.liftSteal = true
-	STATE.stealGoal = nil
+	STATE.openedDay = dayId
+	if not target then
+		local lookUntil = os.clock() + 2
+		while os.clock() < lookUntil and running() and STATE.autoSteal == true do
+			target = freshTarget()
+			if target then
+				break
+			end
+			task.wait(0.2)
+		end
+	end
+	if not target or not target.model.Parent then
+		backToBench()
+		STATE.nextSteal = os.clock() + 2
+		return
+	end
+	STATE.triedKeys[eggKey(target)] = true
 	LocalPlayer:SetAttribute("CodexMode", "steal")
 	homeSpot()
 	local grabbed = false
 	local arrived = false
-	local stolenName = target.model.Name
-	local gym = myGym()
-	local bench = gym and gym:FindFirstChild("Bench")
-	local seat = bench and bench:FindFirstChild("Seat")
-	if seat and seat:IsA("Seat") then
-		seat.Disabled = true
-	end
-	local releaseLimit = os.clock() + 1
-	while not releaseGym() and os.clock() < releaseLimit and running() do
-		task.wait(0.05)
-	end
-	local character = LocalPlayer.Character
-	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	if hrp and target.model.Parent and target.prompt and target.prompt.Parent and not LocalPlayer:GetAttribute("Benching") then
-		target.prompt.HoldDuration = 0
-		target.prompt.RequiresLineOfSight = false
-		if target.prompt.MaxActivationDistance < 30 then
-			target.prompt.MaxActivationDistance = 30
+	local stolenName = target.label or target.model.Name
+	local tripOk, tripErr = pcall(function()
+		local gym = myGym()
+		local bench = gym and gym:FindFirstChild("Bench")
+		local seat = bench and bench:FindFirstChild("Seat")
+		if seat and seat:IsA("Seat") then
+			rememberSteal(seat, "Disabled")
+			seat.Disabled = true
 		end
-		for _, part in ipairs(target.model:GetDescendants()) do
-			if part:IsA("BasePart") then
-				part.CanCollide = false
-			end
-		end
-		if humanoid then
-			humanoid.PlatformStand = false
-			humanoid.Sit = false
-		end
-		local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
-		activeGoal = CFrame.new(stand)
-		STATE.stealGoal = activeGoal
-		local arriveUntil = os.clock() + 1
-		while os.clock() < arriveUntil and running() and target.model.Parent do
-			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.CFrame = activeGoal
-			if (hrp.Position - stand).Magnitude < 18 then
-				arrived = true
-				break
-			end
+		local releaseLimit = os.clock() + 1.5
+		while not releaseGym() and os.clock() < releaseLimit and running() and STATE.autoSteal == true do
 			task.wait(0.05)
 		end
-		if arrived then
-			local grabUntil = os.clock() + 2
-			while os.clock() < grabUntil and running() and target.prompt.Parent do
-				hrp.AssemblyLinearVelocity = Vector3.zero
-				hrp.CFrame = activeGoal
-				fireproximityprompt(target.prompt)
-				if LocalPlayer:GetAttribute("holdingFriend") == true then
-					grabbed = true
+		if LocalPlayer:GetAttribute("Benching") or not running() or STATE.autoSteal ~= true then
+			return
+		end
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if hrp and target.model.Parent and target.prompt and target.prompt.Parent then
+			rememberSteal(target.prompt, "HoldDuration")
+			rememberSteal(target.prompt, "RequiresLineOfSight")
+			rememberSteal(target.prompt, "MaxActivationDistance")
+			target.prompt.HoldDuration = 0
+			target.prompt.RequiresLineOfSight = false
+			if target.prompt.MaxActivationDistance < 30 then
+				target.prompt.MaxActivationDistance = 30
+			end
+			for _, part in ipairs(target.model:GetDescendants()) do
+				if part:IsA("BasePart") then
+					rememberSteal(part, "CanCollide")
+					part.CanCollide = false
+				end
+			end
+			if humanoid then
+				humanoid.PlatformStand = false
+				humanoid.Sit = false
+			end
+			local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
+			local goal = CFrame.new(stand)
+			activeGoal = goal
+			STATE.stealGoal = goal
+			pinGoal(hrp, goal)
+			local arriveUntil = os.clock() + 1.5
+			while os.clock() < arriveUntil and running() and STATE.autoSteal == true and target.model.Parent do
+				pinGoal(hrp, goal)
+				if (hrp.Position - stand).Magnitude < 18 then
+					arrived = true
 					break
 				end
-				task.wait(0.1)
+				task.wait(0.05)
 			end
-			grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
+			if arrived then
+				local grabUntil = os.clock() + 2
+				while os.clock() < grabUntil and running() and STATE.autoSteal == true and target.prompt.Parent do
+					pinGoal(hrp, goal)
+					fireproximityprompt(target.prompt)
+					if LocalPlayer:GetAttribute("holdingFriend") == true then
+						grabbed = true
+						break
+					end
+					task.wait(0.1)
+				end
+				grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
+			end
 		end
-	end
-	if seat and seat.Parent and seat:IsA("Seat") then
-		seat.Disabled = false
+	end)
+	restoreStealChanges()
+	if not tripOk then
+		grabbed = false
+		warn("[Zinoos hub] steal " .. tostring(tripErr))
 	end
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	local carryingEgg = LocalPlayer:GetAttribute("holdingFriend") == true
@@ -1353,21 +1495,23 @@ local function runStealTrip()
 	if grabbed and queueRare then
 		queueRare("Stolen egg", stolenName)
 	end
-	local character = LocalPlayer.Character
-	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	homeSpot()
-	if hrp and typeof(STATE.homePos) == "Vector3" and (hrp.Position - STATE.homePos).Magnitude > 80 then
-		STATE.liftSteal = true
-		activeGoal = CFrame.new(STATE.homePos)
-		STATE.stealGoal = activeGoal
-		hrp.CFrame = activeGoal
-		task.wait(0.35)
-	end
-	activeGoal = nil
-	STATE.liftSteal = false
-	STATE.stealGoal = nil
-	STATE.nextSteal = os.clock() + (grabbed and 12 or 8)
+	backToBench()
+	STATE.stealError = nil
+	STATE.nextSteal = os.clock() + (grabbed and 12 or 4)
 end
+
+local savedPadTouch = setmetatable({}, { __mode = "k" })
+local function restorePurchasePads()
+	for trigger, value in pairs(savedPadTouch) do
+		savedPadTouch[trigger] = nil
+		if typeof(trigger) == "Instance" and trigger.Parent then
+			pcall(function()
+				trigger.CanTouch = value
+			end)
+		end
+	end
+end
+hubCleanup(restorePurchasePads)
 
 local function dismissPurchase()
 	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -1400,6 +1544,9 @@ local function dismissPurchase()
 		local pad = plot:FindFirstChild("FarmUpgradePad")
 		local trigger = pad and pad:FindFirstChild("TriggerPart", true)
 		if trigger and trigger:IsA("BasePart") then
+			if savedPadTouch[trigger] == nil then
+				savedPadTouch[trigger] = trigger.CanTouch
+			end
 			trigger.CanTouch = false
 		end
 	end
@@ -1546,28 +1693,102 @@ local function eggValueText(model)
 	return model.Name .. "  $" .. Format.Short(income) .. "/s"
 end
 
+local webhookHosts = {
+	["discord.com"] = true,
+	["discordapp.com"] = true,
+	["canary.discord.com"] = true,
+	["ptb.discord.com"] = true,
+}
+
 local function webhookUrl()
-	local url = type(STATE.webhook) == "string" and STATE.webhook or ""
-	url = string.match(url, "^%s*(https://%S+)%s*$") or ""
-	if not string.find(url, "/api/webhooks/", 1, true) then
+	local raw = type(STATE.webhook) == "string" and STATE.webhook or ""
+	local url = string.match(raw, "^%s*(https://%S+)%s*$")
+	if not url then
+		return nil
+	end
+	local host, path = string.match(url, "^https://([^/%s]+)(/.*)$")
+	if not host or not path then
+		return nil
+	end
+	host = string.lower(host)
+	local portAt = string.find(host, ":", 1, true)
+	if portAt then
+		host = string.sub(host, 1, portAt - 1)
+	end
+	if string.sub(host, 1, 4) == "www." then
+		host = string.sub(host, 5)
+	end
+	local webhookPrefix = "/api/webhooks/"
+	if not webhookHosts[host] or string.sub(path, 1, #webhookPrefix) ~= webhookPrefix then
 		return nil
 	end
 	return url
 end
 
+local function webhookRequest()
+	if typeof(request) == "function" then
+		return request
+	end
+	return nil
+end
+
+local requestWarned = false
+local function sendWebhook(url, payload)
+	local requester = webhookRequest()
+	if not requester then
+		if not requestWarned then
+			requestWarned = true
+			warn("[Zinoos hub] Webhook request is not available.")
+		end
+		return false, "Request is not available."
+	end
+	local okEncode, body = pcall(function()
+		return game:GetService("HttpService"):JSONEncode(payload)
+	end)
+	if not okEncode then
+		return false, "Could not build the message."
+	end
+	local ok, result = pcall(requester, {
+		Url = url,
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = body,
+	})
+	if not ok then
+		return false, "The request failed."
+	end
+	local code = nil
+	if type(result) == "table" then
+		code = result.StatusCode or result.Status or result.statusCode or result.status_code
+	elseif type(result) == "number" then
+		code = result
+	end
+	if type(code) == "number" and code >= 200 and code < 300 then
+		return true, "Webhook sent."
+	end
+	return false, "Webhook failed."
+end
+
 queueRare = function(kind, name, money, mark)
 	if STATE.webhookOn == false or STATE._unloaded then
-		return
+		return false
 	end
 	local url = webhookUrl()
 	if not url then
-		return
+		return false
 	end
 	local clean = string.gsub(tostring(name), " Egg$", "")
 	local rarity = rarityByDisplay[clean] or ""
 	local minRank = rarityRank[STATE.webhookRarity] or rarityRank.Divine or 1
 	if (rarityRank[rarity] or 0) < minRank then
-		return
+		return false
+	end
+	if not webhookRequest() then
+		if not requestWarned then
+			requestWarned = true
+			warn("[Zinoos hub] Webhook request is not available.")
+		end
+		return false
 	end
 	if type(money) ~= "string" or money == "" then
 		for _, spec in pairs(Pets.Specs) do
@@ -1580,33 +1801,26 @@ queueRare = function(kind, name, money, mark)
 	local stamp = mark or (kind .. "|" .. clean .. "|" .. rarity)
 	local now = os.clock()
 	if STATE._hookStamp == stamp and now - (STATE._hookAt or 0) < 12 then
-		return
+		return false
 	end
 	STATE._hookStamp = stamp
 	STATE._hookAt = now
 	task.spawn(function()
-		local okEncode, body = pcall(function()
-			return game:GetService("HttpService"):JSONEncode({
-				username = "Zinoos hub",
-				embeds = {
-					{
-						title = kind,
-						description = string.format("**%s**\n%s\n%s", clean, rarity, money or ""),
-						color = 16098851,
-					},
-				},
-			})
-		end)
-		if not okEncode then
+		if STATE._unloaded or not running() then
 			return
 		end
-		pcall(request, {
-			Url = url,
-			Method = "POST",
-			Headers = { ["Content-Type"] = "application/json" },
-			Body = body,
+		sendWebhook(url, {
+			username = "Zinoos hub",
+			embeds = {
+				{
+					title = kind,
+					description = string.format("**%s**\n%s\n%s", clean, rarity, money or ""),
+					color = 16098851,
+				},
+			},
 		})
 	end)
+	return true
 end
 
 local liteHooked = setmetatable({}, { __mode = "k" })
@@ -2289,11 +2503,15 @@ local function installHub()
 
 	local uiScale = Instance.new("UIScale")
 	uiScale.Parent = gui
-	local function fitScale()
+	local function viewSize()
 		local camera = workspace.CurrentCamera
-		local view = camera and camera.ViewportSize or Vector2.new(1280, 720)
-		local scale = math.min(view.X / 760, view.Y / 540, 1)
-		uiScale.Scale = math.clamp(scale, 0.62, 1)
+		return camera and camera.ViewportSize or Vector2.new(1280, 720)
+	end
+	local function fitScale()
+		local view = viewSize()
+		local margin = 16
+		local scale = math.min((view.X - margin * 2) / 700, (view.Y - margin * 2) / 468, 1)
+		uiScale.Scale = math.clamp(scale, 0.35, 1)
 	end
 	fitScale()
 
@@ -2651,7 +2869,22 @@ local function installHub()
 	local searchRows = {}
 	local function remember(row, cardFrame, text)
 		row:SetAttribute("ZinoosSearch", string.lower(text))
-		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text) }
+		local page = "Main"
+		local current = row
+		while current do
+			if current == discordPage then
+				page = "Discord"
+				break
+			elseif current == homePage then
+				page = "Home"
+				break
+			elseif current == mainPage then
+				page = "Main"
+				break
+			end
+			current = current.Parent
+		end
+		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text), page = page }
 	end
 
 	local function paintSwitch(track, knob, on)
@@ -2664,8 +2897,6 @@ local function installHub()
 		if key == "autoTrain" and not on then
 			lastSwitchAt = 0
 			releaseGym()
-		elseif key == "equipBest" and on then
-			STATE.equipRoster = nil
 		elseif key == "lowEnd" then
 			applyLowEnd(on)
 		elseif key == "invEsp" and not on then
@@ -3004,6 +3235,102 @@ local function installHub()
 	local noteBody = label(note, "Alert Rarity decides which eggs are worth standing up for. Weaker eggs leave you training. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 48)
 	noteBody.LayoutOrder = 1
 
+	local trackerCard = card(homePage, "EGG TRACKER", 5)
+	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 18)
+	trackerStatus.LayoutOrder = 1
+	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
+	local trackerRows = {}
+	local function rarityColor(rank)
+		if rank >= (rarityRank.Divine or 10) then
+			return accent
+		end
+		if rank >= (rarityRank.Eternal or 9) then
+			return Color3.fromRGB(255, 196, 92)
+		end
+		if rank >= (rarityRank.Legendary or 5) then
+			return Color3.fromRGB(196, 160, 255)
+		end
+		return muted
+	end
+	for index = 1, 8 do
+		local row = Instance.new("Frame")
+		row.BackgroundTransparency = 1
+		row.LayoutOrder = index + 1
+		row.Size = UDim2.new(1, 0, 0, 18)
+		row.Visible = false
+		row.ZIndex = 6
+		row.Parent = trackerCard
+		local nameLabel = Instance.new("TextLabel")
+		nameLabel.BackgroundTransparency = 1
+		nameLabel.Font = Enum.Font.GothamMedium
+		nameLabel.TextSize = 13
+		nameLabel.Text = ""
+		nameLabel.TextColor3 = ink
+		nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+		nameLabel.Size = UDim2.new(0.62, 0, 1, 0)
+		nameLabel.ZIndex = 6
+		nameLabel.Parent = row
+		local rareLabel = Instance.new("TextLabel")
+		rareLabel.BackgroundTransparency = 1
+		rareLabel.Font = Enum.Font.GothamBold
+		rareLabel.TextSize = 12
+		rareLabel.Text = ""
+		rareLabel.TextXAlignment = Enum.TextXAlignment.Right
+		rareLabel.AnchorPoint = Vector2.new(1, 0)
+		rareLabel.Position = UDim2.new(1, 0, 0, 0)
+		rareLabel.Size = UDim2.new(0.38, 0, 1, 0)
+		rareLabel.ZIndex = 6
+		rareLabel.Parent = row
+		trackerRows[index] = { row = row, name = nameLabel, rare = rareLabel }
+	end
+	local trackerMore = label(trackerCard, "", 12, muted, Enum.Font.Gotham, 16)
+	trackerMore.LayoutOrder = 20
+	trackerMore.Visible = false
+
+	local function refreshTracker()
+		local ok, eggs = pcall(listSpawnedEggs)
+		if not ok or type(eggs) ~= "table" then
+			trackerStatus.Text = "Can't see eggs right now."
+			trackerStatus.TextColor3 = muted
+			return
+		end
+		local worth = 0
+		for _, egg in ipairs(eggs) do
+			if egg.worth then
+				worth += 1
+			end
+		end
+		if #eggs == 0 then
+			trackerStatus.Text = stealZone() .. " · nothing spawned"
+		else
+			trackerStatus.Text = string.format("%d spawned · %d worth taking", #eggs, worth)
+		end
+		trackerStatus.TextColor3 = worth > 0 and accent or muted
+		for index, slot in ipairs(trackerRows) do
+			local egg = eggs[index]
+			slot.row.Visible = egg ~= nil
+			if egg then
+				local extra = ""
+				if egg.mutation ~= "None" and egg.mutation ~= "" then
+					extra = " · " .. egg.mutation
+				end
+				if egg.front then
+					extra ..= " · Front"
+				end
+				if egg.locked then
+					extra ..= " · under a rock"
+				end
+				slot.name.Text = egg.label .. extra
+				slot.name.TextColor3 = egg.worth and ink or muted
+				slot.rare.Text = egg.rarity
+				slot.rare.TextColor3 = rarityColor(egg.rank)
+			end
+		end
+		local extraCount = #eggs - #trackerRows
+		trackerMore.Visible = extraCount > 0
+		trackerMore.Text = extraCount > 0 and ("+" .. tostring(extraCount) .. " more") or ""
+	end
+
 	local discordBlurb = label(discordPage, "Get a Discord message when a rare egg shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 40)
 	discordBlurb.LayoutOrder = 1
 	local discordCard = card(discordPage, "WEBHOOK", 2)
@@ -3058,47 +3385,64 @@ local function installHub()
 		return button
 	end
 
-	actionButton(discordCard, "Test Webhook", 4, false, function()
+	local hookStatus = label(discordCard, "", 13, muted, Enum.Font.Gotham, 32)
+	hookStatus.LayoutOrder = 4
+	hookStatus.TextWrapped = true
+	local function showHookResult(text, ok)
+		hookStatus.Text = text
+		hookStatus.TextColor3 = ok and accent or Color3.fromRGB(255, 120, 150)
+	end
+	actionButton(discordCard, "Test Webhook", 5, false, function()
 		local url = webhookUrl()
 		if not url then
+			showHookResult("That webhook link is not a Discord webhook.", false)
 			return
 		end
+		if not webhookRequest() then
+			showHookResult("Request is not available.", false)
+			return
+		end
+		showHookResult("Sending...", true)
 		task.spawn(function()
-			local okEncode, body = pcall(function()
-				return game:GetService("HttpService"):JSONEncode({
-					username = "Zinoos hub",
-					content = "Webhook connected. You'll get a ping when a rare egg shows up, is stolen, or hatches.",
-				})
-			end)
-			if okEncode then
-				pcall(request, {
-					Url = url,
-					Method = "POST",
-					Headers = { ["Content-Type"] = "application/json" },
-					Body = body,
-				})
+			local ok, message = sendWebhook(url, {
+				username = "Zinoos hub",
+				content = "Webhook connected. You'll get a ping when a rare egg shows up, is stolen, or hatches.",
+			})
+			if gui.Parent then
+				showHookResult(message, ok)
 			end
 		end)
 	end)
-	actionButton(discordCard, "Unload", 5, true, function()
+	actionButton(discordCard, "Unload", 6, true, function()
 		task.defer(unloadHub)
 	end)
 
 	local function applySearch()
 		local query = string.lower(search.Text)
 		local used = {}
+		local pages = {}
 		for _, item in ipairs(searchRows) do
 			local show = query == "" or string.find(item.text, query, 1, true) ~= nil
 			item.row.Visible = show
 			if show then
 				used[item.card] = true
+				pages[item.page or "Main"] = true
 			end
 		end
 		for _, item in ipairs(searchRows) do
 			item.card.Visible = used[item.card] == true or query == ""
 		end
-		if query ~= "" and not mainPage.Visible and not discordPage.Visible then
-			showPage("Main")
+		if query ~= "" then
+			local here = (mainPage.Visible and pages.Main) or (discordPage.Visible and pages.Discord) or (homePage.Visible and pages.Home)
+			if not here then
+				if pages.Discord and not pages.Main then
+					showPage("Discord")
+				elseif pages.Main then
+					showPage("Main")
+				elseif pages.Discord then
+					showPage("Discord")
+				end
+			end
 		end
 	end
 	search:GetPropertyChangedSignal("Text"):Connect(applySearch)
@@ -3123,21 +3467,16 @@ local function installHub()
 		speedText.Text = Format.Short(speed or 0)
 	end
 	refreshHome()
+	refreshTracker()
 	task.spawn(function()
 		while running() and gui.Parent do
-			if homePage.Visible then
-				pcall(refreshHome)
-			end
+			pcall(refreshHome)
+			pcall(refreshTracker)
 			task.wait(1)
 		end
 	end)
 
 	showPage("Home")
-
-	local function viewSize()
-		local camera = workspace.CurrentCamera
-		return camera and camera.ViewportSize or Vector2.new(1280, 720)
-	end
 
 	local function placeTopLeft(obj, absX, absY)
 		local parentPos = obj.Parent.AbsolutePosition
@@ -3171,6 +3510,64 @@ local function installHub()
 		STATE[keyY] = pos.Y / view.Y
 		saveConfig()
 	end
+
+	local function rememberLayout()
+		if not gui.Parent then
+			return
+		end
+		clampObject(holder)
+		clampObject(launcher)
+		local view = viewSize()
+		if view.X < 1 or view.Y < 1 then
+			return
+		end
+		local changed = false
+		if type(STATE.menuX) == "number" and type(STATE.menuY) == "number" then
+			local menuPos = holder.AbsolutePosition
+			local nextX = menuPos.X / view.X
+			local nextY = menuPos.Y / view.Y
+			if math.abs(nextX - STATE.menuX) > 0.002 or math.abs(nextY - STATE.menuY) > 0.002 then
+				STATE.menuX = nextX
+				STATE.menuY = nextY
+				changed = true
+			end
+		end
+		if STATE.dockCustom and type(STATE.dockX) == "number" and type(STATE.dockY) == "number" then
+			local dockPos = launcher.AbsolutePosition
+			local nextX = dockPos.X / view.X
+			local nextY = dockPos.Y / view.Y
+			if math.abs(nextX - STATE.dockX) > 0.002 or math.abs(nextY - STATE.dockY) > 0.002 then
+				STATE.dockX = nextX
+				STATE.dockY = nextY
+				changed = true
+			end
+		end
+		if changed then
+			saveConfig()
+		end
+	end
+	local function refit()
+		fitScale()
+		task.defer(rememberLayout)
+	end
+	local viewSignal = nil
+	local function bindView()
+		if viewSignal then
+			pcall(function()
+				viewSignal:Disconnect()
+			end)
+			viewSignal = nil
+		end
+		local camera = workspace.CurrentCamera
+		if camera then
+			viewSignal = trackConnection(camera:GetPropertyChangedSignal("ViewportSize"):Connect(refit))
+		end
+	end
+	trackConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		refit()
+		bindView()
+	end))
+	bindView()
 
 	task.defer(function()
 		if not gui.Parent then
@@ -3237,7 +3634,7 @@ local function installHub()
 		launcher.Visible = not open
 	end
 
-	local dragConn = UserInputService.InputChanged:Connect(function(input)
+	local dragConn = trackConnection(UserInputService.InputChanged:Connect(function(input)
 		if not dragTarget or not dragStart or not dragOrigin then
 			return
 		end
@@ -3250,8 +3647,8 @@ local function installHub()
 		end
 		dragMoved = true
 		placeTopLeft(dragTarget, dragOrigin.X + delta.X, dragOrigin.Y + delta.Y)
-	end)
-	local dragEndConn = UserInputService.InputEnded:Connect(function(input)
+	end))
+	local dragEndConn = trackConnection(UserInputService.InputEnded:Connect(function(input)
 		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
 			return
 		end
@@ -3277,7 +3674,7 @@ local function installHub()
 		if target == launcher then
 			setOpen(true)
 		end
-	end)
+	end))
 
 	closeButton.MouseButton1Click:Connect(function()
 		if not STATE.dockCustom then
@@ -3287,26 +3684,37 @@ local function installHub()
 		setOpen(false)
 	end)
 
-	local keyConn = UserInputService.InputBegan:Connect(function(input, processed)
+	local keyConn = trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
 		if processed or search:IsFocused() or urlBox:IsFocused() then
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.RightControl then
 			setOpen(not holder.Visible)
 		end
-	end)
+	end))
 
 	STATE.hubWindow = {
 		Unload = function()
-			if keyConn then
-				keyConn:Disconnect()
-			end
-			if dragConn then
-				dragConn:Disconnect()
-			end
-			if dragEndConn then
-				dragEndConn:Disconnect()
-			end
+			pcall(function()
+				if keyConn then
+					keyConn:Disconnect()
+				end
+			end)
+			pcall(function()
+				if dragConn then
+					dragConn:Disconnect()
+				end
+			end)
+			pcall(function()
+				if dragEndConn then
+					dragEndConn:Disconnect()
+				end
+			end)
+			pcall(function()
+				if viewSignal then
+					viewSignal:Disconnect()
+				end
+			end)
 			if gui.Parent then
 				gui:Destroy()
 			end
@@ -3344,7 +3752,9 @@ task.spawn(function()
 			STATE.stealError = tostring(err)
 			STATE.liftSteal = false
 			STATE.stealGoal = nil
-			STATE.nextSteal = os.clock() + 2
+			activeGoal = nil
+			restoreStealChanges()
+			STATE.nextSteal = os.clock() + 8
 			warn("[Zinoos hub] steal " .. tostring(err))
 		end
 		task.wait(0.6)
@@ -3381,89 +3791,6 @@ local function stepOpenEggs()
 	end
 end
 
-local lastEquipAt = 0
-
-local function addHatched(parts, pets, prefix)
-	if type(pets) ~= "table" then
-		return
-	end
-	for uid, pet in pairs(pets) do
-		if type(pet) == "table" and pet.hatchAt == nil then
-			parts[#parts + 1] = table.concat({
-				prefix,
-				tostring(uid),
-				tostring(pet.key),
-				tostring(pet.mutation),
-				tostring(pet.weight),
-			}, ":")
-		end
-	end
-end
-
-local function rosterSignature()
-	local parts = {}
-	local data = readData()
-	addHatched(parts, data and data.plotPets, "plot")
-	addHatched(parts, data and data.backpack, "bag")
-	if #parts == 0 then
-		local live = workspace:FindFirstChild("Live")
-		local owned = live and live:FindFirstChild("PlayerFriends")
-		owned = owned and owned:FindFirstChild(LocalPlayer.Name)
-		if owned then
-			for _, model in ipairs(owned:GetChildren()) do
-				if model:IsA("Model") and model:GetAttribute("incubating") ~= true then
-					parts[#parts + 1] = model.Name .. ":" .. tostring(model:GetAttribute("renderId"))
-				end
-			end
-		end
-	end
-	table.sort(parts)
-	return table.concat(parts, "|")
-end
-
-local nextIncomeCheck = 0
-
-local function backpackBeatsPlot()
-	local now = os.clock()
-	if now < nextIncomeCheck then
-		return false
-	end
-	nextIncomeCheck = now + 4
-	local data = readData()
-	if not data then
-		return false
-	end
-	local bestBag = 0
-	local worstPlot = math.huge
-	local anyPlot = false
-	local function scan(list, fromBag)
-		if type(list) ~= "table" then
-			return
-		end
-		for _, pet in pairs(list) do
-			if type(pet) == "table" and pet.hatchAt == nil then
-				local ok, income = pcall(Pets.IncomeFor, pet)
-				income = ok and income or 0
-				if fromBag then
-					if income > bestBag then
-						bestBag = income
-					end
-				else
-					anyPlot = true
-					if income < worstPlot then
-						worstPlot = income
-					end
-				end
-			end
-		end
-	end
-	scan(data.backpack, true)
-	scan(data.plotPets, false)
-	if not anyPlot then
-		return bestBag > 0
-	end
-	return bestBag > worstPlot
-end
 
 local function shownIncome(pet)
 	local ok, base = pcall(Pets.IncomeFor, pet)
@@ -3571,8 +3898,6 @@ local function syncToggles()
 			if key == "autoTrain" and control.value == false then
 				lastSwitchAt = 0
 				releaseGym()
-			elseif key == "equipBest" and control.value == true then
-				STATE.equipRoster = nil
 			elseif key == "lowEnd" then
 				applyLowEnd(control.value == true)
 			elseif key == "invEsp" and control.value == false then
@@ -3620,7 +3945,6 @@ local function pullHomeIfEmpty()
 		return
 	end
 	STATE.liftSteal = false
-	STATE.stealing = false
 	STATE.stealGoal = nil
 	activeGoal = nil
 	hrp.AssemblyLinearVelocity = Vector3.zero
@@ -3721,7 +4045,6 @@ STATE.connect(RunService.Heartbeat, function()
 		return
 	end
 	STATE.train = false
-	STATE.stealing = false
 	syncToggles()
 	if os.clock() >= (STATE.nextView or 0) then
 		STATE.nextView = os.clock() + (STATE.lowEnd == true and 1.25 or 0.5)
@@ -3763,3 +4086,5 @@ STATE.connect(RunService.Heartbeat, function()
 	pcall(stepIndex)
 	pcall(stepStash)
 end)
+
+startupFinished = true
