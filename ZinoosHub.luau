@@ -7,6 +7,8 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
 
 if game.PlaceId ~= 76731343328034 then
 	warn("[Zinoos hub] This only runs in Lift Rock For Eggs.")
@@ -14,9 +16,23 @@ if game.PlaceId ~= 76731343328034 then
 end
 local existingHub = CoreGui:FindFirstChild("ZinoosHub")
 if existingHub then
-	if typeof(STATE) == "table" and STATE._replaceHub == true then
+	local okGenv, genvEarly = pcall(getgenv)
+	genvEarly = okGenv and typeof(genvEarly) == "table" and genvEarly or nil
+	local saved = genvEarly and genvEarly.STATE or nil
+	local replace = (typeof(STATE) == "table" and STATE._replaceHub == true)
+		or (typeof(saved) == "table" and saved._replaceHub == true)
+		or (genvEarly and genvEarly.ZinoosReplace == true)
+	if replace then
 		existingHub:Destroy()
-		STATE._replaceHub = false
+		if typeof(STATE) == "table" then
+			STATE._replaceHub = false
+		end
+		if typeof(saved) == "table" then
+			saved._replaceHub = false
+		end
+		if genvEarly then
+			genvEarly.ZinoosReplace = false
+		end
 	else
 		warn("[Zinoos hub] Already running.")
 		return
@@ -25,6 +41,29 @@ end
 local hubMarker = Instance.new("Folder")
 hubMarker.Name = "ZinoosHub"
 hubMarker.Parent = CoreGui
+
+do
+	local genv = getgenv()
+	local injected = typeof(STATE) == "table" and STATE or nil
+	local shared = typeof(genv.STATE) == "table" and genv.STATE or nil
+	if shared then
+		if injected and injected ~= shared then
+			if typeof(injected.onCleanup) == "function" then
+				shared.onCleanup = injected.onCleanup
+			end
+			if typeof(injected.connect) == "function" then
+				shared.connect = injected.connect
+			end
+			if typeof(injected.override) == "function" then
+				shared.override = injected.override
+			end
+		end
+		STATE = shared
+	elseif not injected then
+		STATE = {}
+	end
+	genv.STATE = STATE
+end
 
 local LocalPlayer = Players.LocalPlayer
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -63,6 +102,9 @@ end
 local netFireServer = STATE and STATE._rawNetFire
 if typeof(netFireServer) ~= "function" then
 	netFireServer = unwrapNetFire(Net.FireServer)
+	if typeof(STATE) == "table" and typeof(netFireServer) == "function" then
+		STATE._rawNetFire = netFireServer
+	end
 end
 Net.FireServer = function(self, remoteName, ...)
 	if remoteName == "LeaveBench" and not allowLeaveBench() then
@@ -209,11 +251,17 @@ end
 if STATE.eggEsp == nil then
 	STATE.eggEsp = true
 end
+if STATE.invEsp == nil then
+	STATE.invEsp = true
+end
+if STATE.lowEnd == nil then
+	STATE.lowEnd = true
+end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Prehistoric"
 end
 STATE._alive = false
-STATE._gen = (STATE._gen or 0) + 1
+STATE._gen = math.floor(os.clock() * 1000)
 local myGen = STATE._gen
 task.wait(2)
 local function running()
@@ -1353,7 +1401,29 @@ local function eggValueText(model)
 	return model.Name .. "  $" .. Format.Short(income) .. "/s"
 end
 
+local liteHooked = setmetatable({}, { __mode = "k" })
+
+local function hideOne(child)
+	if child:IsA("BasePart") then
+		if child.LocalTransparencyModifier ~= 1 then
+			child.LocalTransparencyModifier = 1
+		end
+		if child.CastShadow then
+			child:SetAttribute("ZinoosShadow", true)
+			child.CastShadow = false
+		end
+	elseif child:IsA("ParticleEmitter") or child:IsA("Trail") or child:IsA("Beam") or child:IsA("Light") or child:IsA("Highlight") then
+		if child.Enabled then
+			child:SetAttribute("ZinoosHid", true)
+			child.Enabled = false
+		end
+	end
+end
+
 local function hideVisual(model)
+	if model:GetAttribute("ZinoosLite") == true then
+		return
+	end
 	local animator = model:FindFirstChildWhichIsA("Animator", true)
 	if animator then
 		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
@@ -1361,21 +1431,28 @@ local function hideVisual(model)
 		end
 	end
 	for _, child in ipairs(model:GetDescendants()) do
-		if child:IsA("BasePart") then
-			child.LocalTransparencyModifier = 1
-		elseif child:IsA("ParticleEmitter") or child:IsA("Trail") or child:IsA("Beam") or child:IsA("Light") then
-			if child.Enabled then
-				child:SetAttribute("ZinoosHid", true)
-				child.Enabled = false
+		hideOne(child)
+	end
+	model:SetAttribute("ZinoosLite", true)
+	if not liteHooked[model] then
+		liteHooked[model] = true
+		STATE.connect(model.DescendantAdded, function(child)
+			if STATE.litePets == true then
+				hideOne(child)
 			end
-		end
+		end)
 	end
 end
 
 local function showVisual(model)
+	model:SetAttribute("ZinoosLite", nil)
 	for _, child in ipairs(model:GetDescendants()) do
 		if child:IsA("BasePart") then
 			child.LocalTransparencyModifier = 0
+			if child:GetAttribute("ZinoosShadow") == true then
+				child.CastShadow = true
+				child:SetAttribute("ZinoosShadow", nil)
+			end
 		elseif child:GetAttribute("ZinoosHid") == true then
 			child.Enabled = true
 			child:SetAttribute("ZinoosHid", nil)
@@ -1467,7 +1544,16 @@ local function stepView()
 					tag = tag or ensureEggTag(model)
 					local label = tag and tag:FindFirstChild("Value")
 					if label then
-						label.Text = eggValueText(model)
+						local text = eggValueText(model)
+						if label.Text ~= text then
+							label.Text = text
+						end
+					end
+					if tag then
+						local dist = STATE.lowEnd == true and 150 or 280
+						if tag.MaxDistance ~= dist then
+							tag.MaxDistance = dist
+						end
 					end
 				elseif tag then
 					tag:Destroy()
@@ -1478,6 +1564,399 @@ local function stepView()
 		end
 	end
 end
+
+local savedQuality
+pcall(function()
+	savedQuality = settings().Rendering.QualityLevel
+end)
+local savedShadows = Lighting.GlobalShadows
+local bloomEffect = Lighting:FindFirstChildOfClass("BloomEffect")
+local sunEffect = Lighting:FindFirstChildOfClass("SunRaysEffect")
+local savedBloom = bloomEffect and bloomEffect.Enabled == true
+local savedSun = sunEffect and sunEffect.Enabled == true
+local savedAnim
+local savedInterp
+pcall(function()
+	savedAnim = workspace.ClientAnimatorThrottling
+end)
+pcall(function()
+	savedInterp = workspace.InterpolationThrottling
+end)
+
+local function applyLowEnd(on)
+	local low = on == true
+	pcall(function()
+		if low then
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+		elseif savedQuality ~= nil then
+			settings().Rendering.QualityLevel = savedQuality
+		end
+	end)
+	Lighting.GlobalShadows = (not low) and savedShadows
+	if bloomEffect then
+		bloomEffect.Enabled = (not low) and savedBloom
+	end
+	if sunEffect then
+		sunEffect.Enabled = (not low) and savedSun
+	end
+	pcall(function()
+		if low then
+			workspace.ClientAnimatorThrottling = Enum.ClientAnimatorThrottlingMode.Enabled
+			workspace.InterpolationThrottling = Enum.InterpolationThrottlingMode.Enabled
+		else
+			if savedAnim ~= nil then
+				workspace.ClientAnimatorThrottling = savedAnim
+			end
+			if savedInterp ~= nil then
+				workspace.InterpolationThrottling = savedInterp
+			end
+		end
+	end)
+end
+
+local phoneLayout = UserInputService.TouchEnabled
+local invGui
+local invLabel
+local incomeByUid = {}
+
+local function eventSig(pet)
+	local extra = pet.eventMutations
+	if type(extra) ~= "table" then
+		return ""
+	end
+	local parts = {}
+	for key, name in pairs(extra) do
+		parts[#parts + 1] = tostring(key) .. "=" .. tostring(name)
+	end
+	table.sort(parts)
+	return table.concat(parts, ",")
+end
+
+local function cashNow(data)
+	local rebirths = data and data.rebirths or 0
+	local row = Rebirths[rebirths]
+	local cash = type(row) == "table" and row.CashMulti or 1
+	if type(cash) ~= "number" then
+		cash = 1
+	end
+	return cash
+end
+
+local function rememberPet(pet, cash)
+	local uid = pet.uid
+	if type(uid) ~= "string" then
+		return 0
+	end
+	local spec = Pets.Specs[pet.key]
+	if pet.hatchAt ~= nil or (spec and spec.IsEgg) then
+		incomeByUid[uid] = nil
+		return 0
+	end
+	local sig = table.concat({
+		tostring(pet.key),
+		tostring(pet.mutation),
+		eventSig(pet),
+		tostring(pet.weight),
+		tostring(pet.level),
+		tostring(pet.grade),
+		tostring(cash),
+	}, "|")
+	local cached = incomeByUid[uid]
+	if cached and cached.sig == sig then
+		return cached.amount
+	end
+	local ok, base = pcall(Pets.IncomeFor, pet)
+	base = ok and type(base) == "number" and base or 0
+	local level, grade = 1, 1
+	pcall(function()
+		level = Plot.PetLevelMultiplier(pet.level) or 1
+	end)
+	pcall(function()
+		grade = Grades.Multiplier(pet.grade) or 1
+	end)
+	local amount = base * level * grade * cash
+	incomeByUid[uid] = {
+		sig = sig,
+		amount = amount,
+		text = "$" .. Format.Short(amount) .. "/s",
+	}
+	return amount
+end
+
+local function ensureInvGui()
+	if invGui and invGui.Parent and invLabel and invLabel.Parent then
+		invGui.Enabled = true
+		return invLabel
+	end
+	invGui = Instance.new("ScreenGui")
+	invGui.Name = "ZinoosInvEsp"
+	invGui.ResetOnSpawn = false
+	invGui.IgnoreGuiInset = false
+	invGui.DisplayOrder = 40
+	invLabel = Instance.new("TextLabel")
+	invLabel.Name = "Total"
+	invLabel.AnchorPoint = Vector2.new(0.5, 0)
+	invLabel.Position = UDim2.new(0.5, 0, 0, 6)
+	invLabel.Size = UDim2.fromOffset(phoneLayout and 168 or 200, phoneLayout and 22 or 26)
+	invLabel.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+	invLabel.BackgroundTransparency = 0.4
+	invLabel.BorderSizePixel = 0
+	invLabel.Font = Enum.Font.GothamBold
+	invLabel.TextSize = phoneLayout and 13 or 15
+	invLabel.TextColor3 = Color3.fromRGB(130, 255, 150)
+	invLabel.Text = "Bag"
+	invLabel.Active = false
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = invLabel
+	invLabel.Parent = invGui
+	invGui.Parent = CoreGui
+	return invLabel
+end
+
+local function wipeHold(container)
+	if not container then
+		return
+	end
+	for _, child in ipairs(container:GetChildren()) do
+		if child:IsA("Tool") then
+			local handle = child:FindFirstChild("Handle") or child:FindFirstChildWhichIsA("BasePart")
+			local tag = handle and handle:FindFirstChild("ZinoosHoldValue")
+			if tag then
+				tag:Destroy()
+			end
+		end
+	end
+end
+
+local function wipeSlots(frame)
+	if not frame then
+		return
+	end
+	for _, child in ipairs(frame:GetChildren()) do
+		local tag = child:FindFirstChild("ZinoosValue")
+		if tag then
+			tag:Destroy()
+		end
+		if child:IsA("GuiObject") then
+			for _, nested in ipairs(child:GetChildren()) do
+				local nestedTag = nested:FindFirstChild("ZinoosValue")
+				if nestedTag then
+					nestedTag:Destroy()
+				end
+			end
+		end
+	end
+end
+
+local function clearInvEsp()
+	if invGui then
+		invGui.Enabled = false
+	end
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local backpackGui = playerGui and playerGui:FindFirstChild("BackpackGui")
+	local root = backpackGui and backpackGui:FindFirstChild("Backpack")
+	if root then
+		wipeSlots(root:FindFirstChild("Hotbar"))
+		wipeSlots(root:FindFirstChild("Inventory"))
+	end
+	wipeHold(LocalPlayer.Character)
+	wipeHold(LocalPlayer:FindFirstChild("Backpack"))
+end
+
+local function slotLabel(slot)
+	local label = slot:FindFirstChild("ZinoosValue")
+	if label then
+		return label
+	end
+	label = Instance.new("TextLabel")
+	label.Name = "ZinoosValue"
+	label.AnchorPoint = Vector2.new(0.5, 1)
+	label.Position = UDim2.new(0.5, 0, 1, -1)
+	label.Size = UDim2.new(1, -4, 0, phoneLayout and 12 or 14)
+	label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	label.BackgroundTransparency = 0.35
+	label.BorderSizePixel = 0
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = phoneLayout and 10 or 11
+	label.TextColor3 = Color3.fromRGB(130, 255, 150)
+	label.TextStrokeTransparency = 0.45
+	label.ZIndex = 8
+	label.Active = false
+	label.Parent = slot
+	return label
+end
+
+local function eachSlot(frame, callback)
+	if not frame then
+		return
+	end
+	for _, child in ipairs(frame:GetChildren()) do
+		if child:IsA("GuiButton") and child:FindFirstChild("ToolName") then
+			callback(child)
+		elseif child:IsA("GuiObject") then
+			for _, nested in ipairs(child:GetChildren()) do
+				if nested:IsA("GuiButton") and nested:FindFirstChild("ToolName") then
+					callback(nested)
+				end
+			end
+		end
+	end
+end
+
+local function toolValueText(tool)
+	if tool:GetAttribute("isEgg") == true then
+		return eggValueText(tool)
+	end
+	local uid = tool:GetAttribute("petUID")
+	local entry = type(uid) == "string" and incomeByUid[uid]
+	return entry and entry.text or nil
+end
+
+local function paintHeld()
+	local character = LocalPlayer.Character
+	wipeHold(LocalPlayer:FindFirstChild("Backpack"))
+	if not character then
+		return
+	end
+	for _, tool in ipairs(character:GetChildren()) do
+		if tool:IsA("Tool") then
+			local text = toolValueText(tool)
+			local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
+			if not (text and handle) then
+				local old = handle and handle:FindFirstChild("ZinoosHoldValue")
+				if old then
+					old:Destroy()
+				end
+			else
+				local board = handle:FindFirstChild("ZinoosHoldValue")
+				if not board then
+					board = Instance.new("BillboardGui")
+					board.Name = "ZinoosHoldValue"
+					board.AlwaysOnTop = true
+					board.LightInfluence = 0
+					board.Size = UDim2.fromOffset(phoneLayout and 140 or 160, 22)
+					board.StudsOffset = Vector3.new(0, 3.5, 0)
+					board.MaxDistance = STATE.lowEnd == true and 80 or 140
+					local label = Instance.new("TextLabel")
+					label.Name = "Value"
+					label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+					label.BackgroundTransparency = 0.35
+					label.BorderSizePixel = 0
+					label.Font = Enum.Font.GothamBold
+					label.TextColor3 = Color3.fromRGB(130, 255, 150)
+					label.TextSize = phoneLayout and 13 or 14
+					label.Size = UDim2.fromScale(1, 1)
+					label.Parent = board
+					board.Parent = handle
+				end
+				board.MaxDistance = STATE.lowEnd == true and 80 or 140
+				local label = board:FindFirstChild("Value")
+				if label and label.Text ~= text then
+					label.Text = text
+				end
+			end
+		end
+	end
+end
+
+local function stepInventory()
+	if STATE.invEsp ~= true then
+		if STATE._invShown then
+			STATE._invShown = false
+			clearInvEsp()
+		end
+		return
+	end
+	STATE._invShown = true
+	local data = readData()
+	local cash = cashNow(data)
+	local seen = {}
+	local total = 0
+	local bag = data and data.backpack
+	if type(bag) == "table" then
+		for _, pet in pairs(bag) do
+			if type(pet) == "table" and type(pet.uid) == "string" then
+				seen[pet.uid] = true
+				total += rememberPet(pet, cash)
+			end
+		end
+	end
+	for uid in pairs(incomeByUid) do
+		if not seen[uid] then
+			incomeByUid[uid] = nil
+		end
+	end
+	local label = ensureInvGui()
+	local text = "Bag  $" .. Format.Short(total) .. "/s"
+	if label.Text ~= text then
+		label.Text = text
+	end
+	local queues = {}
+	local function addTools(container)
+		if not container then
+			return
+		end
+		for _, tool in ipairs(container:GetChildren()) do
+			if tool:IsA("Tool") then
+				local valueText = toolValueText(tool)
+				if valueText then
+					local queue = queues[tool.Name]
+					if not queue then
+						queue = {}
+						queues[tool.Name] = queue
+					end
+					queue[#queue + 1] = valueText
+				end
+			end
+		end
+	end
+	addTools(LocalPlayer:FindFirstChild("Backpack"))
+	addTools(LocalPlayer.Character)
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local backpackGui = playerGui and playerGui:FindFirstChild("BackpackGui")
+	local root = backpackGui and backpackGui:FindFirstChild("Backpack")
+	local function paint(frame)
+		local slots = {}
+		eachSlot(frame, function(slot)
+			slots[#slots + 1] = slot
+		end)
+		table.sort(slots, function(a, b)
+			return (tonumber(a.Name) or 0) < (tonumber(b.Name) or 0)
+		end)
+		for _, slot in ipairs(slots) do
+			local nameLabel = slot:FindFirstChild("ToolName")
+			local queue = nameLabel and queues[nameLabel.Text]
+			local valueText = queue and table.remove(queue, 1)
+			local valueLabel = slot:FindFirstChild("ZinoosValue")
+			if valueText then
+				valueLabel = valueLabel or slotLabel(slot)
+				if valueLabel.Text ~= valueText then
+					valueLabel.Text = valueText
+				end
+				valueLabel.Visible = true
+			elseif valueLabel then
+				valueLabel.Visible = false
+			end
+		end
+	end
+	if root then
+		paint(root:FindFirstChild("Hotbar"))
+		paint(root:FindFirstChild("Inventory"))
+	end
+	paintHeld()
+end
+
+applyLowEnd(STATE.lowEnd == true)
+STATE.onCleanup(function()
+	applyLowEnd(false)
+	clearInvEsp()
+	if invGui then
+		invGui:Destroy()
+		invGui = nil
+		invLabel = nil
+	end
+end)
 
 local function installHub()
 	local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
@@ -1507,6 +1986,8 @@ local function installHub()
 		{ "Free Stash", "Takes Brock's free stash card and leaves the paid ones.", "freeStash", "FreeStash" },
 		{ "Lite Pets", "Hides pet models on your screen so the game runs lighter. Your pets stay saved.", "litePets", "LitePets" },
 		{ "Egg ESP", "A small label with the egg name and cash per second.", "eggEsp", "EggEsp" },
+		{ "Inventory ESP", "Shows what each bag pet earns, plus the bag total.", "invEsp", "InvEsp" },
+		{ "Low End", "Turns graphics down and skips extra effects for phones and weaker PCs.", "lowEnd", "LowEnd" },
 	}
 	STATE.toggleControls = {}
 	for _, item in ipairs(toggles) do
@@ -1523,6 +2004,11 @@ local function installHub()
 					releaseGym()
 				elseif item[3] == "equipBest" and on then
 					STATE.equipRoster = nil
+				elseif item[3] == "lowEnd" then
+					applyLowEnd(on)
+				elseif item[3] == "invEsp" and not on then
+					STATE._invShown = false
+					clearInvEsp()
 				end
 			end,
 		})
@@ -1806,6 +2292,11 @@ local function syncToggles()
 				releaseGym()
 			elseif key == "equipBest" and control.value == true then
 				STATE.equipRoster = nil
+			elseif key == "lowEnd" then
+				applyLowEnd(control.value == true)
+			elseif key == "invEsp" and control.value == false then
+				STATE._invShown = false
+				clearInvEsp()
 			end
 		end
 	end
@@ -1844,13 +2335,22 @@ STATE.connect(RunService.Heartbeat, function()
 	STATE.stealing = false
 	syncToggles()
 	if os.clock() >= (STATE.nextView or 0) then
-		STATE.nextView = os.clock() + 0.5
+		STATE.nextView = os.clock() + (STATE.lowEnd == true and 1.25 or 0.5)
 		pcall(stepView)
 	end
+	if os.clock() >= (STATE.nextInv or 0) then
+		STATE.nextInv = os.clock() + (STATE.lowEnd == true and 2 or 1.2)
+		pcall(stepInventory)
+	end
 	stepTrain()
-	task.defer(function()
-		task.defer(pullHomeIfEmpty)
-	end)
+	if STATE.lowEnd ~= true or os.clock() >= (STATE.nextHome or 0) then
+		if STATE.lowEnd == true then
+			STATE.nextHome = os.clock() + 0.25
+		end
+		task.defer(function()
+			task.defer(pullHomeIfEmpty)
+		end)
+	end
 	local now = os.clock()
 	if now < nextBubble then
 		return
