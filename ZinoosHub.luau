@@ -65,6 +65,39 @@ do
 	genv.STATE = STATE
 end
 
+local function closeLeftoverMenus()
+	local root = CoreGui:FindFirstChild("RobloxGui")
+	if not root then
+		return
+	end
+	for _, child in ipairs(root:GetChildren()) do
+		if child:IsA("ScreenGui") and child:FindFirstChild("Zinoos hub") then
+			child:Destroy()
+		end
+	end
+end
+
+local function stopOlderCopies()
+	if typeof(filtergc) == "function" then
+		local ok, copies = pcall(filtergc, "table", { Keys = { "stealZone", "_gen", "autoSteal" } }, false)
+		if ok and type(copies) == "table" then
+			for _, copy in ipairs(copies) do
+				if copy ~= STATE then
+					copy._alive = false
+					copy._gen = -1
+					local window = rawget(copy, "hubWindow")
+					if type(window) == "table" and type(window.Unload) == "function" then
+						pcall(window.Unload, window)
+					end
+				end
+			end
+		end
+	end
+	closeLeftoverMenus()
+end
+
+stopOlderCopies()
+
 local LocalPlayer = Players.LocalPlayer
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Net = require(Shared:WaitForChild("Net"))
@@ -260,12 +293,15 @@ end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Prehistoric"
 end
+local genv = getgenv()
+genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
+local token = genv.ZinoosGen
 STATE._alive = false
 STATE._gen = math.floor(os.clock() * 1000)
 local myGen = STATE._gen
 task.wait(2)
 local function running()
-	return STATE._gen == myGen
+	return genv.ZinoosGen == token and STATE._gen == myGen
 end
 STATE.alive = running
 
@@ -1959,6 +1995,7 @@ STATE.onCleanup(function()
 end)
 
 local function installHub()
+	closeLeftoverMenus()
 	local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 	local window = Rayfield:CreateWindow({
 		name = "Zinoos hub",
