@@ -302,9 +302,6 @@ end
 if STATE.lowEnd == nil then
 	STATE.lowEnd = true
 end
-if STATE.bonusRocks == nil then
-	STATE.bonusRocks = true
-end
 if STATE.webhookOn == nil then
 	STATE.webhookOn = true
 end
@@ -1125,99 +1122,8 @@ end
 
 local activeGoal = nil
 
-local function bestLockedBonus()
-	if STATE.bonusRocks ~= true then
-		return nil
-	end
-	local zone = stealZone()
-	local live = workspace:FindFirstChild("Live")
-	local folder = live and live:FindFirstChild("Friends")
-	if not folder then
-		return nil
-	end
-	local best = nil
-	for _, egg in ipairs(folder:GetChildren()) do
-		if egg:IsA("Model") and egg:GetAttribute("SpawnZone") == zone then
-			local bonusId = egg:GetAttribute("BonusRock")
-			local rock = rockById(bonusId)
-			if rock and rock:GetAttribute("LiftedLocal") ~= true then
-				local pos = egg:GetPivot().Position
-				local rank = eggRank(egg)
-				if inZone(pos, zone) and rank >= alertRank() and (not best or rank > best.rarity) then
-					local spotKey = string.format("bonus:%d:%d:%s", math.floor(pos.X), math.floor(pos.Z), egg.Name)
-					if not spottedEggs[spotKey] and queueRare then
-						spottedEggs[spotKey] = true
-						queueRare("Rare egg", egg.Name, nil, "spot|" .. spotKey)
-					end
-					best = {
-						model = egg,
-						rock = rock,
-						pos = pos,
-						rarity = rank,
-					}
-				end
-			end
-		end
-	end
-	return best
-end
-
-local function dismissLiftPrompt()
-	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-	local boost = playerGui and playerGui:FindFirstChild("LiftBoost")
-	if boost and boost:IsA("ScreenGui") then
-		boost.Enabled = false
-	end
-end
-
-local function liftBonusRock(rock)
-	local strip = rock:FindFirstChild("LiftStrip") or rock:FindFirstChildWhichIsA("BasePart")
-	if not (strip and strip:IsA("BasePart")) then
-		return false
-	end
-	STATE.bonusLift = true
-	STATE.liftSteal = true
-	local stand = strip.Position + Vector3.new(0, 3.2, 0)
-	local look = strip.CFrame.LookVector
-	if look.Magnitude < 0.1 then
-		look = Vector3.new(0, 0, -1)
-	end
-	activeGoal = CFrame.new(stand, stand + look)
-	local releaseLimit = os.clock() + 0.8
-	while not releaseGym() and os.clock() < releaseLimit and running() do
-		task.wait(0.1)
-	end
-	local limit = os.clock() + 1500
-	while running() and os.clock() < limit and rock.Parent and rock:GetAttribute("LiftedLocal") ~= true do
-		dismissLiftPrompt()
-		local character = LocalPlayer.Character
-		local hrp = character and character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			humanoid.PlatformStand = false
-			humanoid.Sit = false
-		end
-		if hrp and activeGoal then
-			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.CFrame = activeGoal
-		end
-		task.wait(0.2)
-	end
-	local lifted = rock.Parent ~= nil and rock:GetAttribute("LiftedLocal") == true
-	if not lifted then
-		STATE.bonusLift = false
-		STATE.liftSteal = false
-		activeGoal = nil
-		STATE.stealGoal = nil
-	end
-	return lifted
-end
-
 allowLeaveBench = function()
 	if STATE.autoTrain ~= true then
-		return true
-	end
-	if STATE.bonusLift == true then
 		return true
 	end
 	if STATE.trainFocus == "speed" then
@@ -1355,26 +1261,6 @@ local function runStealTrip()
 	end
 	local target = peekPrehistoric()
 	if not target or not target.model.Parent then
-		local locked = bestLockedBonus()
-		if locked and liftBonusRock(locked.rock) and running() then
-			target = peekPrehistoric()
-			if (not target or not target.model.Parent) and locked.model.Parent then
-				local prompt = locked.model:FindFirstChild("StealPrompt", true)
-				if prompt and prompt:IsA("ProximityPrompt") then
-					target = {
-						model = locked.model,
-						prompt = prompt,
-						pos = locked.pos,
-						rarity = locked.rarity,
-						weight = 0,
-						mutation = 0,
-					}
-				end
-			end
-		end
-	end
-	if not target or not target.model.Parent then
-		STATE.bonusLift = false
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
 		activeGoal = nil
@@ -1458,7 +1344,6 @@ local function runStealTrip()
 		task.wait(0.35)
 	end
 	activeGoal = nil
-	STATE.bonusLift = false
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
 	STATE.nextSteal = os.clock() + (grabbed and 12 or 3)
@@ -2269,7 +2154,6 @@ local FLAG_KEYS = {
 	AutoUpgrade = "upgrade",
 	AutoTrails = "trails",
 	AutoSteal = "autoSteal",
-	BonusRocks = "bonusRocks",
 	AutoOpen = "autoOpen",
 	EquipBest = "equipBest",
 	AutoDaily = "autoDaily",
@@ -3020,7 +2904,6 @@ local function installHub()
 			saveConfig()
 		end
 	end)
-	makeSwitch(eggs, "Bonus Rocks", "bonusRocks", "Leave off if the rock is too heavy")
 
 	local pets = card(leftColumn, "PETS", 2)
 	makeSwitch(pets, "Auto Open", "autoOpen")
@@ -3701,7 +3584,7 @@ local function syncToggles()
 end
 
 local function pullHomeIfEmpty()
-	if not running() or STATE.bonusLift == true then
+	if not running() then
 		return
 	end
 	local eggs = prehistoricEggs()
