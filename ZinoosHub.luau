@@ -12,9 +12,15 @@ if game.PlaceId ~= 76731343328034 then
 	warn("[Zinoos hub] This only runs in Lift Rock For Eggs.")
 	return
 end
-if CoreGui:FindFirstChild("ZinoosHub") then
-	warn("[Zinoos hub] Already running.")
-	return
+local existingHub = CoreGui:FindFirstChild("ZinoosHub")
+if existingHub then
+	if typeof(STATE) == "table" and STATE._replaceHub == true then
+		existingHub:Destroy()
+		STATE._replaceHub = false
+	else
+		warn("[Zinoos hub] Already running.")
+		return
+	end
 end
 local hubMarker = Instance.new("Folder")
 hubMarker.Name = "ZinoosHub"
@@ -71,10 +77,24 @@ local Trails = require(Shared.Configs.Trails)
 local Pets = require(Shared.Configs.Pets)
 local Rarities = require(Shared.Configs.Rarities)
 local Wild = require(Shared.Configs.Wild)
+local Zones = require(Shared.Configs.Zones)
+local DailyRewards = require(Shared.Configs.DailyRewards)
 local ClientRegistry = require(LocalPlayer:WaitForChild("PlayerScripts").Client.Lib.ClientRegistry)
 
-local STEAL_ZONE = "Prehistoric"
 local LOOK_POS = Vector3.new(190, 8, -6420)
+local FLOORS = {
+	Meadow = { pos = Vector3.new(198, 19, 153), size = Vector3.new(96, 36, 120) },
+	Desert = { pos = Vector3.new(198, 20, -8), size = Vector3.new(96, 39, 171) },
+	Volcano = { pos = Vector3.new(198, 22, -226), size = Vector3.new(96, 43, 233) },
+	Snow = { pos = Vector3.new(198, 24, -540), size = Vector3.new(96, 46, 361) },
+	Crystal = { pos = Vector3.new(198, 26, -936), size = Vector3.new(96, 50, 401) },
+	Jungle = { pos = Vector3.new(198, 28, -1374), size = Vector3.new(96, 53, 441) },
+	Candy = { pos = Vector3.new(198, 30, -1896), size = Vector3.new(96, 57, 573) },
+	Haunted = { pos = Vector3.new(198, 31, -2572), size = Vector3.new(96, 60, 745) },
+	Heaven = { pos = Vector3.new(198, 33, -3444), size = Vector3.new(96, 64, 969) },
+	Space = { pos = Vector3.new(198, 34, -4575), size = Vector3.new(96, 67, 1260) },
+	Prehistoric = { pos = Vector3.new(198, 34, -5835), size = Vector3.new(96, 67, 1260) },
+}
 local rarityRank = {}
 for index, name in ipairs(Rarities.Order) do
 	rarityRank[name] = index
@@ -82,12 +102,17 @@ end
 local mutationRank = { None = 0, Golden = 1, Diamond = 2, Rainbow = 3, Cursed = 4 }
 local rarityOfName = {}
 local weightOfName = {}
-for key, weight in pairs(Wild.SpawnWeights[STEAL_ZONE]) do
-	local spec = Pets.Specs[key]
-	local name = spec and (spec.DisplayName or spec.Name)
-	if name then
-		rarityOfName[name] = rarityRank[spec.Rarity] or 0
-		weightOfName[name] = weight
+for _, zoneName in ipairs(Zones.Order) do
+	local weights = Wild.SpawnWeights[zoneName]
+	if type(weights) == "table" then
+		for key, weight in pairs(weights) do
+			local spec = Pets.Specs[key]
+			local name = spec and (spec.DisplayName or spec.Name)
+			if name then
+				rarityOfName[name] = rarityRank[spec.Rarity] or 0
+				weightOfName[name] = weight
+			end
+		end
 	end
 end
 
@@ -166,18 +191,64 @@ end
 if STATE.autoOpen == nil then
 	STATE.autoOpen = true
 end
-local sessionAlive = STATE.alive
-STATE.alive = function()
-	return false
+if STATE.autoSell == nil then
+	STATE.autoSell = true
 end
-task.wait(3)
-STATE.alive = sessionAlive
-local running = sessionAlive
+if STATE.autoDaily == nil then
+	STATE.autoDaily = true
+end
+if STATE.autoIndex == nil then
+	STATE.autoIndex = true
+end
+if STATE.freeStash == nil then
+	STATE.freeStash = true
+end
+if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
+	STATE.stealZone = "Prehistoric"
+end
+STATE._alive = false
+STATE._gen = (STATE._gen or 0) + 1
+local myGen = STATE._gen
+task.wait(2)
+local function running()
+	return STATE._gen == myGen
+end
+STATE.alive = running
 
 STATE.liftSteal = false
 STATE.stealing = false
 STATE.stealGoal = nil
 STATE.nextSteal = 0
+STATE.stashGen = (STATE.stashGen or 0) + 1
+local stashGen = STATE.stashGen
+Net:OnClient("BrockStashStart", function(payload)
+	if STATE.stashGen ~= stashGen or type(payload) ~= "table" or type(payload.cards) ~= "table" then
+		return
+	end
+	STATE.stashCards = payload.cards
+	STATE.stashTaken = {}
+	for index = 1, tonumber(payload.stage) or 0 do
+		STATE.stashTaken[index] = true
+	end
+end)
+Net:OnClient("BrockStashState", function(payload)
+	if STATE.stashGen ~= stashGen or type(payload) ~= "table" then
+		return
+	end
+	for key in pairs(payload.taken or {}) do
+		local index = tonumber(key)
+		if index then
+			STATE.stashTaken[index] = true
+		end
+	end
+end)
+Net:OnClient("BrockStashEnd", function()
+	if STATE.stashGen ~= stashGen then
+		return
+	end
+	STATE.stashCards = nil
+	STATE.stashTaken = {}
+end)
 
 local added = {}
 local lastRebirthAt = 0
@@ -778,7 +849,49 @@ local function deliverHeld()
 	return LocalPlayer:GetAttribute("holdingFriend") ~= true
 end
 
+local function stealZone()
+	local name = STATE.stealZone
+	if type(name) == "string" and FLOORS[name] then
+		return name
+	end
+	return "Prehistoric"
+end
+
+local function zoneChoice(value)
+	if type(value) == "table" then
+		value = value[1]
+	end
+	if type(value) == "string" and FLOORS[value] then
+		return value
+	end
+	return "Prehistoric"
+end
+
+local function inZone(pos, zone)
+	local floor = FLOORS[zone or stealZone()]
+	if not floor then
+		return false
+	end
+	local halfX = floor.size.X / 2 + 40
+	local halfZ = floor.size.Z / 2 + 40
+	return math.abs(pos.X - floor.pos.X) <= halfX and math.abs(pos.Z - floor.pos.Z) <= halfZ
+end
+
+local function scanPoints(zone)
+	local floor = FLOORS[zone or stealZone()] or FLOORS.Prehistoric
+	local halfZ = floor.size.Z / 2 - 20
+	local span = math.max(halfZ * 2, 1)
+	local count = math.clamp(math.ceil(span / 400), 1, 4)
+	local points = {}
+	for index = 1, count do
+		local offset = count == 1 and 0 or -halfZ + (index - 1) / (count - 1) * span
+		points[index] = Vector3.new(floor.pos.X, 8, floor.pos.Z + offset)
+	end
+	return points
+end
+
 function prehistoricEggs()
+	local zone = stealZone()
 	local live = workspace:FindFirstChild("Live")
 	local folder = live and live:FindFirstChild("Friends")
 	if not folder then
@@ -786,9 +899,9 @@ function prehistoricEggs()
 	end
 	local list = {}
 	for _, egg in ipairs(folder:GetChildren()) do
-		if egg:IsA("Model") and egg:GetAttribute("SpawnZone") == STEAL_ZONE then
+		if egg:IsA("Model") and egg:GetAttribute("SpawnZone") == zone then
 			local pos = egg:GetPivot().Position
-			if pos.Z > -5000 then
+			if not inZone(pos, zone) then
 				continue
 			end
 			local prompt = egg:FindFirstChild("StealPrompt", true)
@@ -832,13 +945,6 @@ end
 local function placeHeldPet()
 	return deliverHeld()
 end
-
-local SCAN_POINTS = {
-	Vector3.new(180, 8, -6420),
-	Vector3.new(198, 8, -6050),
-	Vector3.new(198, 8, -5700),
-	Vector3.new(198, 8, -5350),
-}
 
 local function betterEgg(a, b)
 	if not b then
@@ -912,7 +1018,7 @@ local function peekPrehistoric()
 	consider()
 	local best = bestSeen()
 	if not (best and best.model.Parent) then
-		for _, pos in ipairs(SCAN_POINTS) do
+		for _, pos in ipairs(scanPoints(stealZone())) do
 			if not running() or STATE.autoSteal ~= true then
 				break
 			end
@@ -1026,6 +1132,14 @@ local function runStealTrip()
 	LocalPlayer:SetAttribute("CodexMode", "train")
 	LocalPlayer:SetAttribute("CodexStolen", grabbed and 1 or 0)
 	LocalPlayer:SetAttribute("CodexStealName", stolenName)
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	homeSpot()
+	if hrp and typeof(STATE.homePos) == "Vector3" and (hrp.Position - STATE.homePos).Magnitude > 80 then
+		STATE.liftSteal = true
+		STATE.stealGoal = CFrame.new(STATE.homePos)
+		task.wait(0.35)
+	end
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
 	STATE.nextSteal = os.clock() + (grabbed and 12 or 3)
@@ -1065,6 +1179,154 @@ local function dismissPurchase()
 			trigger.CanTouch = false
 		end
 	end
+end
+
+local function petIncome(pet)
+	local ok, income = pcall(Pets.IncomeFor, pet)
+	if ok and type(income) == "number" then
+		return income
+	end
+	return 0
+end
+
+local function stepSellWeak()
+	if STATE.autoSell ~= true then
+		return
+	end
+	if os.clock() < (STATE.nextSell or 0) then
+		return
+	end
+	local data = readData()
+	if not data then
+		return
+	end
+	local worst = math.huge
+	local anyPlot = false
+	for _, pet in pairs(data.plotPets or {}) do
+		if type(pet) == "table" and pet.hatchAt == nil then
+			local spec = Pets.Specs[pet.key]
+			if not (spec and spec.IsEgg) then
+				anyPlot = true
+				worst = math.min(worst, petIncome(pet))
+			end
+		end
+	end
+	if not anyPlot then
+		return
+	end
+	local victim = nil
+	local victimIncome = math.huge
+	for _, pet in pairs(data.backpack or {}) do
+		if type(pet) == "table" and pet.uid and pet.hatchAt == nil then
+			local spec = Pets.Specs[pet.key]
+			if not (spec and spec.IsEgg) then
+				local income = petIncome(pet)
+				if income < worst and income < victimIncome then
+					victim = pet
+					victimIncome = income
+				end
+			end
+		end
+	end
+	if not victim then
+		return
+	end
+	STATE.nextSell = os.clock() + 0.4
+	Net:FireServer("SellPet", victim.uid)
+end
+
+local function stepDaily()
+	if STATE.autoDaily ~= true then
+		return
+	end
+	if os.clock() < (STATE.nextDaily or 0) then
+		return
+	end
+	local data = readData()
+	local daily = data and data.daily
+	if type(daily) ~= "table" then
+		return
+	end
+	if (daily.nextAt or 0) > os.time() then
+		return
+	end
+	local claimed = daily.claimed or {}
+	local count = 0
+	for _ in pairs(claimed) do
+		count += 1
+	end
+	local day = count + 1
+	if day > (DailyRewards.CycleDays or 7) then
+		return
+	end
+	if claimed[tostring(day)] == true or claimed[day] == true then
+		return
+	end
+	STATE.nextDaily = os.clock() + 8
+	Net:FireServer("ClaimDailyReward", day)
+end
+
+local function hasPendingIndex(rewards)
+	if type(rewards) ~= "table" then
+		return false
+	end
+	for _, group in pairs(rewards) do
+		if type(group) == "table" then
+			for _, status in pairs(group) do
+				if status == "pending" then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+local function stepIndex()
+	if STATE.autoIndex ~= true then
+		return
+	end
+	if os.clock() < (STATE.nextIndex or 0) then
+		return
+	end
+	local data = readData()
+	if not hasPendingIndex(data and data.indexRewards) then
+		return
+	end
+	STATE.nextIndex = os.clock() + 10
+	pcall(function()
+		Net:InvokeServer("ClaimAllIndexRewards")
+	end)
+end
+
+local function stepStash()
+	if STATE.freeStash ~= true then
+		return
+	end
+	local cards = STATE.stashCards
+	if type(cards) ~= "table" then
+		return
+	end
+	if os.clock() < (STATE.nextStash or 0) then
+		return
+	end
+	local taken = STATE.stashTaken or {}
+	local index = nil
+	for cardIndex = 1, #cards do
+		if not taken[cardIndex] then
+			index = cardIndex
+			break
+		end
+	end
+	if not index then
+		return
+	end
+	local card = cards[index]
+	if type(card) ~= "table" or card.paid == true then
+		return
+	end
+	STATE.nextStash = os.clock() + 0.6
+	Net:FireServer("ClaimStashCard", index)
 end
 
 local function popFreeBubbles()
@@ -1115,9 +1377,13 @@ local function installHub()
 		{ "Auto Rebirth", "Rebirths when your strength is high enough.", "rebirth", "AutoRebirth" },
 		{ "Auto Upgrade", "Buys the gym, floors, and basement you can afford.", "upgrade", "AutoUpgrade" },
 		{ "Auto Trails", "Buys the best trail you can afford.", "trails", "AutoTrails" },
-		{ "Auto Steal", "Takes the rarest Prehistoric egg only when one is there.", "autoSteal", "AutoSteal" },
+		{ "Auto Steal", "Takes the rarest egg in the zone you pick, only when one is there.", "autoSteal", "AutoSteal" },
 		{ "Auto Open", "Opens a placed egg when its timer is ready.", "autoOpen", "AutoOpen" },
 		{ "Equip Best", "Equips your best pets when your animals change.", "equipBest", "EquipBest" },
+		{ "Auto Sell Weak", "Sells stored pets that earn less than the ones on your plot.", "autoSell", "AutoSell" },
+		{ "Auto Daily", "Claims the daily reward when it is ready.", "autoDaily", "AutoDaily" },
+		{ "Auto Index", "Claims index rewards you have unlocked.", "autoIndex", "AutoIndex" },
+		{ "Free Stash", "Takes Brock's free stash card and leaves the paid ones.", "freeStash", "FreeStash" },
 	}
 	STATE.toggleControls = {}
 	for _, item in ipairs(toggles) do
@@ -1139,6 +1405,23 @@ local function installHub()
 		})
 		STATE.toggleControls[item[3]] = toggle or window.controls[item[4]]
 	end
+	pcall(function()
+		local options = {}
+		for _, name in ipairs(Zones.Order) do
+			options[#options + 1] = name
+		end
+		local dropdown = tab:CreateDropdown({
+			name = "Steal Zone",
+			description = "Only steals when an egg is in this zone.",
+			options = options,
+			currentOption = { STATE.stealZone or "Prehistoric" },
+			flag = "StealZone",
+			callback = function(value)
+				STATE.stealZone = zoneChoice(value)
+			end,
+		})
+		STATE.zoneControl = dropdown or window.controls.StealZone
+	end)
 end
 
 task.spawn(function()
@@ -1329,7 +1612,10 @@ local function pullHomeIfEmpty()
 	end
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if not hrp or hrp.Position.Z > -4000 then
+	if not hrp then
+		return
+	end
+	if hrp.Position.Z > -4000 and not inZone(hrp.Position, stealZone()) then
 		return
 	end
 	STATE.liftSteal = false
@@ -1362,4 +1648,8 @@ STATE.connect(RunService.Heartbeat, function()
 	pcall(clearBestNotices)
 	pcall(stepOpenEggs)
 	pcall(stepEquipBest)
+	pcall(stepSellWeak)
+	pcall(stepDaily)
+	pcall(stepIndex)
+	pcall(stepStash)
 end)
