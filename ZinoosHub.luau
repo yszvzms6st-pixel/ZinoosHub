@@ -760,6 +760,7 @@ function prehistoricEggs()
 				list[#list + 1] = {
 					model = egg,
 					prompt = prompt,
+					pos = pos,
 					rarity = rarityOfName[egg.Name] or 0,
 					weight = weightOfName[egg.Name] or 999,
 					mutation = mutationRank[tostring(mutation)] or 0,
@@ -792,6 +793,86 @@ local function placeHeldPet()
 	return deliverHeld()
 end
 
+local SCAN_POINTS = {
+	Vector3.new(180, 8, -6420),
+	Vector3.new(198, 8, -6050),
+	Vector3.new(198, 8, -5700),
+	Vector3.new(198, 8, -5350),
+}
+
+local function betterEgg(a, b)
+	if not b then
+		return a
+	end
+	if not a then
+		return b
+	end
+	if a.rarity ~= b.rarity then
+		return a.rarity > b.rarity and a or b
+	end
+	if a.weight ~= b.weight then
+		return a.weight < b.weight and a or b
+	end
+	if a.mutation ~= b.mutation then
+		return a.mutation > b.mutation and a or b
+	end
+	return a
+end
+
+local function peekPrehistoric()
+	local seen = {}
+	local function consider()
+		for _, egg in ipairs(prehistoricEggs()) do
+			local key = string.format("%d,%d", math.floor(egg.pos.X + 0.5), math.floor(egg.pos.Z + 0.5))
+			seen[key] = betterEgg(seen[key], egg)
+		end
+	end
+	local function bestSeen()
+		local best = nil
+		for _, egg in pairs(seen) do
+			best = betterEgg(best, egg)
+		end
+		return best
+	end
+	consider()
+	local best = bestSeen()
+	if not (best and best.model.Parent and best.weight <= 1) then
+		for _, pos in ipairs(SCAN_POINTS) do
+			if not running() or STATE.autoSteal ~= true then
+				break
+			end
+			pcall(function()
+				LocalPlayer:RequestStreamAroundAsync(pos, 3)
+			end)
+			consider()
+			best = bestSeen()
+			if best and best.model.Parent and best.weight <= 1 then
+				break
+			end
+		end
+	end
+	best = bestSeen()
+	if best and not best.model.Parent then
+		pcall(function()
+			LocalPlayer:RequestStreamAroundAsync(best.pos, 3)
+		end)
+		local nearest = nil
+		local nearestDist = 40
+		for _, egg in ipairs(prehistoricEggs()) do
+			local dist = (egg.pos - best.pos).Magnitude
+			if dist < nearestDist then
+				nearest = egg
+				nearestDist = dist
+			end
+		end
+		best = nearest
+	end
+	if best and best.model.Parent then
+		return best
+	end
+	return nil
+end
+
 local function runStealTrip()
 	if STATE.autoSteal ~= true then
 		return
@@ -806,13 +887,12 @@ local function runStealTrip()
 	if os.clock() < (STATE.nextSteal or 0) then
 		return
 	end
-	local targets = prehistoricEggs()
-	local target = targets[1]
+	local target = peekPrehistoric()
 	if not target or not target.model.Parent then
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
 		LocalPlayer:SetAttribute("CodexMode", "train")
-		STATE.nextSteal = os.clock() + 5
+		STATE.nextSteal = os.clock() + 8
 		return
 	end
 	STATE.liftSteal = true
@@ -820,7 +900,14 @@ local function runStealTrip()
 	homeSpot()
 	local grabbed = false
 	local stolenName = target.model.Name
-	STATE.stealGoal = CFrame.new(target.model:GetPivot().Position + Vector3.new(0, 4, 0))
+	local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
+	STATE.stealGoal = CFrame.new(stand)
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = STATE.stealGoal
+	end
 	for _ = 1, 12 do
 		if not running() then
 			break
