@@ -19,26 +19,14 @@ if game.PlaceId ~= 76731343328034 then
 end
 local existingHub = CoreGui:FindFirstChild("ZinoosHub")
 if existingHub then
+	existingHub:Destroy()
 	local okGenv, genvEarly = pcall(getgenv)
 	genvEarly = okGenv and typeof(genvEarly) == "table" and genvEarly or nil
-	local saved = genvEarly and genvEarly.STATE or nil
-	local replace = (typeof(STATE) == "table" and STATE._replaceHub == true)
-		or (typeof(saved) == "table" and saved._replaceHub == true)
-		or (genvEarly and genvEarly.ZinoosReplace == true)
-	if replace then
-		existingHub:Destroy()
-		if typeof(STATE) == "table" then
-			STATE._replaceHub = false
+	if genvEarly then
+		genvEarly.ZinoosReplace = false
+		if typeof(genvEarly.STATE) == "table" then
+			genvEarly.STATE._replaceHub = false
 		end
-		if typeof(saved) == "table" then
-			saved._replaceHub = false
-		end
-		if genvEarly then
-			genvEarly.ZinoosReplace = false
-		end
-	else
-		warn("[Zinoos hub] Already running.")
-		return
 	end
 end
 local hubMarker = Instance.new("Folder")

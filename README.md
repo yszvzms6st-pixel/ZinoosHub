@@ -18,7 +18,7 @@ Pin one commit when you want the script to stay on that version. Replace the has
 loadstring(game:HttpGet("https://raw.githubusercontent.com/yszvzms6st-pixel/ZinoosHub/292de2c3b9746f286c7b6c80249a2c7b1c190e48/ZinoosHub.luau"))()
 ```
 
-Running it again while the hub is already open does nothing. Unload first, then run the loader again.
+Running it again replaces the hub that is already open.
 
 ## What it does
 
