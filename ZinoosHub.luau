@@ -10,107 +10,366 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
 local UserInputService = game:GetService("UserInputService")
 
-local injectedState = STATE
-local STATE = injectedState
-
 if game.PlaceId ~= 76731343328034 then
 	warn("[Zinoos hub] This only runs in Lift Rock For Eggs.")
 	return
 end
-local existingHub = CoreGui:FindFirstChild("ZinoosHub")
-if existingHub then
-	existingHub:Destroy()
-	local okGenv, genvEarly = pcall(getgenv)
-	genvEarly = okGenv and typeof(genvEarly) == "table" and genvEarly or nil
-	if genvEarly then
-		genvEarly.ZinoosReplace = false
-		if typeof(genvEarly.STATE) == "table" then
-			genvEarly.STATE._replaceHub = false
+
+local genv = getgenv()
+local STATE
+do
+	local shared = genv.STATE
+	if typeof(shared) ~= "table" then
+		shared = {}
+		genv.STATE = shared
+	end
+	STATE = shared
+end
+STATE._replaceHub = nil
+genv.ZinoosReplace = nil
+
+local featureOn = {}
+local function featureReady(name)
+	return featureOn[name] ~= false
+end
+local function disableFeature(name, dependency)
+	if featureOn[name] == false then
+		return
+	end
+	featureOn[name] = false
+	warn(string.format("[Zinoos hub] %s is off because %s is missing.", name, dependency))
+end
+
+local runtime = {
+	stopped = false,
+	connections = {},
+	cleanups = {},
+}
+
+local function graphicsSnapshot()
+	local snap = {}
+	pcall(function()
+		snap.quality = settings().Rendering.QualityLevel
+	end)
+	snap.shadows = Lighting.GlobalShadows
+	local bloom = Lighting:FindFirstChildOfClass("BloomEffect")
+	local sun = Lighting:FindFirstChildOfClass("SunRaysEffect")
+	if bloom then
+		snap.bloomEnabled = bloom.Enabled == true
+	end
+	if sun then
+		snap.sunEnabled = sun.Enabled == true
+	end
+	pcall(function()
+		snap.anim = workspace.ClientAnimatorThrottling
+	end)
+	pcall(function()
+		snap.interp = (workspace :: any).InterpolationThrottling
+	end)
+	return snap
+end
+
+local function applyGraphics(snap, low)
+	if type(snap) ~= "table" then
+		return false
+	end
+	local failed = false
+	local qualityOk = pcall(function()
+		if low then
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+		elseif snap.quality ~= nil then
+			settings().Rendering.QualityLevel = snap.quality
+		end
+	end)
+	failed = failed or not qualityOk
+	if low then
+		Lighting.GlobalShadows = false
+	elseif typeof(snap.shadows) == "boolean" then
+		Lighting.GlobalShadows = snap.shadows
+	end
+	local bloom = Lighting:FindFirstChildOfClass("BloomEffect")
+	if bloom and typeof(snap.bloomEnabled) == "boolean" then
+		bloom.Enabled = if low then false else snap.bloomEnabled
+	end
+	local sun = Lighting:FindFirstChildOfClass("SunRaysEffect")
+	if sun and typeof(snap.sunEnabled) == "boolean" then
+		sun.Enabled = if low then false else snap.sunEnabled
+	end
+	local throttleOk = pcall(function()
+		local world = workspace :: any
+		if low then
+			workspace.ClientAnimatorThrottling = Enum.ClientAnimatorThrottlingMode.Enabled
+			world.InterpolationThrottling = Enum.InterpolationThrottlingMode.Enabled
+		else
+			if snap.anim ~= nil then
+				workspace.ClientAnimatorThrottling = snap.anim
+			end
+			if snap.interp ~= nil then
+				world.InterpolationThrottling = snap.interp
+			end
+		end
+	end)
+	failed = failed or not throttleOk
+	return not failed
+end
+
+local function captureBaseline()
+	if type(genv.ZinoosGraphicsBaseline) == "table" then
+		return genv.ZinoosGraphicsBaseline
+	end
+	local snap = graphicsSnapshot()
+	genv.ZinoosGraphicsBaseline = snap
+	return snap
+end
+
+local function restoreBaseline()
+	local snap = genv.ZinoosGraphicsBaseline
+	if type(snap) ~= "table" then
+		return true
+	end
+	local ok = applyGraphics(snap, false)
+	if ok then
+		genv.ZinoosGraphicsBaseline = nil
+	end
+	return ok
+end
+
+local function destroyZinoosGuis()
+	local function sweep(root)
+		if not root then
+			return
+		end
+		for _, child in ipairs(root:GetChildren()) do
+			if child:IsA("ScreenGui") and (child.Name == "ZinoosHubMenu" or child.Name == "ZinoosInvEsp" or child:FindFirstChild("Zinoos hub")) then
+				child:Destroy()
+			end
+		end
+	end
+	sweep(CoreGui)
+	sweep(CoreGui:FindFirstChild("RobloxGui"))
+	local codex = CoreGui:FindFirstChild("CodexLiftRock")
+	if codex then
+		codex:Destroy()
+	end
+end
+
+local function showLiteModels()
+	local live = workspace:FindFirstChild("Live")
+	if not live then
+		return
+	end
+	for _, child in ipairs(live:GetDescendants()) do
+		if child.Name == "ZinoosEggValue" or child.Name == "ZinoosHoldValue" then
+			child:Destroy()
+		elseif child:IsA("Model") then
+			child:SetAttribute("ZinoosLite", nil)
+		elseif child:IsA("BasePart") then
+			child.LocalTransparencyModifier = 0
+			if child:GetAttribute("ZinoosShadow") == true then
+				child.CastShadow = true
+				child:SetAttribute("ZinoosShadow", nil)
+			end
+		elseif (child:IsA("ParticleEmitter") or child:IsA("Trail") or child:IsA("Beam") or child:IsA("Light") or child:IsA("Highlight")) and child:GetAttribute("ZinoosHid") == true then
+			child.Enabled = true
+			child:SetAttribute("ZinoosHid", nil)
 		end
 	end
 end
+
+local function connectionAlive(connection)
+	local alive = false
+	local ok = pcall(function()
+		alive = connection.Connected == true
+	end)
+	return ok and alive
+end
+
+local function forgetConnection(connection)
+	runtime.connections[connection] = nil
+end
+
+local function trackConnection(connection, owner)
+	local canDisconnect = false
+	pcall(function()
+		canDisconnect = typeof(connection.Disconnect) == "function"
+	end)
+	if not canDisconnect or not connectionAlive(connection) then
+		return connection
+	end
+	runtime.connections[connection] = true
+	if typeof(owner) == "Instance" then
+		local release
+		release = owner.Destroying:Connect(function()
+			pcall(function()
+				connection:Disconnect()
+			end)
+			forgetConnection(connection)
+			forgetConnection(release)
+			pcall(function()
+				release:Disconnect()
+			end)
+		end)
+		if connectionAlive(release) then
+			runtime.connections[release] = true
+		end
+	end
+	return connection
+end
+
+local function pruneConnections()
+	for connection in pairs(runtime.connections) do
+		if not connectionAlive(connection) then
+			runtime.connections[connection] = nil
+		end
+	end
+end
+
+local function disconnectOwned()
+	local snapshot = runtime.connections
+	runtime.connections = {}
+	for connection in pairs(snapshot) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+end
+
+function STATE.connectionCount()
+	pruneConnections()
+	local alive = 0
+	for _ in pairs(runtime.connections) do
+		alive += 1
+	end
+	return alive
+end
+
+local function hubCleanup(fn)
+	table.insert(runtime.cleanups, fn)
+end
+
+local function closeLeftoverMenus()
+	destroyZinoosGuis()
+end
+
+local function shutdownHub(mode)
+	local restoring = mode == "unload" or mode == "failed"
+	if runtime.stopped then
+		if restoring then
+			destroyZinoosGuis()
+			showLiteModels()
+			restoreBaseline()
+		end
+		return
+	end
+	runtime.stopped = true
+	genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
+	STATE._gen = -1
+	STATE._alive = false
+	STATE.liftSteal = false
+	STATE.stealGoal = nil
+	if mode == "unload" then
+		STATE._unloaded = true
+	end
+	disconnectOwned()
+	for index = #runtime.cleanups, 1, -1 do
+		local fn = runtime.cleanups[index]
+		runtime.cleanups[index] = nil
+		pcall(fn)
+	end
+	destroyZinoosGuis()
+	local marker = CoreGui:FindFirstChild("ZinoosHub")
+	if marker then
+		marker:Destroy()
+	end
+	if restoring then
+		showLiteModels()
+		restoreBaseline()
+	end
+end
+
+local function legacyStop()
+	local shared = genv.STATE
+	genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
+	if typeof(shared) == "table" then
+		shared._gen = -1
+		shared._alive = false
+		shared.liftSteal = false
+		shared.stealGoal = nil
+		if type(shared._connections) == "table" then
+			for index = #shared._connections, 1, -1 do
+				local connection = shared._connections[index]
+				shared._connections[index] = nil
+				pcall(function()
+					connection:Disconnect()
+				end)
+			end
+		end
+		shared._connections = nil
+	end
+	if typeof(filtergc) == "function" then
+		local ok, copies = pcall(function()
+			return filtergc("table", { Keys = { "stealZone", "_gen", "autoSteal" } }, false)
+		end)
+		if ok and type(copies) == "table" then
+			for _, copy in ipairs(copies) do
+				if copy ~= STATE then
+					copy._alive = false
+					copy._gen = -1
+				end
+			end
+		end
+	end
+	destroyZinoosGuis()
+	local oldMarker = CoreGui:FindFirstChild("ZinoosHub")
+	if oldMarker then
+		oldMarker:Destroy()
+	end
+end
+
+local previousShutdown = genv.ZinoosShutdown
+genv.ZinoosShutdown = shutdownHub
+STATE.shutdown = shutdownHub
+if typeof(previousShutdown) == "function" then
+	local stopped, stopErr = pcall(previousShutdown, "replace")
+	if not stopped then
+		warn("[Zinoos hub] Could not stop the previous run: " .. tostring(stopErr))
+		legacyStop()
+	end
+else
+	legacyStop()
+end
+captureBaseline()
+
 local hubMarker = Instance.new("Folder")
 hubMarker.Name = "ZinoosHub"
 hubMarker.Parent = CoreGui
 local startupFinished = false
 local mainThread = coroutine.running()
 task.spawn(function()
-	local deadline = os.clock() + 8
 	while not startupFinished do
-		if coroutine.status(mainThread) == "dead" or os.clock() >= deadline then
-			break
+		if coroutine.status(mainThread) == "dead" then
+			pcall(shutdownHub, "failed")
+			return
 		end
 		task.wait(0.1)
 	end
-	if not startupFinished and hubMarker.Parent then
-		hubMarker:Destroy()
-	end
 end)
 
-do
-	local genv = getgenv()
-	local injected = typeof(STATE) == "table" and STATE or nil
-	local shared = typeof(genv.STATE) == "table" and genv.STATE or nil
-	if shared then
-		if injected and injected ~= shared then
-			if typeof(injected.onCleanup) == "function" then
-				shared.onCleanup = injected.onCleanup
-			end
-			if typeof(injected.connect) == "function" then
-				shared.connect = injected.connect
-			end
-			if typeof(injected.override) == "function" then
-				shared.override = injected.override
-			end
-		end
-		STATE = shared
-	elseif not injected then
-		STATE = {}
-	end
-	genv.STATE = STATE
-end
-
-local function closeLeftoverMenus()
-	for _, child in ipairs(CoreGui:GetChildren()) do
-		if child:IsA("ScreenGui") and child.Name == "ZinoosHubMenu" then
-			child:Destroy()
-		end
-	end
-	local root = CoreGui:FindFirstChild("RobloxGui")
-	if not root then
-		return
-	end
-	for _, child in ipairs(root:GetChildren()) do
-		if child:IsA("ScreenGui") and (child.Name == "ZinoosHubMenu" or child:FindFirstChild("Zinoos hub")) then
-			child:Destroy()
-		end
-	end
-end
-
-local function stopOlderCopies()
-	if typeof(filtergc) == "function" then
-		local ok, copies = pcall(filtergc, "table", { Keys = { "stealZone", "_gen", "autoSteal" } }, false)
-		if ok and type(copies) == "table" then
-			for _, copy in ipairs(copies) do
-				if copy ~= STATE then
-					copy._alive = false
-					copy._gen = -1
-					local window = rawget(copy, "hubWindow")
-					if type(window) == "table" and type(window.Unload) == "function" then
-						pcall(window.Unload, window)
-					end
-				end
-			end
-		end
-	end
-	closeLeftoverMenus()
-end
-
-stopOlderCopies()
-
 local LocalPlayer = Players.LocalPlayer
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local Net = require(Shared:WaitForChild("Net"))
+local function loadModule(label, loader)
+	local ok, result = pcall(loader)
+	if ok and result ~= nil then
+		return result
+	end
+	warn(string.format("[Zinoos hub] dependency %s is missing.", label))
+	return nil
+end
+local Shared = loadModule("ReplicatedStorage.Shared", function()
+	return ReplicatedStorage:WaitForChild("Shared", 8)
+end)
+local Net = Shared and loadModule("Shared.Net", function()
+	return require(Shared:WaitForChild("Net", 8))
+end)
 local allowLeaveBench = function()
 	return false
 end
@@ -142,7 +401,7 @@ local function unwrapNetFire(fn)
 	end
 	return current
 end
-local currentFire = Net.FireServer
+local currentFire = typeof(Net) == "table" and Net.FireServer or nil
 local netFireServer = currentFire
 if typeof(STATE) == "table" and currentFire == STATE._fireWrapper and typeof(STATE._rawNetFire) == "function" then
 	netFireServer = STATE._rawNetFire
@@ -160,30 +419,45 @@ if typeof(netFireServer) ~= "function" and typeof(STATE) == "table" and typeof(S
 end
 local fireWrapper
 fireWrapper = function(self, remoteName, ...)
-	if remoteName == "LeaveBench" and not allowLeaveBench() then
-		return
+	if remoteName == "LeaveBench" then
+		local allowedOk, allowed = pcall(allowLeaveBench)
+		if allowedOk and allowed == false then
+			return
+		end
 	end
 	if remoteName == "StartBench" and STATE.liftSteal == true then
 		return
 	end
 	return netFireServer(self, remoteName, ...)
 end
-if typeof(netFireServer) == "function" then
+if typeof(Net) == "table" and typeof(netFireServer) == "function" then
 	Net.FireServer = fireWrapper
 	STATE._fireWrapper = fireWrapper
 end
-local Rebirths = require(Shared.Configs.Rebirths)
-local Gym = require(Shared.Configs.Gym)
-local Plot = require(Shared.Configs.Plot)
-local Trails = require(Shared.Configs.Trails)
-local Pets = require(Shared.Configs.Pets)
-local Rarities = require(Shared.Configs.Rarities)
-local Wild = require(Shared.Configs.Wild)
-local Zones = require(Shared.Configs.Zones)
-local DailyRewards = require(Shared.Configs.DailyRewards)
-local Format = require(Shared.Format)
-local Grades = require(Shared.Configs.Grades)
-local ClientRegistry = require(LocalPlayer:WaitForChild("PlayerScripts").Client.Lib.ClientRegistry)
+local function configModule(name)
+	return Shared and loadModule("Shared.Configs." .. name, function()
+		return require(Shared.Configs[name])
+	end)
+end
+local Rebirths = configModule("Rebirths")
+local Gym = configModule("Gym")
+local Plot = configModule("Plot")
+local Trails = configModule("Trails")
+local Pets = configModule("Pets")
+local Rarities = configModule("Rarities")
+local Wild = configModule("Wild")
+local Zones = configModule("Zones")
+local DailyRewards = configModule("DailyRewards")
+local Format = Shared and loadModule("Shared.Format", function()
+	return require(Shared.Format)
+end)
+local Grades = configModule("Grades")
+local ClientRegistry = loadModule("ClientRegistry", function()
+	local scripts = LocalPlayer:WaitForChild("PlayerScripts", 8)
+	local moduleScript = scripts:WaitForChild("Client"):WaitForChild("Lib"):WaitForChild("ClientRegistry")
+	local loadModuleScript = require :: any
+	return loadModuleScript(moduleScript)
+end)
 
 local FLOORS = {
 	Meadow = { pos = Vector3.new(198, 19, 153), size = Vector3.new(96, 36, 120) },
@@ -199,93 +473,174 @@ local FLOORS = {
 	Prehistoric = { pos = Vector3.new(198, 34, -5835), size = Vector3.new(96, 67, 1260) },
 }
 local rarityRank = {}
-for index, name in ipairs(Rarities.Order) do
-	rarityRank[name] = index
+if typeof(Rarities) == "table" and typeof(Rarities.Order) == "table" then
+	for index, name in ipairs(Rarities.Order) do
+		rarityRank[name] = index
+	end
 end
 local mutationRank = { None = 0, Golden = 1, Diamond = 2, Rainbow = 3, Cursed = 4 }
 local rarityOfName = {}
 local weightOfName = {}
-for _, zoneName in ipairs(Zones.Order) do
-	local weights = Wild.SpawnWeights[zoneName]
-	if type(weights) == "table" then
-		for key, weight in pairs(weights) do
-			local spec = Pets.Specs[key]
-			local name = spec and (spec.DisplayName or spec.Name)
-			if name then
-				rarityOfName[name] = rarityRank[spec.Rarity] or 0
-				weightOfName[name] = weight
+if typeof(Zones) == "table" and typeof(Zones.Order) == "table" and typeof(Wild) == "table" and typeof(Wild.SpawnWeights) == "table" and typeof(Pets) == "table" and typeof(Pets.Specs) == "table" then
+	for _, zoneName in ipairs(Zones.Order) do
+		local weights = Wild.SpawnWeights[zoneName]
+		if type(weights) == "table" then
+			for key, weight in pairs(weights) do
+				local spec = Pets.Specs[key]
+				local name = spec and (spec.DisplayName or spec.Name)
+				if name then
+					rarityOfName[name] = rarityRank[spec.Rarity] or 0
+					weightOfName[name] = weight
+				end
 			end
 		end
 	end
 end
 local rarityByDisplay = {}
-for _, spec in pairs(Pets.Specs) do
-	if type(spec) == "table" and type(spec.DisplayName) == "string" and type(spec.Rarity) == "string" then
-		rarityByDisplay[spec.DisplayName] = spec.Rarity
+if typeof(Pets) == "table" and typeof(Pets.Specs) == "table" then
+	for _, spec in pairs(Pets.Specs) do
+		if type(spec) == "table" and type(spec.DisplayName) == "string" and type(spec.Rarity) == "string" then
+			rarityByDisplay[spec.DisplayName] = spec.Rarity
+		end
 	end
 end
 local queueRare
 
-local ownedConnections = {}
-local function trackConnection(connection)
-	local ok, disconnect = pcall(function()
-		return connection and connection.Disconnect
-	end)
-	if ok and type(disconnect) == "function" then
-		table.insert(ownedConnections, connection)
+function STATE.connect(signal, fn, owner)
+	if typeof(fn) ~= "function" then
+		return nil
 	end
-	return connection
+	local ok, connection = pcall(function()
+		return signal:Connect(fn)
+	end)
+	if not ok then
+		return nil
+	end
+	return trackConnection(connection, owner)
 end
-local function disconnectOwned()
-	for index = #ownedConnections, 1, -1 do
-		local connection = ownedConnections[index]
-		ownedConnections[index] = nil
-		pcall(function()
-			connection:Disconnect()
-		end)
+STATE.onCleanup = hubCleanup
+if typeof(STATE.override) ~= "function" then
+	function STATE.override(tbl, key, value)
+		tbl[key] = value
 	end
 end
 
-do
-	local genv = getgenv()
-	if typeof(STATE) ~= "table" then
-		STATE = typeof(genv.STATE) == "table" and genv.STATE or {}
-		genv.STATE = STATE
-	end
-	if typeof(STATE.alive) ~= "function" then
-		STATE._alive = true
-		function STATE.alive()
-			return STATE._alive == true
+local function bindFeature(name, checks)
+	for _, check in ipairs(checks) do
+		local ok, pass = pcall(check.test)
+		if not ok or pass ~= true then
+			disableFeature(name, check.name)
+			return
 		end
 	end
-	if type(STATE._connections) == "table" and STATE._connections ~= ownedConnections then
-		for index = #STATE._connections, 1, -1 do
-			local connection = STATE._connections[index]
-			STATE._connections[index] = nil
-			pcall(function()
-				connection:Disconnect()
-			end)
-		end
-	end
-	STATE._connections = ownedConnections
-	function STATE.connect(signal, fn)
-		return trackConnection(signal:Connect(fn))
-	end
-	if typeof(STATE.onCleanup) ~= "function" then
-		STATE._cleanups = {}
-		function STATE.onCleanup(fn)
-			table.insert(STATE._cleanups, fn)
-		end
-	end
-	if type(STATE._cleanups) == "table" then
-		table.clear(STATE._cleanups)
-	end
-	if typeof(STATE.override) ~= "function" then
-		function STATE.override(tbl, key, value)
-			tbl[key] = value
-		end
-	end
+	featureOn[name] = true
 end
+
+local function bindFeatures()
+	local hasFire = typeof(Net) == "table" and typeof(Net.FireServer) == "function"
+	local hasInvoke = typeof(Net) == "table" and typeof(Net.InvokeServer) == "function"
+	local hasOnClient = typeof(Net) == "table" and typeof(Net.OnClient) == "function"
+	bindFeature("Auto Train", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Rebirths", test = function()
+			return typeof(Rebirths) == "table"
+		end },
+	})
+	bindFeature("Auto Rebirth", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Rebirths", test = function()
+			return typeof(Rebirths) == "table"
+		end },
+	})
+	bindFeature("Auto Upgrade", {
+		{ name = "Net.InvokeServer", test = function()
+			return hasInvoke
+		end },
+		{ name = "Gym.LevelOf", test = function()
+			return typeof(Gym) == "table" and typeof(Gym.LevelOf) == "function" and typeof(Gym.UnlockCost) == "number" and typeof(Gym.Levels) == "table"
+		end },
+		{ name = "Plot.FloorPrice", test = function()
+			return typeof(Plot) == "table" and typeof(Plot.FloorPrice) == "function" and typeof(Plot.BasementPrice) == "function" and typeof(Plot.MaxLevel) == "number" and typeof(Plot.MaxBasementLevel) == "number"
+		end },
+	})
+	bindFeature("Auto Trails", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Trails.Order", test = function()
+			return typeof(Trails) == "table" and typeof(Trails.Order) == "table" and typeof(Trails.Defs) == "table"
+		end },
+	})
+	bindFeature("Auto Steal", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Zones.Order", test = function()
+			return typeof(Zones) == "table" and typeof(Zones.Order) == "table"
+		end },
+		{ name = "Pets.Specs", test = function()
+			return typeof(Pets) == "table" and typeof(Pets.Specs) == "table"
+		end },
+	})
+	bindFeature("Auto Open", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+	})
+	bindFeature("Equip Best", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Pets.IncomeFor", test = function()
+			return typeof(Pets) == "table" and typeof(Pets.IncomeFor) == "function"
+		end },
+		{ name = "Plot.PetLevelMultiplier", test = function()
+			return typeof(Plot) == "table" and typeof(Plot.PetLevelMultiplier) == "function"
+		end },
+		{ name = "Grades.Multiplier", test = function()
+			return typeof(Grades) == "table" and typeof(Grades.Multiplier) == "function"
+		end },
+	})
+	bindFeature("Auto Daily", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "DailyRewards", test = function()
+			return typeof(DailyRewards) == "table"
+		end },
+	})
+	bindFeature("Auto Index", {
+		{ name = "Net.InvokeServer", test = function()
+			return hasInvoke
+		end },
+	})
+	bindFeature("Free Stash", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Net.OnClient", test = function()
+			return hasOnClient
+		end },
+	})
+	bindFeature("Inventory ESP", {
+		{ name = "Format.Short", test = function()
+			return typeof(Format) == "table" and typeof(Format.Short) == "function"
+		end },
+		{ name = "Pets.IncomeFor", test = function()
+			return typeof(Pets) == "table" and typeof(Pets.IncomeFor) == "function"
+		end },
+	})
+	bindFeature("Low End", {
+		{ name = "Rendering.QualityLevel", test = function()
+			return settings().Rendering.QualityLevel ~= nil
+		end },
+	})
+end
+bindFeatures()
 
 STATE.train = nil
 setmetatable(STATE, {
@@ -357,7 +712,6 @@ end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Prehistoric"
 end
-local genv = getgenv()
 genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
 local token = genv.ZinoosGen
 STATE._alive = false
@@ -375,34 +729,36 @@ STATE.stealGoal = nil
 STATE.nextSteal = 0
 STATE.stashGen = (STATE.stashGen or 0) + 1
 local stashGen = STATE.stashGen
-trackConnection(Net:OnClient("BrockStashStart", function(payload)
-	if not running() or STATE.stashGen ~= stashGen or type(payload) ~= "table" or type(payload.cards) ~= "table" then
-		return
-	end
-	STATE.stashCards = payload.cards
-	STATE.stashTaken = {}
-	for index = 1, tonumber(payload.stage) or 0 do
-		STATE.stashTaken[index] = true
-	end
-end))
-trackConnection(Net:OnClient("BrockStashState", function(payload)
-	if not running() or STATE.stashGen ~= stashGen or type(payload) ~= "table" then
-		return
-	end
-	for key in pairs(payload.taken or {}) do
-		local index = tonumber(key)
-		if index then
+if featureReady("Free Stash") then
+	trackConnection(Net:OnClient("BrockStashStart", function(payload)
+		if not running() or STATE.stashGen ~= stashGen or type(payload) ~= "table" or type(payload.cards) ~= "table" then
+			return
+		end
+		STATE.stashCards = payload.cards
+		STATE.stashTaken = {}
+		for index = 1, tonumber(payload.stage) or 0 do
 			STATE.stashTaken[index] = true
 		end
-	end
-end))
-trackConnection(Net:OnClient("BrockStashEnd", function()
-	if not running() or STATE.stashGen ~= stashGen then
-		return
-	end
-	STATE.stashCards = nil
-	STATE.stashTaken = {}
-end))
+	end))
+	trackConnection(Net:OnClient("BrockStashState", function(payload)
+		if not running() or STATE.stashGen ~= stashGen or type(payload) ~= "table" then
+			return
+		end
+		for key in pairs(payload.taken or {}) do
+			local index = tonumber(key)
+			if index then
+				STATE.stashTaken[index] = true
+			end
+		end
+	end))
+	trackConnection(Net:OnClient("BrockStashEnd", function()
+		if not running() or STATE.stashGen ~= stashGen then
+			return
+		end
+		STATE.stashCards = nil
+		STATE.stashTaken = {}
+	end))
+end
 
 local added = {}
 local lastRebirthAt = 0
@@ -421,32 +777,12 @@ local function contentHeight(menu)
 end
 
 
-local hubCleanups = {}
-local function hubCleanup(fn)
-	table.insert(hubCleanups, fn)
-	STATE.onCleanup(fn)
-end
-
 local function unloadHub()
-	if STATE._unloaded then
-		return
-	end
-	STATE._unloaded = true
-	local genv = getgenv()
-	genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
-	STATE._gen = -1
-	STATE._alive = false
-	disconnectOwned()
-	for index = #hubCleanups, 1, -1 do
-		local fn = hubCleanups[index]
-		hubCleanups[index] = nil
-		pcall(fn)
-	end
+	shutdownHub("unload")
 end
 
 hubCleanup(function()
-	disconnectOwned()
-	if Net.FireServer == fireWrapper and typeof(netFireServer) == "function" then
+	if typeof(Net) == "table" and Net.FireServer == fireWrapper and typeof(netFireServer) == "function" then
 		Net.FireServer = netFireServer
 	end
 	local gui = CoreGui:FindFirstChild("ToraScript")
@@ -458,39 +794,6 @@ hubCleanup(function()
 		end
 	end
 	table.clear(added)
-	local own = CoreGui:FindFirstChild("CodexLiftRock")
-	if own then
-		own:Destroy()
-	end
-	if hubMarker.Parent then
-		hubMarker:Destroy()
-	end
-	local live = workspace:FindFirstChild("Live")
-	if live then
-		for _, child in ipairs(live:GetDescendants()) do
-			if child.Name == "ZinoosEggValue" or child.Name == "ZinoosHoldValue" then
-				child:Destroy()
-			elseif child:IsA("Model") then
-				child:SetAttribute("ZinoosLite", nil)
-			elseif child:IsA("BasePart") then
-				child.LocalTransparencyModifier = 0
-				if child:GetAttribute("ZinoosShadow") == true then
-					child.CastShadow = true
-					child:SetAttribute("ZinoosShadow", nil)
-				end
-			elseif child:GetAttribute("ZinoosHid") == true then
-				child.Enabled = true
-				child:SetAttribute("ZinoosHid", nil)
-			end
-		end
-	end
-	local hubWindow = STATE.hubWindow
-	if hubWindow then
-		pcall(function()
-			hubWindow:Unload()
-		end)
-		STATE.hubWindow = nil
-	end
 	if menu then
 		local height = contentHeight(menu)
 		if height > 0 then
@@ -525,6 +828,9 @@ task.defer(function()
 	if not running() then
 		return
 	end
+	if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.TryGet) ~= "function" then
+		return
+	end
 	local notifications = ClientRegistry.TryGet("NotificationController")
 	if not notifications or typeof(notifications.Show) ~= "function" then
 		return
@@ -553,6 +859,9 @@ hubCleanup(function()
 end)
 
 local function readData()
+	if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.Get) ~= "function" then
+		return nil
+	end
 	local data = nil
 	pcall(function()
 		data = ClientRegistry.Get("DataController"):Get()
@@ -611,6 +920,10 @@ local function dismountTreadmill()
 end
 
 local function updateFocus()
+	if typeof(Rebirths) ~= "table" then
+		STATE.trainFocus = "strength"
+		return
+	end
 	local data = readData()
 	local maxed = data ~= nil and Rebirths[(data.rebirths or 0) + 1] == nil
 	STATE.trainFocus = maxed and "speed" or "strength"
@@ -618,6 +931,9 @@ end
 
 local function releaseGym()
 	if LocalPlayer:GetAttribute("Benching") then
+		if typeof(Net) ~= "table" or typeof(Net.FireServer) ~= "function" then
+			return false
+		end
 		if os.clock() - lastSwitchAt >= 0.4 then
 			lastSwitchAt = os.clock()
 			Net:FireServer("LeaveBench")
@@ -632,6 +948,11 @@ local function releaseGym()
 end
 
 local activeGoal = nil
+hubCleanup(function()
+	activeGoal = nil
+	STATE.liftSteal = false
+	STATE.stealGoal = nil
+end)
 
 local function pinGoal(part, goal)
 	if not part or typeof(goal) ~= "CFrame" then
@@ -657,7 +978,7 @@ local function stepTrain()
 		end
 		return
 	end
-	if STATE.autoTrain ~= true then
+	if not featureReady("Auto Train") or STATE.autoTrain ~= true then
 		if LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true then
 			releaseGym()
 		end
@@ -724,7 +1045,7 @@ local function stepTrain()
 end
 
 local function stepRebirth()
-	if STATE.rebirth ~= true then
+	if STATE.rebirth ~= true or not featureReady("Auto Rebirth") then
 		return
 	end
 	local data = readData()
@@ -732,10 +1053,10 @@ local function stepRebirth()
 		return
 	end
 	local nextTier = Rebirths[(data.rebirths or 0) + 1]
-	if not nextTier then
+	if typeof(nextTier) ~= "table" or typeof(nextTier.StrengthRequirement) ~= "number" then
 		return
 	end
-	if (data.strength or 0) < nextTier.StrengthRequirement then
+	if typeof(data.strength) ~= "number" or data.strength < nextTier.StrengthRequirement then
 		return
 	end
 	if os.clock() - lastRebirthAt < 4 then
@@ -746,14 +1067,14 @@ local function stepRebirth()
 end
 
 local function stepUpgrade()
-	if STATE.upgrade ~= true then
+	if STATE.upgrade ~= true or not featureReady("Auto Upgrade") then
 		return
 	end
 	local data = readData()
-	if not data then
+	if not data or typeof(data.cash) ~= "number" then
 		return
 	end
-	local cash = data.cash or 0
+	local cash = data.cash
 	if data.gymOwned ~= true then
 		if cash >= Gym.UnlockCost then
 			Net:InvokeServer("BuyGym")
@@ -761,23 +1082,34 @@ local function stepUpgrade()
 		return
 	end
 	local level = Gym.LevelOf(data.gymLevel)
-	if level < #Gym.Levels and cash >= Gym.Levels[level + 1].Price then
+	local nextLevel = typeof(level) == "number" and Gym.Levels[level + 1]
+	if typeof(level) == "number" and level < #Gym.Levels and typeof(nextLevel) == "table" and typeof(nextLevel.Price) == "number" and cash >= nextLevel.Price then
 		Net:InvokeServer("UpgradeGym")
 		return
 	end
 	local nextFloor = (data.baseLevel or 0) + 1
-	if nextFloor <= Plot.MaxLevel and cash >= Plot.FloorPrice(nextFloor) then
-		Net:InvokeServer("BuyFloorLevel", nextFloor)
-		return
+	if typeof(nextFloor) == "number" and nextFloor <= Plot.MaxLevel then
+		local priceOk, floorPrice = pcall(function()
+			return Plot.FloorPrice(nextFloor)
+		end)
+		if priceOk and typeof(floorPrice) == "number" and cash >= floorPrice then
+			Net:InvokeServer("BuyFloorLevel", nextFloor)
+			return
+		end
 	end
 	local nextBasement = (data.basementLevel or 0) + 1
-	if nextBasement <= Plot.MaxBasementLevel and cash >= Plot.BasementPrice(nextBasement) then
-		Net:InvokeServer("BuyBasementLevel", nextBasement)
+	if typeof(nextBasement) == "number" and nextBasement <= Plot.MaxBasementLevel then
+		local priceOk, basementPrice = pcall(function()
+			return Plot.BasementPrice(nextBasement)
+		end)
+		if priceOk and typeof(basementPrice) == "number" and cash >= basementPrice then
+			Net:InvokeServer("BuyBasementLevel", nextBasement)
+		end
 	end
 end
 
 local function stepTrails()
-	if STATE.trails ~= true then
+	if STATE.trails ~= true or not featureReady("Auto Trails") then
 		return
 	end
 	local data = readData()
@@ -809,11 +1141,11 @@ local function stepTrails()
 			buyPrice = price
 		end
 	end
-	if buyName then
+	if typeof(buyName) == "string" then
 		Net:FireServer("BuyTrail", buyName)
 		return
 	end
-	if bestOwned and data.trail ~= bestOwned then
+	if typeof(bestOwned) == "string" and data.trail ~= bestOwned then
 		Net:FireServer("EquipTrail", bestOwned)
 	end
 end
@@ -855,7 +1187,10 @@ local function placeOneEgg()
 		task.wait(0.15)
 	end
 	local uid = tool:GetAttribute("petUID")
-	if not uid then
+	if type(uid) ~= "string" then
+		return false
+	end
+	if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.Get) ~= "function" then
 		return false
 	end
 	local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
@@ -865,6 +1200,9 @@ local function placeOneEgg()
 	end
 	local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
 	local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
+	if type(x) ~= "number" or type(z) ~= "number" then
+		return false
+	end
 	Net:FireServer("PlacePet", uid, x, z)
 	task.wait(0.4)
 	return tool.Parent == nil
@@ -927,7 +1265,7 @@ end
 
 local function eggLabel(model)
 	local key = model:GetAttribute("Key")
-	local spec = key and Pets.Specs[key]
+	local spec = key and typeof(Pets) == "table" and typeof(Pets.Specs) == "table" and Pets.Specs[key]
 	local name = spec and spec.DisplayName
 	if type(name) ~= "string" or name == "" then
 		name = model.Name
@@ -940,7 +1278,7 @@ end
 
 local function eggRank(model)
 	local key = model:GetAttribute("Key")
-	local spec = key and Pets.Specs[key]
+	local spec = key and typeof(Pets) == "table" and typeof(Pets.Specs) == "table" and Pets.Specs[key]
 	if spec and type(spec.Rarity) == "string" and rarityRank[spec.Rarity] then
 		return rarityRank[spec.Rarity]
 	end
@@ -981,7 +1319,7 @@ local function listSpawnedEggs()
 		local mutation = tostring(egg:GetAttribute("Mutation") or "None")
 		list[#list + 1] = {
 			label = eggLabel(egg),
-			rarity = Rarities.Order[rank] or "Unknown",
+			rarity = typeof(Rarities) == "table" and typeof(Rarities.Order) == "table" and Rarities.Order[rank] or "Unknown",
 			rank = rank,
 			mutation = mutation,
 			worth = rank >= alertRank(),
@@ -1297,7 +1635,7 @@ local function backToBench()
 end
 
 local function runStealTrip()
-	if STATE.autoSteal ~= true then
+	if STATE.autoSteal ~= true or not featureReady("Auto Steal") then
 		return
 	end
 	if hasEggTool() and os.clock() >= (STATE.nextPlace or 0) then
@@ -1492,10 +1830,9 @@ local savedPadTouch = setmetatable({}, { __mode = "k" })
 local function restorePurchasePads()
 	for trigger, value in pairs(savedPadTouch) do
 		savedPadTouch[trigger] = nil
-		if typeof(trigger) == "Instance" and trigger.Parent then
-			pcall(function()
-				trigger.CanTouch = value
-			end)
+		if typeof(trigger) == "Instance" and trigger.Parent and trigger:IsA("BasePart") then
+			local part = trigger
+			part.CanTouch = value
 		end
 	end
 end
@@ -1541,7 +1878,7 @@ local function dismissPurchase()
 end
 
 local function stepDaily()
-	if STATE.autoDaily ~= true then
+	if STATE.autoDaily ~= true or not featureReady("Auto Daily") then
 		return
 	end
 	if os.clock() < (STATE.nextDaily or 0) then
@@ -1564,7 +1901,7 @@ local function stepDaily()
 	if day > (DailyRewards.CycleDays or 7) then
 		return
 	end
-	if claimed[tostring(day)] == true or claimed[day] == true then
+	if type(day) ~= "number" or claimed[tostring(day)] == true or claimed[day] == true then
 		return
 	end
 	STATE.nextDaily = os.clock() + 8
@@ -1588,7 +1925,7 @@ local function hasPendingIndex(rewards)
 end
 
 local function stepIndex()
-	if STATE.autoIndex ~= true then
+	if STATE.autoIndex ~= true or not featureReady("Auto Index") then
 		return
 	end
 	if os.clock() < (STATE.nextIndex or 0) then
@@ -1605,7 +1942,7 @@ local function stepIndex()
 end
 
 local function stepStash()
-	if STATE.freeStash ~= true then
+	if STATE.freeStash ~= true or not featureReady("Free Stash") then
 		return
 	end
 	local cards = STATE.stashCards
@@ -1628,6 +1965,9 @@ local function stepStash()
 	end
 	local card = cards[index]
 	if type(card) ~= "table" or card.paid == true then
+		return
+	end
+	if type(index) ~= "number" then
 		return
 	end
 	STATE.nextStash = os.clock() + 0.6
@@ -1663,10 +2003,12 @@ local function popFreeBubbles()
 end
 
 local eggValue = {}
-for _, spec in pairs(Pets.Specs) do
-	if type(spec) == "table" and type(spec.DisplayName) == "string" and type(spec.Income) == "number" and not spec.IsEgg then
-		eggValue[spec.DisplayName] = spec.Income
-		eggValue[spec.DisplayName .. " Egg"] = spec.Income
+if typeof(Pets) == "table" and typeof(Pets.Specs) == "table" then
+	for _, spec in pairs(Pets.Specs) do
+		if type(spec) == "table" and type(spec.DisplayName) == "string" and type(spec.Income) == "number" and not spec.IsEgg then
+			eggValue[spec.DisplayName] = spec.Income
+			eggValue[spec.DisplayName .. " Egg"] = spec.Income
+		end
 	end
 end
 
@@ -1675,7 +2017,7 @@ local function eggValueText(model)
 	if not income then
 		income = eggValue[string.gsub(model.Name, " Egg$", "")]
 	end
-	if not income then
+	if not income or typeof(Format) ~= "table" or typeof(Format.Short) ~= "function" then
 		return model.Name
 	end
 	return model.Name .. "  $" .. Format.Short(income) .. "/s"
@@ -1811,7 +2153,7 @@ queueRare = function(kind, name, money, mark)
 	return true
 end
 
-local liteHooked = setmetatable({}, { __mode = "k" })
+local liteHooked = {}
 
 local function hideOne(child)
 	if child:IsA("BasePart") then
@@ -1831,27 +2173,30 @@ local function hideOne(child)
 end
 
 local function hideVisual(model)
-	if model:GetAttribute("ZinoosLite") == true then
+	if model:GetAttribute("ZinoosLite") ~= true then
+		local animator = model:FindFirstChildWhichIsA("Animator", true)
+		if animator then
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				track:Stop()
+			end
+		end
+		for _, child in ipairs(model:GetDescendants()) do
+			hideOne(child)
+		end
+		model:SetAttribute("ZinoosLite", true)
+	end
+	if liteHooked[model] then
 		return
 	end
-	local animator = model:FindFirstChildWhichIsA("Animator", true)
-	if animator then
-		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-			track:Stop()
+	liteHooked[model] = true
+	STATE.connect(model.DescendantAdded, function(child)
+		if running() and STATE.litePets == true then
+			hideOne(child)
 		end
-	end
-	for _, child in ipairs(model:GetDescendants()) do
-		hideOne(child)
-	end
-	model:SetAttribute("ZinoosLite", true)
-	if not liteHooked[model] then
-		liteHooked[model] = true
-		STATE.connect(model.DescendantAdded, function(child)
-			if STATE.litePets == true then
-				hideOne(child)
-			end
-		end)
-	end
+	end, model)
+	trackConnection(model.Destroying:Connect(function()
+		liteHooked[model] = nil
+	end))
 end
 
 local function showVisual(model)
@@ -1863,7 +2208,7 @@ local function showVisual(model)
 				child.CastShadow = true
 				child:SetAttribute("ZinoosShadow", nil)
 			end
-		elseif child:GetAttribute("ZinoosHid") == true then
+		elseif (child:IsA("ParticleEmitter") or child:IsA("Trail") or child:IsA("Beam") or child:IsA("Light") or child:IsA("Highlight")) and child:GetAttribute("ZinoosHid") == true then
 			child.Enabled = true
 			child:SetAttribute("ZinoosHid", nil)
 		end
@@ -1975,53 +2320,11 @@ local function stepView()
 	end
 end
 
-local savedQuality
-pcall(function()
-	savedQuality = settings().Rendering.QualityLevel
-end)
-local savedShadows = Lighting.GlobalShadows
-local bloomEffect = Lighting:FindFirstChildOfClass("BloomEffect")
-local sunEffect = Lighting:FindFirstChildOfClass("SunRaysEffect")
-local savedBloom = bloomEffect and bloomEffect.Enabled == true
-local savedSun = sunEffect and sunEffect.Enabled == true
-local savedAnim
-local savedInterp
-pcall(function()
-	savedAnim = workspace.ClientAnimatorThrottling
-end)
-pcall(function()
-	savedInterp = workspace.InterpolationThrottling
-end)
-
 local function applyLowEnd(on)
-	local low = on == true
-	pcall(function()
-		if low then
-			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-		elseif savedQuality ~= nil then
-			settings().Rendering.QualityLevel = savedQuality
-		end
-	end)
-	Lighting.GlobalShadows = (not low) and savedShadows
-	if bloomEffect then
-		bloomEffect.Enabled = (not low) and savedBloom
+	if not featureReady("Low End") then
+		return
 	end
-	if sunEffect then
-		sunEffect.Enabled = (not low) and savedSun
-	end
-	pcall(function()
-		if low then
-			workspace.ClientAnimatorThrottling = Enum.ClientAnimatorThrottlingMode.Enabled
-			workspace.InterpolationThrottling = Enum.InterpolationThrottlingMode.Enabled
-		else
-			if savedAnim ~= nil then
-				workspace.ClientAnimatorThrottling = savedAnim
-			end
-			if savedInterp ~= nil then
-				workspace.InterpolationThrottling = savedInterp
-			end
-		end
-	end)
+	applyGraphics(captureBaseline(), on == true)
 end
 
 local phoneLayout = UserInputService.TouchEnabled
@@ -2044,7 +2347,7 @@ end
 
 local function cashNow(data)
 	local rebirths = data and data.rebirths or 0
-	local row = Rebirths[rebirths]
+	local row = typeof(Rebirths) == "table" and Rebirths[rebirths] or nil
 	local cash = type(row) == "table" and row.CashMulti or 1
 	if type(cash) ~= "number" then
 		cash = 1
@@ -2075,15 +2378,22 @@ local function rememberPet(pet, cash)
 	if cached and cached.sig == sig then
 		return cached.amount
 	end
+	if typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
+		return 0
+	end
 	local ok, base = pcall(Pets.IncomeFor, pet)
 	base = ok and type(base) == "number" and base or 0
 	local level, grade = 1, 1
-	pcall(function()
-		level = Plot.PetLevelMultiplier(pet.level) or 1
-	end)
-	pcall(function()
-		grade = Grades.Multiplier(pet.grade) or 1
-	end)
+	if typeof(Plot) == "table" and typeof(Plot.PetLevelMultiplier) == "function" then
+		pcall(function()
+			level = Plot.PetLevelMultiplier(pet.level) or 1
+		end)
+	end
+	if typeof(Grades) == "table" and typeof(Grades.Multiplier) == "function" then
+		pcall(function()
+			grade = Grades.Multiplier(pet.grade) or 1
+		end)
+	end
 	local amount = base * level * grade * cash
 	incomeByUid[uid] = {
 		sig = sig,
@@ -2093,11 +2403,39 @@ local function rememberPet(pet, cash)
 	return amount
 end
 
+local function destroyInvHuds(except)
+	local function sweep(root)
+		if not root then
+			return
+		end
+		for _, child in ipairs(root:GetChildren()) do
+			if child:IsA("ScreenGui") and child.Name == "ZinoosInvEsp" and child ~= except then
+				child:Destroy()
+			end
+		end
+	end
+	sweep(CoreGui)
+	sweep(CoreGui:FindFirstChild("RobloxGui"))
+end
+
 local function ensureInvGui()
 	if invGui and invGui.Parent and invLabel and invLabel.Parent then
+		destroyInvHuds(invGui)
 		invGui.Enabled = true
 		return invLabel
 	end
+	local existing = CoreGui:FindFirstChild("ZinoosInvEsp")
+	if existing and existing:IsA("ScreenGui") then
+		local total = existing:FindFirstChild("Total")
+		if total and total:IsA("TextLabel") then
+			invGui = existing
+			invLabel = total
+			destroyInvHuds(invGui)
+			invGui.Enabled = true
+			return invLabel
+		end
+	end
+	destroyInvHuds(nil)
 	invGui = Instance.new("ScreenGui")
 	invGui.Name = "ZinoosInvEsp"
 	invGui.ResetOnSpawn = false
@@ -2271,7 +2609,7 @@ local function paintHeld()
 end
 
 local function stepInventory()
-	if STATE.invEsp ~= true then
+	if not featureReady("Inventory ESP") or STATE.invEsp ~= true then
 		if STATE._invShown then
 			STATE._invShown = false
 			clearInvEsp()
@@ -2359,7 +2697,6 @@ end
 
 applyLowEnd(STATE.lowEnd == true)
 hubCleanup(function()
-	applyLowEnd(false)
 	clearInvEsp()
 	if invGui then
 		invGui:Destroy()
@@ -2388,14 +2725,28 @@ local FLAG_KEYS = {
 	WebhookAlerts = "webhookOn",
 }
 
+local function syncSavedVisuals()
+	applyLowEnd(STATE.lowEnd == true)
+	if STATE.litePets == true then
+		STATE._liteWasOn = true
+	elseif STATE._liteWasOn == true then
+		showLiteModels()
+		STATE._liteWasOn = false
+	else
+		STATE._liteWasOn = false
+	end
+end
+
 local function loadSaved()
 	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(CONFIG_PATH) then
+		syncSavedVisuals()
 		return
 	end
 	local ok, saved = pcall(function()
 		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_PATH))
 	end)
 	if not ok or type(saved) ~= "table" then
+		syncSavedVisuals()
 		return
 	end
 	for flag, key in pairs(FLAG_KEYS) do
@@ -2434,7 +2785,7 @@ local function loadSaved()
 		STATE.dockY = saved.DockY
 	end
 	STATE.dockCustom = saved.DockCustom == true
-	applyLowEnd(STATE.lowEnd == true)
+	syncSavedVisuals()
 end
 
 local function saveConfig()
@@ -3119,8 +3470,10 @@ local function installHub()
 	local eggs = card(leftColumn, "EGGS", 1)
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Teleports onto a rare egg, then comes back")
 	local zoneOptions = {}
-	for _, zoneName in ipairs(Zones.Order) do
-		zoneOptions[#zoneOptions + 1] = zoneName
+	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
+		for _, zoneName in ipairs(Zones.Order) do
+			zoneOptions[#zoneOptions + 1] = zoneName
+		end
 	end
 	if #zoneOptions == 0 then
 		zoneOptions[1] = "Prehistoric"
@@ -3412,28 +3765,41 @@ local function installHub()
 		for _, item in ipairs(searchRows) do
 			local show = query == "" or string.find(item.text, query, 1, true) ~= nil
 			item.row.Visible = show
-			if show then
+			if show and query ~= "" then
 				used[item.card] = true
 				pages[item.page or "Main"] = true
 			end
 		end
 		for _, item in ipairs(searchRows) do
-			item.card.Visible = used[item.card] == true or query == ""
+			item.card.Visible = query == "" or used[item.card] == true
 		end
-		if query ~= "" then
-			local here = (mainPage.Visible and pages.Main) or (discordPage.Visible and pages.Discord) or (homePage.Visible and pages.Home)
-			if not here then
-				if pages.Discord and not pages.Main then
-					showPage("Discord")
-				elseif pages.Main then
-					showPage("Main")
-				elseif pages.Discord then
-					showPage("Discord")
-				end
-			end
+		if query == "" then
+			return
+		end
+		local current = "Main"
+		if homePage.Visible then
+			current = "Home"
+		elseif discordPage.Visible then
+			current = "Discord"
+		end
+		if pages[current] then
+			return
+		end
+		if pages.Home and not pages.Main and not pages.Discord then
+			showPage("Home")
+		elseif pages.Main and not pages.Home and not pages.Discord then
+			showPage("Main")
+		elseif pages.Discord and not pages.Home and not pages.Main then
+			showPage("Discord")
+		elseif pages.Home then
+			showPage("Home")
+		elseif pages.Main then
+			showPage("Main")
+		elseif pages.Discord then
+			showPage("Discord")
 		end
 	end
-	search:GetPropertyChangedSignal("Text"):Connect(applySearch)
+	trackConnection(search:GetPropertyChangedSignal("Text"):Connect(applySearch))
 
 	local function refreshHome()
 		local data = readData()
@@ -3683,29 +4049,7 @@ local function installHub()
 
 	STATE.hubWindow = {
 		Unload = function()
-			pcall(function()
-				if keyConn then
-					keyConn:Disconnect()
-				end
-			end)
-			pcall(function()
-				if dragConn then
-					dragConn:Disconnect()
-				end
-			end)
-			pcall(function()
-				if dragEndConn then
-					dragEndConn:Disconnect()
-				end
-			end)
-			pcall(function()
-				if viewSignal then
-					viewSignal:Disconnect()
-				end
-			end)
-			if gui.Parent then
-				gui:Destroy()
-			end
+			unloadHub()
 		end,
 	}
 end
@@ -3717,6 +4061,9 @@ task.spawn(function()
 	local ok, err = pcall(installHub)
 	if not ok then
 		warn("[Zinoos hub] " .. tostring(err))
+		if running() then
+			shutdownHub("failed")
+		end
 	end
 end)
 
@@ -3737,13 +4084,18 @@ task.spawn(function()
 		STATE.stealTick = os.clock()
 		local ok, err = pcall(runStealTrip)
 		if not ok then
-			STATE.stealError = tostring(err)
+			local message = tostring(err)
 			STATE.liftSteal = false
 			STATE.stealGoal = nil
 			activeGoal = nil
 			restoreStealChanges()
 			STATE.nextSteal = os.clock() + 8
-			warn("[Zinoos hub] steal " .. tostring(err))
+			if STATE.stealError ~= message then
+				STATE.stealError = message
+				warn("[Zinoos hub] steal " .. message)
+			end
+		else
+			STATE.stealError = nil
 		end
 		task.wait(0.6)
 	end
@@ -3752,7 +4104,7 @@ end)
 local openTried = {}
 
 local function stepOpenEggs()
-	if STATE.autoOpen ~= true then
+	if STATE.autoOpen ~= true or not featureReady("Auto Open") then
 		return
 	end
 	local data = readData()
@@ -3767,10 +4119,11 @@ local function stepOpenEggs()
 			break
 		end
 		if type(pet) == "table" and pet.hatchAt and pet.hatchAt <= now then
-			local last = openTried[uid]
-			if not last or os.clock() - last > 3 then
-				openTried[uid] = os.clock()
-				Net:FireServer("OpenEgg", uid)
+			local eggUid = type(pet.uid) == "string" and pet.uid or (type(uid) == "string" and uid or nil)
+			local last = eggUid and openTried[eggUid]
+			if eggUid and (not last or os.clock() - last > 3) then
+				openTried[eggUid] = os.clock()
+				Net:FireServer("OpenEgg", eggUid)
 				sent += 1
 			end
 		elseif openTried[uid] then
@@ -3781,6 +4134,9 @@ end
 
 
 local function shownIncome(pet)
+	if typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
+		return 0
+	end
 	local ok, base = pcall(Pets.IncomeFor, pet)
 	base = ok and type(base) == "number" and base or 0
 	local level = 1
@@ -3793,7 +4149,7 @@ local function shownIncome(pet)
 	end)
 	local data = readData()
 	local rebirths = data and data.rebirths or 0
-	local row = Rebirths[rebirths]
+	local row = typeof(Rebirths) == "table" and Rebirths[rebirths] or nil
 	local cash = type(row) == "table" and row.CashMulti or 1
 	if type(cash) ~= "number" then
 		cash = 1
@@ -3802,7 +4158,7 @@ local function shownIncome(pet)
 end
 
 local function stepEquipBest()
-	if STATE.equipBest ~= true then
+	if STATE.equipBest ~= true or not featureReady("Equip Best") then
 		return
 	end
 	if os.clock() < (STATE.nextEquip or 0) then
@@ -3854,9 +4210,12 @@ local function stepEquipBest()
 	STATE.nextEquip = os.clock() + 1.4
 	local placeUid = bestPet.uid
 	local pickupUid = worstPet and (worstPet.uid)
+	if type(placeUid) ~= "string" then
+		return
+	end
 	task.spawn(function()
 		Net:FireServer("EquipBestPets")
-		if not (pickupUid and best > worst) then
+		if not (type(pickupUid) == "string" and best > worst) then
 			return
 		end
 		Net:FireServer("PickupPet", pickupUid)
@@ -3871,7 +4230,9 @@ local function stepEquipBest()
 		end
 		local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
 		local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
-		Net:FireServer("PlacePet", placeUid, x, z)
+		if type(x) == "number" and type(z) == "number" then
+			Net:FireServer("PlacePet", placeUid, x, z)
+		end
 	end)
 end
 
@@ -4031,6 +4392,10 @@ local nextBubble = 0
 STATE.connect(RunService.Heartbeat, function()
 	if not running() then
 		return
+	end
+	if os.clock() >= (STATE.nextPrune or 0) then
+		STATE.nextPrune = os.clock() + 1
+		pruneConnections()
 	end
 	STATE.train = false
 	syncToggles()

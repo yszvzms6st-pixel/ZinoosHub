@@ -18,7 +18,7 @@ Pin one commit when you want the script to stay on that version. Replace the has
 loadstring(game:HttpGet("https://raw.githubusercontent.com/yszvzms6st-pixel/ZinoosHub/292de2c3b9746f286c7b6c80249a2c7b1c190e48/ZinoosHub.luau"))()
 ```
 
-Running it again replaces the hub that is already open.
+Running it again replaces the hub that is already open. The new run stops the previous loops, disconnects its connections, puts back temporary bench, prompt, collision and purchase-pad changes, and removes the old menu before it starts. Saved Low End and Lite Pets stay as they were. The original graphics settings are remembered from the first load and are not recaptured while Low End is on.
 
 ## What it does
 
@@ -42,7 +42,11 @@ That file stores the Discord webhook URL as plain text. Anyone who can read the 
 
 ## Unload and reload
 
-Unload stops this run, disconnects the connections it created, restores the methods and temporary changes it made, and removes the menu. Run the loader again after that. Webhooks, features, and Unload work on the new run. Repeating unload and reload does not stack menus, hooks, or callbacks.
+Unload stops this run, disconnects the connections it created, restores the methods and temporary changes it made, puts pet visuals and the original graphics back, and removes the menu and the inventory HUD. A second Unload does nothing harmful. Run the loader again after that. The next load can remember a fresh graphics baseline. Webhooks, features, and Unload work on the new run. Repeating unload and reload does not stack menus, heartbeats, hooks, or inventory HUDs.
+
+Search covers Home, Main, and Discord. A result on another page opens that page. Clearing the search shows the page contents again.
+
+If a game update removes something one feature needs, that feature turns off and names the missing piece. The rest of the hub keeps running. The next load tries the feature again.
 
 ## Executor
 
