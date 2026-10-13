@@ -197,21 +197,24 @@ local function trackConnection(connection, owner)
 		return connection
 	end
 	runtime.connections[connection] = true
-	if typeof(owner) == "Instance" then
-		local release
-		release = owner.Destroying:Connect(function()
-			pcall(function()
-				connection:Disconnect()
-			end)
-			forgetConnection(connection)
-			forgetConnection(release)
-			pcall(function()
-				release:Disconnect()
-			end)
+	if typeof(owner) ~= "Instance" then
+		return connection
+	end
+	local release
+	release = owner.Destroying:Connect(function()
+		forgetConnection(connection)
+		forgetConnection(release)
+		pcall(function()
+			connection:Disconnect()
 		end)
-		if connectionAlive(release) then
-			runtime.connections[release] = true
-		end
+		pcall(function()
+			release:Disconnect()
+		end)
+	end)
+	if connectionAlive(release) then
+		runtime.connections[release] = true
+	else
+		forgetConnection(release)
 	end
 	return connection
 end
@@ -452,6 +455,31 @@ local Format = Shared and loadModule("Shared.Format", function()
 	return require(Shared.Format)
 end)
 local Grades = configModule("Grades")
+local displayWarned = {}
+local function warnDisplayOnce(name, dependency)
+	if displayWarned[name] then
+		return
+	end
+	displayWarned[name] = true
+	warn(string.format("[Zinoos hub] %s is off because %s is missing.", name, dependency))
+end
+local function shortNumber(value)
+	if typeof(Format) == "table" and typeof(Format.Short) == "function" then
+		local ok, text = pcall(Format.Short, value)
+		if ok and text ~= nil then
+			return tostring(text)
+		end
+	end
+	warnDisplayOnce("Number display", "Format.Short")
+	return tostring(value)
+end
+local function petSpec(key)
+	if typeof(Pets) == "table" and typeof(Pets.Specs) == "table" then
+		return Pets.Specs[key]
+	end
+	warnDisplayOnce("Pet display", "Pets.Specs")
+	return nil
+end
 local ClientRegistry = loadModule("ClientRegistry", function()
 	local scripts = LocalPlayer:WaitForChild("PlayerScripts", 8)
 	local moduleScript = scripts:WaitForChild("Client"):WaitForChild("Lib"):WaitForChild("ClientRegistry")
@@ -2017,10 +2045,10 @@ local function eggValueText(model)
 	if not income then
 		income = eggValue[string.gsub(model.Name, " Egg$", "")]
 	end
-	if not income or typeof(Format) ~= "table" or typeof(Format.Short) ~= "function" then
+	if not income then
 		return model.Name
 	end
-	return model.Name .. "  $" .. Format.Short(income) .. "/s"
+	return model.Name .. "  $" .. shortNumber(income) .. "/s"
 end
 
 local webhookHosts = {
@@ -2121,11 +2149,15 @@ queueRare = function(kind, name, money, mark)
 		return false
 	end
 	if type(money) ~= "string" or money == "" then
-		for _, spec in pairs(Pets.Specs) do
-			if type(spec) == "table" and spec.DisplayName == clean and type(spec.Income) == "number" then
-				money = "$" .. Format.Short(spec.Income) .. "/s"
-				break
+		if typeof(Pets) == "table" and typeof(Pets.Specs) == "table" then
+			for _, spec in pairs(Pets.Specs) do
+				if type(spec) == "table" and spec.DisplayName == clean and type(spec.Income) == "number" then
+					money = "$" .. shortNumber(spec.Income) .. "/s"
+					break
+				end
 			end
+		else
+			warnDisplayOnce("Pet display", "Pets.Specs")
 		end
 	end
 	local stamp = mark or (kind .. "|" .. clean .. "|" .. rarity)
@@ -2153,7 +2185,7 @@ queueRare = function(kind, name, money, mark)
 	return true
 end
 
-local liteHooked = {}
+local liteHooked = setmetatable({}, { __mode = "k" })
 
 local function hideOne(child)
 	if child:IsA("BasePart") then
@@ -2193,10 +2225,8 @@ local function hideVisual(model)
 		if running() and STATE.litePets == true then
 			hideOne(child)
 		end
+		return model
 	end, model)
-	trackConnection(model.Destroying:Connect(function()
-		liteHooked[model] = nil
-	end))
 end
 
 local function showVisual(model)
@@ -2360,7 +2390,7 @@ local function rememberPet(pet, cash)
 	if type(uid) ~= "string" then
 		return 0
 	end
-	local spec = Pets.Specs[pet.key]
+	local spec = petSpec(pet.key)
 	if pet.hatchAt ~= nil or (spec and spec.IsEgg) then
 		incomeByUid[uid] = nil
 		return 0
@@ -2398,7 +2428,7 @@ local function rememberPet(pet, cash)
 	incomeByUid[uid] = {
 		sig = sig,
 		amount = amount,
-		text = "$" .. Format.Short(amount) .. "/s",
+		text = "$" .. shortNumber(amount) .. "/s",
 	}
 	return amount
 end
@@ -2636,7 +2666,7 @@ local function stepInventory()
 		end
 	end
 	local label = ensureInvGui()
-	local text = "Bag  $" .. Format.Short(total) .. "/s"
+	local text = "Bag  $" .. shortNumber(total) .. "/s"
 	if label.Text ~= text then
 		label.Text = text
 	end
@@ -3815,10 +3845,10 @@ local function installHub()
 		if type(rebirths) ~= "number" then
 			rebirths = data and data.rebirths or 0
 		end
-		strengthText.Text = Format.Short(strength or 0)
-		cashText.Text = "$" .. Format.Short((data and data.cash) or 0)
+		strengthText.Text = shortNumber(strength or 0)
+		cashText.Text = "$" .. shortNumber((data and data.cash) or 0)
 		rebirthText.Text = tostring(rebirths or 0)
-		speedText.Text = Format.Short(speed or 0)
+		speedText.Text = shortNumber(speed or 0)
 	end
 	refreshHome()
 	refreshTracker()
@@ -4340,7 +4370,7 @@ local function paintAnimals()
 		local pet = petFor(card.Name)
 		local label = card:FindFirstChild("DisplayName", true)
 		if type(pet) == "table" and pet.hatchAt == nil and label and label:IsA("TextLabel") and string.find(label.Text, "/s", 1, true) then
-			local money = Format.Short(shownIncome(pet))
+			local money = shortNumber(shownIncome(pet))
 			local text = string.gsub(label.Text, "%$[^<%)]+/s", "$" .. money .. "/s", 1)
 			if label.Text ~= text then
 				label.RichText = true
@@ -4373,9 +4403,9 @@ local function scanNewPets()
 					knownPets[id] = "egg"
 				elseif (prev == nil or prev == "egg") and hatched then
 					knownPets[id] = "pet"
-					local spec = Pets.Specs[pet.key]
+					local spec = petSpec(pet.key)
 					if spec and not spec.IsEgg and queueRare then
-						queueRare("Hatched", spec.DisplayName or spec.Name or pet.key, "$" .. Format.Short(shownIncome(pet)) .. "/s")
+						queueRare("Hatched", spec.DisplayName or spec.Name or pet.key, "$" .. shortNumber(shownIncome(pet)) .. "/s")
 					end
 				end
 			end
