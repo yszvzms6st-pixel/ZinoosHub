@@ -192,6 +192,13 @@ for _, zoneName in ipairs(Zones.Order) do
 		end
 	end
 end
+local rarityByDisplay = {}
+for _, spec in pairs(Pets.Specs) do
+	if type(spec) == "table" and type(spec.DisplayName) == "string" and type(spec.Rarity) == "string" then
+		rarityByDisplay[spec.DisplayName] = spec.Rarity
+	end
+end
+local queueRare
 
 local ON_COLOR = Color3.fromRGB(255, 65, 65)
 local OFF_TRACK = Color3.fromRGB(100, 100, 100)
@@ -289,6 +296,15 @@ if STATE.invEsp == nil then
 end
 if STATE.lowEnd == nil then
 	STATE.lowEnd = true
+end
+if STATE.webhookOn == nil then
+	STATE.webhookOn = true
+end
+if type(STATE.webhook) ~= "string" then
+	STATE.webhook = ""
+end
+if rarityRank[STATE.webhookRarity] == nil then
+	STATE.webhookRarity = "Divine"
 end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Prehistoric"
@@ -532,7 +548,27 @@ local function installOwnMenu()
 	return true
 end
 
-STATE.onCleanup(function()
+local hubCleanups = {}
+local function hubCleanup(fn)
+	table.insert(hubCleanups, fn)
+	STATE.onCleanup(fn)
+end
+
+local function unloadHub()
+	if STATE._unloaded then
+		return
+	end
+	STATE._unloaded = true
+	local genv = getgenv()
+	genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
+	STATE._gen = -1
+	STATE._alive = false
+	for index = #hubCleanups, 1, -1 do
+		pcall(hubCleanups[index])
+	end
+end
+
+hubCleanup(function()
 	if typeof(netFireServer) == "function" then
 		Net.FireServer = netFireServer
 	end
@@ -555,10 +591,16 @@ STATE.onCleanup(function()
 	local live = workspace:FindFirstChild("Live")
 	if live then
 		for _, child in ipairs(live:GetDescendants()) do
-			if child.Name == "ZinoosEggValue" then
+			if child.Name == "ZinoosEggValue" or child.Name == "ZinoosHoldValue" then
 				child:Destroy()
+			elseif child:IsA("Model") then
+				child:SetAttribute("ZinoosLite", nil)
 			elseif child:IsA("BasePart") then
 				child.LocalTransparencyModifier = 0
+				if child:GetAttribute("ZinoosShadow") == true then
+					child.CastShadow = true
+					child:SetAttribute("ZinoosShadow", nil)
+				end
 			elseif child:GetAttribute("ZinoosHid") == true then
 				child.Enabled = true
 				child:SetAttribute("ZinoosHid", nil)
@@ -1244,6 +1286,9 @@ local function runStealTrip()
 	LocalPlayer:SetAttribute("CodexMode", "train")
 	LocalPlayer:SetAttribute("CodexStolen", grabbed and 1 or 0)
 	LocalPlayer:SetAttribute("CodexStealName", stolenName)
+	if grabbed and queueRare then
+		queueRare("Stolen egg", stolenName)
+	end
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
 	homeSpot()
@@ -1435,6 +1480,69 @@ local function eggValueText(model)
 		return model.Name
 	end
 	return model.Name .. "  $" .. Format.Short(income) .. "/s"
+end
+
+local function webhookUrl()
+	local url = type(STATE.webhook) == "string" and STATE.webhook or ""
+	url = string.match(url, "^%s*(https://%S+)%s*$") or ""
+	if not string.find(url, "/api/webhooks/", 1, true) then
+		return nil
+	end
+	return url
+end
+
+queueRare = function(kind, name, money)
+	if STATE.webhookOn == false or STATE._unloaded then
+		return
+	end
+	local url = webhookUrl()
+	if not url then
+		return
+	end
+	local clean = string.gsub(tostring(name), " Egg$", "")
+	local rarity = rarityByDisplay[clean] or ""
+	local minRank = rarityRank[STATE.webhookRarity] or rarityRank.Divine or 1
+	if (rarityRank[rarity] or 0) < minRank then
+		return
+	end
+	if type(money) ~= "string" or money == "" then
+		for _, spec in pairs(Pets.Specs) do
+			if type(spec) == "table" and spec.DisplayName == clean and type(spec.Income) == "number" then
+				money = "$" .. Format.Short(spec.Income) .. "/s"
+				break
+			end
+		end
+	end
+	local stamp = kind .. "|" .. clean .. "|" .. rarity
+	local now = os.clock()
+	if STATE._hookStamp == stamp and now - (STATE._hookAt or 0) < 12 then
+		return
+	end
+	STATE._hookStamp = stamp
+	STATE._hookAt = now
+	task.spawn(function()
+		local okEncode, body = pcall(function()
+			return game:GetService("HttpService"):JSONEncode({
+				username = "Zinoos hub",
+				embeds = {
+					{
+						title = kind,
+						description = string.format("**%s**\n%s\n%s", clean, rarity, money or ""),
+						color = 16098851,
+					},
+				},
+			})
+		end)
+		if not okEncode then
+			return
+		end
+		pcall(request, {
+			Url = url,
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
+	end)
 end
 
 local liteHooked = setmetatable({}, { __mode = "k" })
@@ -1984,7 +2092,7 @@ local function stepInventory()
 end
 
 applyLowEnd(STATE.lowEnd == true)
-STATE.onCleanup(function()
+hubCleanup(function()
 	applyLowEnd(false)
 	clearInvEsp()
 	if invGui then
@@ -2025,6 +2133,7 @@ local function installHub()
 		{ "Egg ESP", "A small label with the egg name and cash per second.", "eggEsp", "EggEsp" },
 		{ "Inventory ESP", "Shows what each bag pet earns, plus the bag total.", "invEsp", "InvEsp" },
 		{ "Low End", "Turns graphics down and skips extra effects for phones and weaker PCs.", "lowEnd", "LowEnd" },
+		{ "Webhook Alerts", "Sends a Discord message when you steal or hatch something rare.", "webhookOn", "WebhookAlerts" },
 	}
 	STATE.toggleControls = {}
 	for _, item in ipairs(toggles) do
@@ -2068,6 +2177,97 @@ local function installHub()
 		})
 		STATE.zoneControl = dropdown or window.controls.StealZone
 	end)
+	local sectionOk, sectionErr = pcall(function()
+		tab:CreateSection({ name = "Discord" })
+	end)
+	if not sectionOk then
+		warn("[Zinoos hub] discord section " .. tostring(sectionErr))
+	end
+	local inputOk, inputErr = pcall(function()
+		local input = tab:CreateInput({
+			name = "Discord Webhook",
+			description = "Paste your Discord webhook here.",
+			placeholder = "https://discord.com/api/webhooks/...",
+			default = STATE.webhook or "",
+			currentValue = STATE.webhook or "",
+			flag = "WebhookUrl",
+			callback = function(text)
+				if type(text) == "string" then
+					STATE.webhook = text
+				end
+			end,
+		})
+		STATE.webhookControl = input or window.controls.WebhookUrl
+	end)
+	if not inputOk then
+		warn("[Zinoos hub] webhook box " .. tostring(inputErr))
+	end
+	local rarityOk, rarityErr = pcall(function()
+		local options = { "Secret", "Eternal", "Divine", "Exclusive" }
+		local dropdown = tab:CreateDropdown({
+			name = "Alert Rarity",
+			description = "Ping when the pet is this rarity or higher.",
+			options = options,
+			currentOption = { STATE.webhookRarity or "Divine" },
+			flag = "WebhookRarity",
+			callback = function(value)
+				local picked = value
+				if type(picked) == "table" then
+					picked = picked[1]
+				end
+				if type(picked) == "string" and rarityRank[picked] then
+					STATE.webhookRarity = picked
+				end
+			end,
+		})
+		STATE.rarityControl = dropdown or window.controls.WebhookRarity
+	end)
+	if not rarityOk then
+		warn("[Zinoos hub] alert rarity " .. tostring(rarityErr))
+	end
+	local testOk, testErr = pcall(function()
+		tab:CreateButton({
+			name = "Test Webhook",
+			description = "Sends a test message to the webhook you pasted.",
+			callback = function()
+				local url = webhookUrl()
+				if not url then
+					return
+				end
+				task.spawn(function()
+					local okEncode, body = pcall(function()
+						return game:GetService("HttpService"):JSONEncode({
+							username = "Zinoos hub",
+							content = "Webhook connected. You'll get a ping when a rare pet is stolen or hatches.",
+						})
+					end)
+					if okEncode then
+						pcall(request, {
+							Url = url,
+							Method = "POST",
+							Headers = { ["Content-Type"] = "application/json" },
+							Body = body,
+						})
+					end
+				end)
+			end,
+		})
+	end)
+	if not testOk then
+		warn("[Zinoos hub] test webhook " .. tostring(testErr))
+	end
+	local unloadOk, unloadErr = pcall(function()
+		tab:CreateButton({
+			name = "Unload",
+			description = "Stops the hub and removes everything it added.",
+			callback = function()
+				task.defer(unloadHub)
+			end,
+		})
+	end)
+	if not unloadOk then
+		warn("[Zinoos hub] unload button " .. tostring(unloadErr))
+	end
 end
 
 task.spawn(function()
@@ -2337,6 +2537,26 @@ local function syncToggles()
 			end
 		end
 	end
+	local hookControl = STATE.webhookControl
+	if type(hookControl) == "table" then
+		local text = hookControl.value
+		if type(text) ~= "string" then
+			text = hookControl.currentValue
+		end
+		if type(text) == "string" and text ~= STATE.webhook then
+			STATE.webhook = text
+		end
+	end
+	local rareControl = STATE.rarityControl
+	if type(rareControl) == "table" then
+		local picked = rareControl.value or rareControl.currentOption
+		if type(picked) == "table" then
+			picked = picked[1]
+		end
+		if type(picked) == "string" and rarityRank[picked] and picked ~= STATE.webhookRarity then
+			STATE.webhookRarity = picked
+		end
+	end
 end
 
 local function pullHomeIfEmpty()
@@ -2363,6 +2583,42 @@ local function pullHomeIfEmpty()
 	hrp.CFrame = CFrame.new(homeSpot())
 end
 
+local knownPets = {}
+local petsReady = false
+
+local function scanNewPets()
+	local data = readData()
+	if not data then
+		return
+	end
+	local function walk(list)
+		if type(list) ~= "table" then
+			return
+		end
+		for uid, pet in pairs(list) do
+			if type(pet) == "table" then
+				local id = tostring(pet.uid or uid)
+				local hatched = pet.hatchAt == nil
+				local prev = knownPets[id]
+				if not petsReady then
+					knownPets[id] = hatched and "pet" or "egg"
+				elseif prev == nil and not hatched then
+					knownPets[id] = "egg"
+				elseif (prev == nil or prev == "egg") and hatched then
+					knownPets[id] = "pet"
+					local spec = Pets.Specs[pet.key]
+					if spec and not spec.IsEgg and queueRare then
+						queueRare("Hatched", spec.DisplayName or spec.Name or pet.key, "$" .. Format.Short(shownIncome(pet)) .. "/s")
+					end
+				end
+			end
+		end
+	end
+	walk(data.plotPets)
+	walk(data.backpack)
+	petsReady = true
+end
+
 local nextBubble = 0
 STATE.connect(RunService.Heartbeat, function()
 	if not running() then
@@ -2378,6 +2634,10 @@ STATE.connect(RunService.Heartbeat, function()
 	if os.clock() >= (STATE.nextInv or 0) then
 		STATE.nextInv = os.clock() + (STATE.lowEnd == true and 2 or 1.2)
 		pcall(stepInventory)
+	end
+	if os.clock() >= (STATE.nextHookScan or 0) then
+		STATE.nextHookScan = os.clock() + 2
+		pcall(scanNewPets)
 	end
 	stepTrain()
 	if STATE.lowEnd ~= true or os.clock() >= (STATE.nextHome or 0) then
