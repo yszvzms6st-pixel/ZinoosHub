@@ -655,9 +655,6 @@ local function bindFeatures()
 		end },
 	})
 	bindFeature("Inventory ESP", {
-		{ name = "Format.Short", test = function()
-			return typeof(Format) == "table" and typeof(Format.Short) == "function"
-		end },
 		{ name = "Pets.IncomeFor", test = function()
 			return typeof(Pets) == "table" and typeof(Pets.IncomeFor) == "function"
 		end },
@@ -4203,7 +4200,7 @@ local function stepEquipBest()
 	local anyPlot = false
 	for uid, pet in pairs(data.plotPets or {}) do
 		if type(pet) == "table" and pet.hatchAt == nil then
-			local spec = Pets.Specs[pet.key]
+			local spec = petSpec(pet.key)
 			if not (spec and spec.IsEgg) then
 				anyPlot = true
 				local income = shownIncome(pet)
@@ -4224,7 +4221,7 @@ local function stepEquipBest()
 	local best = 0
 	for _, pet in pairs(data.backpack or {}) do
 		if type(pet) == "table" and pet.uid and pet.hatchAt == nil then
-			local spec = Pets.Specs[pet.key]
+			local spec = petSpec(pet.key)
 			if not (spec and spec.IsEgg) then
 				local income = shownIncome(pet)
 				if income > best then
