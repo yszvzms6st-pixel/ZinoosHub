@@ -80,6 +80,7 @@ local Wild = require(Shared.Configs.Wild)
 local Zones = require(Shared.Configs.Zones)
 local DailyRewards = require(Shared.Configs.DailyRewards)
 local Format = require(Shared.Format)
+local Grades = require(Shared.Configs.Grades)
 local ClientRegistry = require(LocalPlayer:WaitForChild("PlayerScripts").Client.Lib.ClientRegistry)
 
 local LOOK_POS = Vector3.new(190, 8, -6420)
@@ -608,18 +609,20 @@ local function releaseGym()
 	return true
 end
 
+local activeGoal = nil
+
 local function stepTrain()
 	if STATE.liftSteal then
 		releaseGym()
 		local character = LocalPlayer.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
-		if hrp and typeof(STATE.stealGoal) == "CFrame" then
+		if hrp and activeGoal then
 			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.CFrame = STATE.stealGoal
+			hrp.CFrame = activeGoal
 			task.defer(function()
-				if STATE.liftSteal and hrp.Parent and typeof(STATE.stealGoal) == "CFrame" then
+				if STATE.liftSteal and hrp.Parent and activeGoal then
 					hrp.AssemblyLinearVelocity = Vector3.zero
-					hrp.CFrame = STATE.stealGoal
+					hrp.CFrame = activeGoal
 				end
 			end)
 		end
@@ -851,7 +854,8 @@ local function placeOneEgg()
 end
 
 local function deliverHeld()
-	STATE.stealGoal = CFrame.new(homeSpot())
+	activeGoal = CFrame.new(homeSpot())
+	STATE.stealGoal = activeGoal
 	for _ = 1, 16 do
 		if not running() then
 			return false
@@ -925,12 +929,13 @@ function prehistoricEggs()
 			local prompt = egg:FindFirstChild("StealPrompt", true)
 			if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
 				local mutation = egg:GetAttribute("Mutation")
+				local petName = string.gsub(egg.Name, " Egg$", "")
 				list[#list + 1] = {
 					model = egg,
 					prompt = prompt,
 					pos = pos,
-					rarity = rarityOfName[egg.Name] or 0,
-					weight = weightOfName[egg.Name] or 999,
+					rarity = rarityOfName[petName] or rarityOfName[egg.Name] or 0,
+					weight = weightOfName[petName] or weightOfName[egg.Name] or 999,
 					mutation = mutationRank[tostring(mutation)] or 0,
 				}
 			end
@@ -1099,7 +1104,7 @@ local function runStealTrip()
 	homeSpot()
 	local grabbed = false
 	local stolenName = target.model.Name
-	local releaseLimit = os.clock() + 0.8
+	local releaseLimit = os.clock() + 0.6
 	while not releaseGym() and os.clock() < releaseLimit and running() do
 		task.wait(0.1)
 	end
@@ -1109,15 +1114,11 @@ local function runStealTrip()
 	if hrp and target.model.Parent and target.prompt and target.prompt.Parent then
 		target.prompt.HoldDuration = 0
 		target.prompt.RequiresLineOfSight = false
+		if target.prompt.MaxActivationDistance < 20 then
+			target.prompt.MaxActivationDistance = 20
+		end
 		for _, part in ipairs(target.model:GetDescendants()) do
 			if part:IsA("BasePart") then
-				part.CanCollide = false
-			end
-		end
-		local savedCollide = {}
-		for _, part in ipairs(character:GetDescendants()) do
-			if part:IsA("BasePart") then
-				savedCollide[part] = part.CanCollide
 				part.CanCollide = false
 			end
 		end
@@ -1125,19 +1126,23 @@ local function runStealTrip()
 			humanoid.PlatformStand = false
 			humanoid.Sit = false
 		end
-		local stand = target.model:GetPivot().Position + Vector3.new(0, 3, 0)
-		STATE.stealGoal = CFrame.new(stand)
+		local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
+		activeGoal = CFrame.new(stand)
+		STATE.stealGoal = activeGoal
 		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.AssemblyAngularVelocity = Vector3.zero
-		hrp.CFrame = STATE.stealGoal
-		fireproximityprompt(target.prompt)
-		task.wait(0.12)
-		grabbed = LocalPlayer:GetAttribute("holdingFriend") == true
-		for part, collide in pairs(savedCollide) do
-			if part.Parent then
-				part.CanCollide = collide
+		hrp.CFrame = activeGoal
+		local grabUntil = os.clock() + 0.8
+		while os.clock() < grabUntil and running() and target.prompt.Parent do
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.CFrame = activeGoal
+			fireproximityprompt(target.prompt)
+			if LocalPlayer:GetAttribute("holdingFriend") == true then
+				grabbed = true
+				break
 			end
+			task.wait(0.1)
 		end
+		grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
 	end
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	local carryingEgg = LocalPlayer:GetAttribute("holdingFriend") == true
@@ -1160,9 +1165,12 @@ local function runStealTrip()
 	homeSpot()
 	if hrp and typeof(STATE.homePos) == "Vector3" and (hrp.Position - STATE.homePos).Magnitude > 80 then
 		STATE.liftSteal = true
-		STATE.stealGoal = CFrame.new(STATE.homePos)
+		activeGoal = CFrame.new(STATE.homePos)
+		STATE.stealGoal = activeGoal
+		hrp.CFrame = activeGoal
 		task.wait(0.35)
 	end
+	activeGoal = nil
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
 	STATE.nextSteal = os.clock() + (grabbed and 12 or 3)
@@ -1563,8 +1571,16 @@ end)
 
 task.spawn(function()
 	while running() do
-		pcall(runStealTrip)
-		task.wait(1)
+		STATE.stealTick = os.clock()
+		local ok, err = pcall(runStealTrip)
+		if not ok then
+			STATE.stealError = tostring(err)
+			STATE.liftSteal = false
+			STATE.stealGoal = nil
+			STATE.nextSteal = os.clock() + 2
+			warn("[Zinoos hub] steal " .. tostring(err))
+		end
+		task.wait(0.6)
 	end
 end)
 
@@ -1682,21 +1698,99 @@ local function backpackBeatsPlot()
 	return bestBag > worstPlot
 end
 
+local function shownIncome(pet)
+	local ok, base = pcall(Pets.IncomeFor, pet)
+	base = ok and type(base) == "number" and base or 0
+	local level = 1
+	local grade = 1
+	pcall(function()
+		level = Plot.PetLevelMultiplier(pet.level) or 1
+	end)
+	pcall(function()
+		grade = Grades.Multiplier(pet.grade) or 1
+	end)
+	local data = readData()
+	local rebirths = data and data.rebirths or 0
+	local row = Rebirths[rebirths]
+	local cash = type(row) == "table" and row.CashMulti or 1
+	if type(cash) ~= "number" then
+		cash = 1
+	end
+	return base * level * grade * cash
+end
+
 local function stepEquipBest()
 	if STATE.equipBest ~= true then
 		return
 	end
-	local signature = rosterSignature()
-	local better = backpackBeatsPlot()
-	if not better and (signature == "" or signature == STATE.equipRoster) then
+	if os.clock() < (STATE.nextEquip or 0) then
 		return
 	end
-	if os.clock() - lastEquipAt < 0.2 then
+	local data = readData()
+	if not data then
 		return
 	end
-	lastEquipAt = os.clock()
-	STATE.equipRoster = signature
-	Net:FireServer("EquipBestPets")
+	local worstPet = nil
+	local worst = math.huge
+	local anyPlot = false
+	for uid, pet in pairs(data.plotPets or {}) do
+		if type(pet) == "table" and pet.hatchAt == nil then
+			local spec = Pets.Specs[pet.key]
+			if not (spec and spec.IsEgg) then
+				anyPlot = true
+				local income = shownIncome(pet)
+				if income < worst then
+					worst = income
+					worstPet = pet
+					if pet.uid == nil then
+						worstPet = { uid = uid, key = pet.key }
+						for field, value in pairs(pet) do
+							worstPet[field] = value
+						end
+					end
+				end
+			end
+		end
+	end
+	local bestPet = nil
+	local best = 0
+	for _, pet in pairs(data.backpack or {}) do
+		if type(pet) == "table" and pet.uid and pet.hatchAt == nil then
+			local spec = Pets.Specs[pet.key]
+			if not (spec and spec.IsEgg) then
+				local income = shownIncome(pet)
+				if income > best then
+					best = income
+					bestPet = pet
+				end
+			end
+		end
+	end
+	if not bestPet or (anyPlot and best <= worst) then
+		return
+	end
+	STATE.nextEquip = os.clock() + 1.4
+	local placeUid = bestPet.uid
+	local pickupUid = worstPet and (worstPet.uid)
+	task.spawn(function()
+		Net:FireServer("EquipBestPets")
+		if not (pickupUid and best > worst) then
+			return
+		end
+		Net:FireServer("PickupPet", pickupUid)
+		task.wait(0.35)
+		if not running() then
+			return
+		end
+		local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
+		local base = plot and plot:FindFirstChild("Base")
+		if not (base and base:IsA("BasePart")) then
+			return
+		end
+		local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
+		local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
+		Net:FireServer("PlacePet", placeUid, x, z)
+	end)
 end
 
 local function syncToggles()
@@ -1736,6 +1830,7 @@ local function pullHomeIfEmpty()
 	STATE.liftSteal = false
 	STATE.stealing = false
 	STATE.stealGoal = nil
+	activeGoal = nil
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.CFrame = CFrame.new(homeSpot())
 end
