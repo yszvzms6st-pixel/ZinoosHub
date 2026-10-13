@@ -297,6 +297,9 @@ end
 if STATE.lowEnd == nil then
 	STATE.lowEnd = true
 end
+if STATE.bonusRocks == nil then
+	STATE.bonusRocks = true
+end
 if STATE.webhookOn == nil then
 	STATE.webhookOn = true
 end
@@ -735,8 +738,6 @@ local function releaseGym()
 	return true
 end
 
-local activeGoal = nil
-
 local function stepTrain()
 	if STATE.liftSteal then
 		releaseGym()
@@ -1015,6 +1016,34 @@ local function zoneChoice(value)
 	return "Prehistoric"
 end
 
+local spottedEggs = {}
+
+local function alertRank()
+	return rarityRank[STATE.webhookRarity] or rarityRank.Divine or 10
+end
+
+local function rockById(id)
+	if type(id) ~= "string" then
+		return nil
+	end
+	local folder = workspace:FindFirstChild("BonusRocks")
+	return folder and folder:FindFirstChild(id) or nil
+end
+
+local function rockIsLifted(id)
+	local rock = rockById(id)
+	return rock ~= nil and rock:GetAttribute("LiftedLocal") == true
+end
+
+local function eggRank(model)
+	local petName = string.gsub(model.Name, " Egg$", "")
+	local rank = rarityOfName[petName] or rarityOfName[model.Name]
+	if rank then
+		return rank
+	end
+	return rarityRank[rarityByDisplay[petName] or ""] or 0
+end
+
 local function inZone(pos, zone)
 	local floor = FLOORS[zone or stealZone()]
 	if not floor then
@@ -1052,15 +1081,25 @@ function prehistoricEggs()
 			if not inZone(pos, zone) then
 				continue
 			end
+			local bonusId = egg:GetAttribute("BonusRock")
+			if type(bonusId) == "string" and not rockIsLifted(bonusId) then
+				continue
+			end
 			local prompt = egg:FindFirstChild("StealPrompt", true)
-			if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+			local rank = eggRank(egg)
+			if rank >= alertRank() and prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and prompt.MaxActivationDistance > 0 then
+				local spotKey = string.format("%d:%d:%s", math.floor(pos.X), math.floor(pos.Z), egg.Name)
+				if not spottedEggs[spotKey] and queueRare then
+					spottedEggs[spotKey] = true
+					queueRare("Rare egg", egg.Name, nil, "spot|" .. spotKey)
+				end
 				local mutation = egg:GetAttribute("Mutation")
 				local petName = string.gsub(egg.Name, " Egg$", "")
 				list[#list + 1] = {
 					model = egg,
 					prompt = prompt,
 					pos = pos,
-					rarity = rarityOfName[petName] or rarityOfName[egg.Name] or 0,
+					rarity = rank,
 					weight = weightOfName[petName] or weightOfName[egg.Name] or 999,
 					mutation = mutationRank[tostring(mutation)] or 0,
 				}
@@ -1079,8 +1118,101 @@ function prehistoricEggs()
 	return list
 end
 
+local activeGoal = nil
+
+local function bestLockedBonus()
+	if STATE.bonusRocks ~= true then
+		return nil
+	end
+	local zone = stealZone()
+	local live = workspace:FindFirstChild("Live")
+	local folder = live and live:FindFirstChild("Friends")
+	if not folder then
+		return nil
+	end
+	local best = nil
+	for _, egg in ipairs(folder:GetChildren()) do
+		if egg:IsA("Model") and egg:GetAttribute("SpawnZone") == zone then
+			local bonusId = egg:GetAttribute("BonusRock")
+			local rock = rockById(bonusId)
+			if rock and rock:GetAttribute("LiftedLocal") ~= true then
+				local pos = egg:GetPivot().Position
+				local rank = eggRank(egg)
+				if inZone(pos, zone) and rank >= alertRank() and (not best or rank > best.rarity) then
+					local spotKey = string.format("bonus:%d:%d:%s", math.floor(pos.X), math.floor(pos.Z), egg.Name)
+					if not spottedEggs[spotKey] and queueRare then
+						spottedEggs[spotKey] = true
+						queueRare("Rare egg", egg.Name, nil, "spot|" .. spotKey)
+					end
+					best = {
+						model = egg,
+						rock = rock,
+						pos = pos,
+						rarity = rank,
+					}
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function dismissLiftPrompt()
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local boost = playerGui and playerGui:FindFirstChild("LiftBoost")
+	if boost and boost:IsA("ScreenGui") then
+		boost.Enabled = false
+	end
+end
+
+local function liftBonusRock(rock)
+	local strip = rock:FindFirstChild("LiftStrip") or rock:FindFirstChildWhichIsA("BasePart")
+	if not (strip and strip:IsA("BasePart")) then
+		return false
+	end
+	STATE.bonusLift = true
+	STATE.liftSteal = true
+	local stand = strip.Position + Vector3.new(0, 3.2, 0)
+	local look = strip.CFrame.LookVector
+	if look.Magnitude < 0.1 then
+		look = Vector3.new(0, 0, -1)
+	end
+	activeGoal = CFrame.new(stand, stand + look)
+	local releaseLimit = os.clock() + 0.8
+	while not releaseGym() and os.clock() < releaseLimit and running() do
+		task.wait(0.1)
+	end
+	local limit = os.clock() + 1500
+	while running() and os.clock() < limit and rock.Parent and rock:GetAttribute("LiftedLocal") ~= true do
+		dismissLiftPrompt()
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid.Sit = false
+		end
+		if hrp and activeGoal then
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.CFrame = activeGoal
+		end
+		task.wait(0.2)
+	end
+	local lifted = rock.Parent ~= nil and rock:GetAttribute("LiftedLocal") == true
+	if not lifted then
+		STATE.bonusLift = false
+		STATE.liftSteal = false
+		activeGoal = nil
+		STATE.stealGoal = nil
+	end
+	return lifted
+end
+
 allowLeaveBench = function()
 	if STATE.autoTrain ~= true then
+		return true
+	end
+	if STATE.bonusLift == true then
 		return true
 	end
 	if STATE.trainFocus == "speed" then
@@ -1218,8 +1350,29 @@ local function runStealTrip()
 	end
 	local target = peekPrehistoric()
 	if not target or not target.model.Parent then
+		local locked = bestLockedBonus()
+		if locked and liftBonusRock(locked.rock) and running() then
+			target = peekPrehistoric()
+			if (not target or not target.model.Parent) and locked.model.Parent then
+				local prompt = locked.model:FindFirstChild("StealPrompt", true)
+				if prompt and prompt:IsA("ProximityPrompt") then
+					target = {
+						model = locked.model,
+						prompt = prompt,
+						pos = locked.pos,
+						rarity = locked.rarity,
+						weight = 0,
+						mutation = 0,
+					}
+				end
+			end
+		end
+	end
+	if not target or not target.model.Parent then
+		STATE.bonusLift = false
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
+		activeGoal = nil
 		LocalPlayer:SetAttribute("CodexMode", "train")
 		STATE.nextSteal = os.clock() + 8
 		return
@@ -1300,6 +1453,7 @@ local function runStealTrip()
 		task.wait(0.35)
 	end
 	activeGoal = nil
+	STATE.bonusLift = false
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
 	STATE.nextSteal = os.clock() + (grabbed and 12 or 3)
@@ -1491,7 +1645,7 @@ local function webhookUrl()
 	return url
 end
 
-queueRare = function(kind, name, money)
+queueRare = function(kind, name, money, mark)
 	if STATE.webhookOn == false or STATE._unloaded then
 		return
 	end
@@ -1513,7 +1667,7 @@ queueRare = function(kind, name, money)
 			end
 		end
 	end
-	local stamp = kind .. "|" .. clean .. "|" .. rarity
+	local stamp = mark or (kind .. "|" .. clean .. "|" .. rarity)
 	local now = os.clock()
 	if STATE._hookStamp == stamp and now - (STATE._hookAt or 0) < 12 then
 		return
@@ -2123,7 +2277,8 @@ local function installHub()
 		{ "Auto Rebirth", "Rebirths when your strength is high enough.", "rebirth", "AutoRebirth" },
 		{ "Auto Upgrade", "Buys the gym, floors, and basement you can afford.", "upgrade", "AutoUpgrade" },
 		{ "Auto Trails", "Buys the best trail you can afford.", "trails", "AutoTrails" },
-		{ "Auto Steal", "Grabs the rarest egg in the zone you pick the moment one is there.", "autoSteal", "AutoSteal" },
+		{ "Auto Steal", "Grabs an egg in your zone when it is at your alert rarity or higher.", "autoSteal", "AutoSteal" },
+		{ "Bonus Rocks", "Lifts a bonus rock the normal way when a rare egg is stuck under it. No Robux.", "bonusRocks", "BonusRocks" },
 		{ "Auto Open", "Opens a placed egg when its timer is ready.", "autoOpen", "AutoOpen" },
 		{ "Equip Best", "Equips your best pets when your animals change.", "equipBest", "EquipBest" },
 		{ "Auto Daily", "Claims the daily reward when it is ready.", "autoDaily", "AutoDaily" },
@@ -2133,7 +2288,7 @@ local function installHub()
 		{ "Egg ESP", "A small label with the egg name and cash per second.", "eggEsp", "EggEsp" },
 		{ "Inventory ESP", "Shows what each bag pet earns, plus the bag total.", "invEsp", "InvEsp" },
 		{ "Low End", "Turns graphics down and skips extra effects for phones and weaker PCs.", "lowEnd", "LowEnd" },
-		{ "Webhook Alerts", "Sends a Discord message when you steal or hatch something rare.", "webhookOn", "WebhookAlerts" },
+		{ "Webhook Alerts", "Sends a Discord message when a rare egg shows up, you steal it, or it hatches.", "webhookOn", "WebhookAlerts" },
 	}
 	STATE.toggleControls = {}
 	for _, item in ipairs(toggles) do
@@ -2206,7 +2361,7 @@ local function installHub()
 		local options = { "Secret", "Eternal", "Divine", "Exclusive" }
 		local dropdown = tab:CreateDropdown({
 			name = "Alert Rarity",
-			description = "Ping when the pet is this rarity or higher.",
+			description = "Only steal and ping this rarity or higher.",
 			options = options,
 			currentOption = { STATE.webhookRarity or "Divine" },
 			flag = "WebhookRarity",
@@ -2560,7 +2715,7 @@ local function syncToggles()
 end
 
 local function pullHomeIfEmpty()
-	if not running() then
+	if not running() or STATE.bonusLift == true then
 		return
 	end
 	local eggs = prehistoricEggs()
@@ -2581,6 +2736,56 @@ local function pullHomeIfEmpty()
 	activeGoal = nil
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.CFrame = CFrame.new(homeSpot())
+end
+
+local function paintAnimals()
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local menu = playerGui and playerGui:FindFirstChild("ActiveBrainrotsNEW")
+	if not menu or not menu.Enabled then
+		return
+	end
+	local frame = menu:FindFirstChild("Frame")
+	local container = frame and frame:FindFirstChild("Container")
+	if not container then
+		return
+	end
+	local data = readData()
+	local pets = data and data.plotPets
+	local bag = data and data.backpack
+	if type(pets) ~= "table" and type(bag) ~= "table" then
+		return
+	end
+	local function petFor(uid)
+		local pet = type(pets) == "table" and pets[uid] or nil
+		if type(pet) == "table" then
+			return pet
+		end
+		if type(bag) ~= "table" then
+			return nil
+		end
+		pet = bag[uid]
+		if type(pet) == "table" then
+			return pet
+		end
+		for _, item in pairs(bag) do
+			if type(item) == "table" and item.uid == uid then
+				return item
+			end
+		end
+		return nil
+	end
+	for _, card in ipairs(container:GetChildren()) do
+		local pet = petFor(card.Name)
+		local label = card:FindFirstChild("DisplayName", true)
+		if type(pet) == "table" and pet.hatchAt == nil and label and label:IsA("TextLabel") and string.find(label.Text, "/s", 1, true) then
+			local money = Format.Short(shownIncome(pet))
+			local text = string.gsub(label.Text, "%$[^<%)]+/s", "$" .. money .. "/s", 1)
+			if label.Text ~= text then
+				label.RichText = true
+				label.Text = text
+			end
+		end
+	end
 end
 
 local knownPets = {}
@@ -2638,6 +2843,10 @@ STATE.connect(RunService.Heartbeat, function()
 	if os.clock() >= (STATE.nextHookScan or 0) then
 		STATE.nextHookScan = os.clock() + 2
 		pcall(scanNewPets)
+	end
+	if os.clock() >= (STATE.nextAnimals or 0) then
+		STATE.nextAnimals = os.clock() + 1
+		pcall(paintAnimals)
 	end
 	stepTrain()
 	if STATE.lowEnd ~= true or os.clock() >= (STATE.nextHome or 0) then
