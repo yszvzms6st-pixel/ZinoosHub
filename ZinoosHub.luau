@@ -66,12 +66,17 @@ do
 end
 
 local function closeLeftoverMenus()
+	for _, child in ipairs(CoreGui:GetChildren()) do
+		if child:IsA("ScreenGui") and child.Name == "ZinoosHubMenu" then
+			child:Destroy()
+		end
+	end
 	local root = CoreGui:FindFirstChild("RobloxGui")
 	if not root then
 		return
 	end
 	for _, child in ipairs(root:GetChildren()) do
-		if child:IsA("ScreenGui") and child:FindFirstChild("Zinoos hub") then
+		if child:IsA("ScreenGui") and (child.Name == "ZinoosHubMenu" or child:FindFirstChild("Zinoos hub")) then
 			child:Destroy()
 		end
 	end
@@ -2256,173 +2261,1022 @@ hubCleanup(function()
 	end
 end)
 
+local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ZinoosHub.rfld"
+
+local FLAG_KEYS = {
+	AutoTrain = "autoTrain",
+	AutoRebirth = "rebirth",
+	AutoUpgrade = "upgrade",
+	AutoTrails = "trails",
+	AutoSteal = "autoSteal",
+	BonusRocks = "bonusRocks",
+	AutoOpen = "autoOpen",
+	EquipBest = "equipBest",
+	AutoDaily = "autoDaily",
+	AutoIndex = "autoIndex",
+	FreeStash = "freeStash",
+	LitePets = "litePets",
+	EggEsp = "eggEsp",
+	InvEsp = "invEsp",
+	LowEnd = "lowEnd",
+	WebhookAlerts = "webhookOn",
+}
+
+local function loadSaved()
+	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(CONFIG_PATH) then
+		return
+	end
+	local ok, saved = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_PATH))
+	end)
+	if not ok or type(saved) ~= "table" then
+		return
+	end
+	for flag, key in pairs(FLAG_KEYS) do
+		if type(saved[flag]) == "boolean" then
+			STATE[key] = saved[flag]
+		end
+	end
+	STATE.autoSell = false
+	local zone = saved.StealZone
+	if type(zone) == "table" then
+		zone = zone[1]
+	end
+	if type(zone) == "string" then
+		STATE.stealZone = zoneChoice(zone)
+	end
+	local rarity = saved.WebhookRarity
+	if type(rarity) == "table" then
+		rarity = rarity[1]
+	end
+	if type(rarity) == "string" and rarityRank[rarity] then
+		STATE.webhookRarity = rarity
+	end
+	if type(saved.WebhookUrl) == "string" then
+		STATE.webhook = saved.WebhookUrl
+	end
+	applyLowEnd(STATE.lowEnd == true)
+end
+
+local function saveConfig()
+	if typeof(writefile) ~= "function" then
+		return
+	end
+	if typeof(makefolder) == "function" then
+		pcall(makefolder, "Rayfield")
+		pcall(makefolder, "Rayfield/Configurations")
+		pcall(makefolder, "Rayfield/Configurations/ZinoosHub")
+	end
+	local payload = {
+		AutoSell = false,
+		StealZone = { STATE.stealZone or "Prehistoric" },
+		WebhookRarity = { STATE.webhookRarity or "Divine" },
+		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
+	}
+	for flag, key in pairs(FLAG_KEYS) do
+		payload[flag] = STATE[key] == true
+	end
+	local ok, encoded = pcall(function()
+		return game:GetService("HttpService"):JSONEncode(payload)
+	end)
+	if ok then
+		pcall(writefile, CONFIG_PATH, encoded)
+	end
+end
+
 local function installHub()
 	closeLeftoverMenus()
-	local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
-	local window = Rayfield:CreateWindow({
-		name = "Zinoos hub",
-		subtitle = "Lift Rock",
-		sidebarLayout = true,
-		configuration = {
-			autoSave = true,
-			autoLoad = true,
-			fileName = "ZinoosHub",
-			customFolder = "ZinoosHub",
-		},
-	})
-	STATE.hubWindow = window
-	local tab = window:CreateTab({ name = "Main" })
-	local toggles = {
-		{ "Auto Train", "Bench for strength until max rebirth, then the treadmill.", "autoTrain", "AutoTrain" },
-		{ "Auto Rebirth", "Rebirths when your strength is high enough.", "rebirth", "AutoRebirth" },
-		{ "Auto Upgrade", "Buys the gym, floors, and basement you can afford.", "upgrade", "AutoUpgrade" },
-		{ "Auto Trails", "Buys the best trail you can afford.", "trails", "AutoTrails" },
-		{ "Auto Steal", "Grabs an egg in your zone when it is at your alert rarity or higher.", "autoSteal", "AutoSteal" },
-		{ "Bonus Rocks", "Lifts a bonus rock the normal way when a rare egg is stuck under it. No Robux.", "bonusRocks", "BonusRocks" },
-		{ "Auto Open", "Opens a placed egg when its timer is ready.", "autoOpen", "AutoOpen" },
-		{ "Equip Best", "Equips your best pets when your animals change.", "equipBest", "EquipBest" },
-		{ "Auto Daily", "Claims the daily reward when it is ready.", "autoDaily", "AutoDaily" },
-		{ "Auto Index", "Claims index rewards you have unlocked.", "autoIndex", "AutoIndex" },
-		{ "Free Stash", "Takes Brock's free stash card and leaves the paid ones.", "freeStash", "FreeStash" },
-		{ "Lite Pets", "Hides pet models on your screen so the game runs lighter. Your pets stay saved.", "litePets", "LitePets" },
-		{ "Egg ESP", "A small label with the egg name and cash per second.", "eggEsp", "EggEsp" },
-		{ "Inventory ESP", "Shows what each bag pet earns, plus the bag total.", "invEsp", "InvEsp" },
-		{ "Low End", "Turns graphics down and skips extra effects for phones and weaker PCs.", "lowEnd", "LowEnd" },
-		{ "Webhook Alerts", "Sends a Discord message when a rare egg shows up, you steal it, or it hatches.", "webhookOn", "WebhookAlerts" },
-	}
-	STATE.toggleControls = {}
-	for _, item in ipairs(toggles) do
-		local toggle = tab:CreateToggle({
-			name = item[1],
-			description = item[2],
-			flag = item[4],
-			value = STATE[item[3]] == true,
-			callback = function(value)
-				local on = value == true
-				STATE[item[3]] = on
-				if item[3] == "autoTrain" and not on then
-					lastSwitchAt = 0
-					releaseGym()
-				elseif item[3] == "equipBest" and on then
-					STATE.equipRoster = nil
-				elseif item[3] == "lowEnd" then
-					applyLowEnd(on)
-				elseif item[3] == "invEsp" and not on then
-					STATE._invShown = false
-					clearInvEsp()
-				end
-			end,
-		})
-		STATE.toggleControls[item[3]] = toggle or window.controls[item[4]]
+	loadSaved()
+
+	local accent = Color3.fromRGB(255, 79, 158)
+	local ink = Color3.fromRGB(245, 240, 248)
+	local muted = Color3.fromRGB(176, 160, 190)
+	local panel = Color3.fromRGB(24, 18, 32)
+	local side = Color3.fromRGB(32, 24, 42)
+	local cardColor = Color3.fromRGB(40, 30, 52)
+	local off = Color3.fromRGB(62, 48, 76)
+	local line = Color3.fromRGB(70, 52, 86)
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "ZinoosHubMenu"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 220
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.Parent = CoreGui
+
+	local uiScale = Instance.new("UIScale")
+	uiScale.Parent = gui
+	local function fitScale()
+		local camera = workspace.CurrentCamera
+		local view = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		local scale = math.min(view.X / 760, view.Y / 540, 1)
+		uiScale.Scale = math.clamp(scale, 0.62, 1)
 	end
-	pcall(function()
-		local options = {}
-		for _, name in ipairs(Zones.Order) do
-			options[#options + 1] = name
+	fitScale()
+	if workspace.CurrentCamera then
+		workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fitScale)
+	end
+
+	local launcher = Instance.new("TextButton")
+	launcher.Name = "Zinoos hub"
+	launcher.AutoButtonColor = false
+	launcher.Text = "Zinoos"
+	launcher.Font = Enum.Font.GothamBold
+	launcher.TextSize = 14
+	launcher.TextColor3 = ink
+	launcher.BackgroundColor3 = panel
+	launcher.Size = UDim2.fromOffset(92, 36)
+	launcher.Position = UDim2.new(1, -110, 0.62, 0)
+	launcher.Visible = false
+	launcher.Parent = gui
+	local launcherCorner = Instance.new("UICorner")
+	launcherCorner.CornerRadius = UDim.new(1, 0)
+	launcherCorner.Parent = launcher
+	local launcherStroke = Instance.new("UIStroke")
+	launcherStroke.Color = accent
+	launcherStroke.Thickness = 1.5
+	launcherStroke.Parent = launcher
+
+	local holder = Instance.new("Frame")
+	holder.Name = "Holder"
+	holder.AnchorPoint = Vector2.new(0.5, 0.5)
+	holder.Position = UDim2.fromScale(0.5, 0.5)
+	holder.Size = UDim2.fromOffset(700, 468)
+	holder.BackgroundTransparency = 1
+	holder.Parent = gui
+
+	local shadow = Instance.new("Frame")
+	shadow.BackgroundColor3 = Color3.new(0, 0, 0)
+	shadow.BackgroundTransparency = 0.45
+	shadow.BorderSizePixel = 0
+	shadow.Position = UDim2.fromOffset(0, 8)
+	shadow.Size = UDim2.fromScale(1, 1)
+	shadow.ZIndex = 1
+	shadow.Parent = holder
+	local shadowCorner = Instance.new("UICorner")
+	shadowCorner.CornerRadius = UDim.new(0, 18)
+	shadowCorner.Parent = shadow
+
+	local window = Instance.new("Frame")
+	window.Name = "Window"
+	window.BackgroundColor3 = panel
+	window.BorderSizePixel = 0
+	window.Size = UDim2.fromScale(1, 1)
+	window.ZIndex = 2
+	window.Parent = holder
+	local windowCorner = Instance.new("UICorner")
+	windowCorner.CornerRadius = UDim.new(0, 16)
+	windowCorner.Parent = window
+	local windowStroke = Instance.new("UIStroke")
+	windowStroke.Color = line
+	windowStroke.Thickness = 1
+	windowStroke.Parent = window
+
+	local sidebar = Instance.new("Frame")
+	sidebar.Name = "Sidebar"
+	sidebar.BackgroundColor3 = side
+	sidebar.BorderSizePixel = 0
+	sidebar.Size = UDim2.new(0, 168, 1, 0)
+	sidebar.ZIndex = 3
+	sidebar.Parent = window
+	local sideCorner = Instance.new("UICorner")
+	sideCorner.CornerRadius = UDim.new(0, 16)
+	sideCorner.Parent = sidebar
+	local sideFill = Instance.new("Frame")
+	sideFill.BackgroundColor3 = side
+	sideFill.BorderSizePixel = 0
+	sideFill.Position = UDim2.new(1, -16, 0, 0)
+	sideFill.Size = UDim2.new(0, 16, 1, 0)
+	sideFill.ZIndex = 3
+	sideFill.Parent = sidebar
+
+	local mark = Instance.new("Frame")
+	mark.BackgroundColor3 = accent
+	mark.BorderSizePixel = 0
+	mark.Position = UDim2.fromOffset(16, 16)
+	mark.Size = UDim2.fromOffset(28, 28)
+	mark.ZIndex = 4
+	mark.Parent = sidebar
+	local markCorner = Instance.new("UICorner")
+	markCorner.CornerRadius = UDim.new(1, 0)
+	markCorner.Parent = mark
+	local markText = Instance.new("TextLabel")
+	markText.BackgroundTransparency = 1
+	markText.Font = Enum.Font.GothamBlack
+	markText.Text = "Z"
+	markText.TextColor3 = Color3.new(1, 1, 1)
+	markText.TextSize = 16
+	markText.Size = UDim2.fromScale(1, 1)
+	markText.ZIndex = 5
+	markText.Parent = mark
+
+	local brand = Instance.new("TextLabel")
+	brand.BackgroundTransparency = 1
+	brand.Font = Enum.Font.GothamBold
+	brand.Text = "Zinoos"
+	brand.TextColor3 = ink
+	brand.TextSize = 16
+	brand.TextXAlignment = Enum.TextXAlignment.Left
+	brand.Position = UDim2.fromOffset(52, 14)
+	brand.Size = UDim2.new(1, -60, 0, 20)
+	brand.ZIndex = 4
+	brand.Parent = sidebar
+	local brandSub = Instance.new("TextLabel")
+	brandSub.BackgroundTransparency = 1
+	brandSub.Font = Enum.Font.Gotham
+	brandSub.Text = "Lift Rock"
+	brandSub.TextColor3 = muted
+	brandSub.TextSize = 12
+	brandSub.TextXAlignment = Enum.TextXAlignment.Left
+	brandSub.Position = UDim2.fromOffset(52, 32)
+	brandSub.Size = UDim2.new(1, -60, 0, 16)
+	brandSub.ZIndex = 4
+	brandSub.Parent = sidebar
+
+	local content = Instance.new("Frame")
+	content.BackgroundTransparency = 1
+	content.Position = UDim2.fromOffset(168, 0)
+	content.Size = UDim2.new(1, -168, 1, 0)
+	content.ZIndex = 3
+	content.Parent = window
+
+	local header = Instance.new("Frame")
+	header.BackgroundTransparency = 1
+	header.Size = UDim2.new(1, 0, 0, 52)
+	header.ZIndex = 4
+	header.Parent = content
+	local pageTitle = Instance.new("TextLabel")
+	pageTitle.BackgroundTransparency = 1
+	pageTitle.Font = Enum.Font.GothamBold
+	pageTitle.Text = "Home"
+	pageTitle.TextColor3 = ink
+	pageTitle.TextSize = 18
+	pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+	pageTitle.Position = UDim2.fromOffset(18, 0)
+	pageTitle.Size = UDim2.new(0.4, 0, 1, 0)
+	pageTitle.ZIndex = 4
+	pageTitle.Parent = header
+
+	local search = Instance.new("TextBox")
+	search.Name = "Search"
+	search.BackgroundColor3 = cardColor
+	search.BorderSizePixel = 0
+	search.ClearTextOnFocus = false
+	search.Font = Enum.Font.Gotham
+	search.PlaceholderText = "Search"
+	search.PlaceholderColor3 = muted
+	search.Text = ""
+	search.TextColor3 = ink
+	search.TextSize = 14
+	search.TextXAlignment = Enum.TextXAlignment.Left
+	search.AnchorPoint = Vector2.new(1, 0.5)
+	search.Position = UDim2.new(1, -52, 0.5, 0)
+	search.Size = UDim2.fromOffset(180, 32)
+	search.ZIndex = 5
+	search.Parent = header
+	local searchCorner = Instance.new("UICorner")
+	searchCorner.CornerRadius = UDim.new(0, 8)
+	searchCorner.Parent = search
+	local searchPad = Instance.new("UIPadding")
+	searchPad.PaddingLeft = UDim.new(0, 10)
+	searchPad.Parent = search
+
+	local closeButton = Instance.new("TextButton")
+	closeButton.AutoButtonColor = false
+	closeButton.Text = "X"
+	closeButton.Font = Enum.Font.GothamBold
+	closeButton.TextSize = 14
+	closeButton.TextColor3 = muted
+	closeButton.BackgroundTransparency = 1
+	closeButton.AnchorPoint = Vector2.new(1, 0.5)
+	closeButton.Position = UDim2.new(1, -12, 0.5, 0)
+	closeButton.Size = UDim2.fromOffset(28, 28)
+	closeButton.ZIndex = 5
+	closeButton.Parent = header
+
+	local pageHost = Instance.new("Frame")
+	pageHost.BackgroundTransparency = 1
+	pageHost.Position = UDim2.fromOffset(0, 52)
+	pageHost.Size = UDim2.new(1, 0, 1, -52)
+	pageHost.ZIndex = 4
+	pageHost.Parent = content
+
+	local pages = {}
+	local navButtons = {}
+	local function newPage(name)
+		local page = Instance.new("ScrollingFrame")
+		page.Name = name
+		page.BackgroundTransparency = 1
+		page.BorderSizePixel = 0
+		page.Size = UDim2.fromScale(1, 1)
+		page.ScrollBarThickness = 4
+		page.ScrollBarImageColor3 = accent
+		page.CanvasSize = UDim2.new()
+		page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		page.Visible = false
+		page.ZIndex = 4
+		page.Parent = pageHost
+		local pad = Instance.new("UIPadding")
+		pad.PaddingLeft = UDim.new(0, 16)
+		pad.PaddingRight = UDim.new(0, 16)
+		pad.PaddingTop = UDim.new(0, 4)
+		pad.PaddingBottom = UDim.new(0, 16)
+		pad.Parent = page
+		local layout = Instance.new("UIListLayout")
+		layout.Padding = UDim.new(0, 10)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = page
+		pages[name] = page
+		return page
+	end
+
+	local homePage = newPage("Home")
+	local mainPage = newPage("Main")
+	local discordPage = newPage("Discord")
+
+	local function showPage(name)
+		for pageName, page in pairs(pages) do
+			page.Visible = pageName == name
 		end
-		local dropdown = tab:CreateDropdown({
-			name = "Steal Zone",
-			description = "Only steals when an egg is in this zone.",
-			options = options,
-			currentOption = { STATE.stealZone or "Prehistoric" },
-			flag = "StealZone",
-			callback = function(value)
-				STATE.stealZone = zoneChoice(value)
-			end,
-		})
-		STATE.zoneControl = dropdown or window.controls.StealZone
-	end)
-	local sectionOk, sectionErr = pcall(function()
-		tab:CreateSection({ name = "Discord" })
-	end)
-	if not sectionOk then
-		warn("[Zinoos hub] discord section " .. tostring(sectionErr))
+		pageTitle.Text = name
+		for buttonName, button in pairs(navButtons) do
+			button.BackgroundTransparency = buttonName == name and 0 or 1
+		end
 	end
-	local inputOk, inputErr = pcall(function()
-		local input = tab:CreateInput({
-			name = "Discord Webhook",
-			description = "Paste your Discord webhook here.",
-			placeholder = "https://discord.com/api/webhooks/...",
-			default = STATE.webhook or "",
-			currentValue = STATE.webhook or "",
-			flag = "WebhookUrl",
-			callback = function(text)
-				if type(text) == "string" then
-					STATE.webhook = text
-				end
-			end,
-		})
-		STATE.webhookControl = input or window.controls.WebhookUrl
-	end)
-	if not inputOk then
-		warn("[Zinoos hub] webhook box " .. tostring(inputErr))
+
+	local function addNav(name, order)
+		local button = Instance.new("TextButton")
+		button.Name = name
+		button.AutoButtonColor = false
+		button.Text = "   " .. name
+		button.Font = Enum.Font.GothamMedium
+		button.TextSize = 14
+		button.TextColor3 = ink
+		button.TextXAlignment = Enum.TextXAlignment.Left
+		button.BackgroundColor3 = Color3.fromRGB(54, 36, 64)
+		button.BackgroundTransparency = 1
+		button.BorderSizePixel = 0
+		button.Position = UDim2.fromOffset(12, 64 + (order - 1) * 40)
+		button.Size = UDim2.new(1, -24, 0, 34)
+		button.ZIndex = 4
+		button.Parent = sidebar
+		local navCorner = Instance.new("UICorner")
+		navCorner.CornerRadius = UDim.new(0, 8)
+		navCorner.Parent = button
+		navButtons[name] = button
+		button.MouseButton1Click:Connect(function()
+			showPage(name)
+		end)
 	end
-	local rarityOk, rarityErr = pcall(function()
-		local options = { "Secret", "Eternal", "Divine", "Exclusive" }
-		local dropdown = tab:CreateDropdown({
-			name = "Alert Rarity",
-			description = "Only steal and ping this rarity or higher.",
-			options = options,
-			currentOption = { STATE.webhookRarity or "Divine" },
-			flag = "WebhookRarity",
-			callback = function(value)
-				local picked = value
-				if type(picked) == "table" then
-					picked = picked[1]
-				end
-				if type(picked) == "string" and rarityRank[picked] then
-					STATE.webhookRarity = picked
-				end
-			end,
-		})
-		STATE.rarityControl = dropdown or window.controls.WebhookRarity
+	addNav("Home", 1)
+	addNav("Main", 2)
+	addNav("Discord", 3)
+
+	local profile = Instance.new("Frame")
+	profile.BackgroundTransparency = 1
+	profile.AnchorPoint = Vector2.new(0, 1)
+	profile.Position = UDim2.new(0, 12, 1, -12)
+	profile.Size = UDim2.new(1, -24, 0, 42)
+	profile.ZIndex = 4
+	profile.Parent = sidebar
+	local avatar = Instance.new("ImageLabel")
+	avatar.BackgroundColor3 = cardColor
+	avatar.BorderSizePixel = 0
+	avatar.Size = UDim2.fromOffset(32, 32)
+	avatar.Position = UDim2.fromOffset(0, 5)
+	avatar.ZIndex = 5
+	avatar.Parent = profile
+	local avatarCorner = Instance.new("UICorner")
+	avatarCorner.CornerRadius = UDim.new(1, 0)
+	avatarCorner.Parent = avatar
+	task.spawn(function()
+		local ok, image = pcall(function()
+			return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+		end)
+		if ok and gui.Parent then
+			avatar.Image = image
+		end
 	end)
-	if not rarityOk then
-		warn("[Zinoos hub] alert rarity " .. tostring(rarityErr))
+	local profileName = Instance.new("TextLabel")
+	profileName.BackgroundTransparency = 1
+	profileName.Font = Enum.Font.GothamBold
+	profileName.Text = LocalPlayer.DisplayName
+	profileName.TextColor3 = ink
+	profileName.TextSize = 13
+	profileName.TextXAlignment = Enum.TextXAlignment.Left
+	profileName.TextTruncate = Enum.TextTruncate.AtEnd
+	profileName.Position = UDim2.fromOffset(40, 4)
+	profileName.Size = UDim2.new(1, -40, 0, 16)
+	profileName.ZIndex = 5
+	profileName.Parent = profile
+	local profileGame = Instance.new("TextLabel")
+	profileGame.BackgroundTransparency = 1
+	profileGame.Font = Enum.Font.Gotham
+	profileGame.Text = "Lift Rock For Eggs"
+	profileGame.TextColor3 = muted
+	profileGame.TextSize = 11
+	profileGame.TextXAlignment = Enum.TextXAlignment.Left
+	profileGame.Position = UDim2.fromOffset(40, 20)
+	profileGame.Size = UDim2.new(1, -40, 0, 14)
+	profileGame.ZIndex = 5
+	profileGame.Parent = profile
+
+	local function label(parent, text, size, color, font, height)
+		local item = Instance.new("TextLabel")
+		item.BackgroundTransparency = 1
+		item.Font = font or Enum.Font.Gotham
+		item.Text = text
+		item.TextColor3 = color or ink
+		item.TextSize = size or 14
+		item.TextWrapped = true
+		item.TextXAlignment = Enum.TextXAlignment.Left
+		item.TextYAlignment = Enum.TextYAlignment.Top
+		item.Size = UDim2.new(1, 0, 0, height or 20)
+		item.ZIndex = 5
+		item.Parent = parent
+		return item
 	end
-	local testOk, testErr = pcall(function()
-		tab:CreateButton({
-			name = "Test Webhook",
-			description = "Sends a test message to the webhook you pasted.",
-			callback = function()
-				local url = webhookUrl()
-				if not url then
-					return
-				end
-				task.spawn(function()
-					local okEncode, body = pcall(function()
-						return game:GetService("HttpService"):JSONEncode({
-							username = "Zinoos hub",
-							content = "Webhook connected. You'll get a ping when a rare pet is stolen or hatches.",
-						})
-					end)
-					if okEncode then
-						pcall(request, {
-							Url = url,
-							Method = "POST",
-							Headers = { ["Content-Type"] = "application/json" },
-							Body = body,
-						})
-					end
-				end)
-			end,
-		})
+
+	local function card(parent, title, order)
+		local box = Instance.new("Frame")
+		box.Name = title
+		box.BackgroundColor3 = cardColor
+		box.BorderSizePixel = 0
+		box.LayoutOrder = order
+		box.AutomaticSize = Enum.AutomaticSize.Y
+		box.Size = UDim2.new(1, 0, 0, 0)
+		box.ZIndex = 5
+		box.Parent = parent
+		local boxCorner = Instance.new("UICorner")
+		boxCorner.CornerRadius = UDim.new(0, 12)
+		boxCorner.Parent = box
+		local boxPad = Instance.new("UIPadding")
+		boxPad.PaddingTop = UDim.new(0, 10)
+		boxPad.PaddingBottom = UDim.new(0, 10)
+		boxPad.PaddingLeft = UDim.new(0, 12)
+		boxPad.PaddingRight = UDim.new(0, 12)
+		boxPad.Parent = box
+		local boxLayout = Instance.new("UIListLayout")
+		boxLayout.Padding = UDim.new(0, 6)
+		boxLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		boxLayout.Parent = box
+		local heading = label(box, title, 13, muted, Enum.Font.GothamBold, 16)
+		heading.LayoutOrder = 0
+		return box
+	end
+
+	local searchRows = {}
+	local function remember(row, cardFrame, text)
+		row:SetAttribute("ZinoosSearch", string.lower(text))
+		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text) }
+	end
+
+	local function paintSwitch(track, knob, on)
+		track.BackgroundColor3 = on and accent or off
+		knob.Position = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+	end
+
+	local function onToggle(key, on)
+		STATE[key] = on
+		if key == "autoTrain" and not on then
+			lastSwitchAt = 0
+			releaseGym()
+		elseif key == "equipBest" and on then
+			STATE.equipRoster = nil
+		elseif key == "lowEnd" then
+			applyLowEnd(on)
+		elseif key == "invEsp" and not on then
+			STATE._invShown = false
+			clearInvEsp()
+		end
+		saveConfig()
+	end
+
+	local function makeSwitch(parentBox, name, key, hint)
+		local row = Instance.new("Frame")
+		row.Name = name
+		row.BackgroundTransparency = 1
+		row.LayoutOrder = 1
+		row.Size = UDim2.new(1, 0, 0, hint and 40 or 30)
+		row.ZIndex = 6
+		row.Parent = parentBox
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamMedium
+		title.Text = name
+		title.TextColor3 = ink
+		title.TextSize = 14
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Size = UDim2.new(1, -52, 0, 18)
+		title.ZIndex = 6
+		title.Parent = row
+		if hint then
+			local note = Instance.new("TextLabel")
+			note.BackgroundTransparency = 1
+			note.Font = Enum.Font.Gotham
+			note.Text = hint
+			note.TextColor3 = muted
+			note.TextSize = 11
+			note.TextXAlignment = Enum.TextXAlignment.Left
+			note.Position = UDim2.fromOffset(0, 18)
+			note.Size = UDim2.new(1, -52, 0, 16)
+			note.ZIndex = 6
+			note.Parent = row
+		end
+		local track = Instance.new("TextButton")
+		track.AutoButtonColor = false
+		track.Text = ""
+		track.AnchorPoint = Vector2.new(1, 0.5)
+		track.Position = UDim2.new(1, 0, 0.5, 0)
+		track.Size = UDim2.fromOffset(36, 20)
+		track.ZIndex = 7
+		track.Parent = row
+		local trackCorner = Instance.new("UICorner")
+		trackCorner.CornerRadius = UDim.new(1, 0)
+		trackCorner.Parent = track
+		local knob = Instance.new("Frame")
+		knob.AnchorPoint = Vector2.new(0, 0.5)
+		knob.Size = UDim2.fromOffset(14, 14)
+		knob.BackgroundColor3 = Color3.new(1, 1, 1)
+		knob.BorderSizePixel = 0
+		knob.ZIndex = 8
+		knob.Parent = track
+		local knobCorner = Instance.new("UICorner")
+		knobCorner.CornerRadius = UDim.new(1, 0)
+		knobCorner.Parent = knob
+		local control = STATE.toggleControls[key]
+		if type(control) ~= "table" then
+			control = {}
+			STATE.toggleControls[key] = control
+		end
+		control.value = STATE[key] == true
+		paintSwitch(track, knob, control.value)
+		track.MouseButton1Click:Connect(function()
+			control.value = not control.value
+			paintSwitch(track, knob, control.value)
+			onToggle(key, control.value == true)
+		end)
+		remember(row, parentBox, name .. " " .. (hint or ""))
+		return row
+	end
+
+	local popupBlock = Instance.new("TextButton")
+	popupBlock.BackgroundTransparency = 1
+	popupBlock.Text = ""
+	popupBlock.Size = UDim2.fromScale(1, 1)
+	popupBlock.Visible = false
+	popupBlock.ZIndex = 20
+	popupBlock.Parent = window
+	local popup = Instance.new("Frame")
+	popup.BackgroundColor3 = Color3.fromRGB(32, 24, 44)
+	popup.BorderSizePixel = 0
+	popup.Visible = false
+	popup.ZIndex = 21
+	popup.AutomaticSize = Enum.AutomaticSize.Y
+	popup.Size = UDim2.fromOffset(180, 0)
+	popup.Parent = window
+	local popupCorner = Instance.new("UICorner")
+	popupCorner.CornerRadius = UDim.new(0, 10)
+	popupCorner.Parent = popup
+	local popupStroke = Instance.new("UIStroke")
+	popupStroke.Color = line
+	popupStroke.Parent = popup
+	local popupLayout = Instance.new("UIListLayout")
+	popupLayout.Parent = popup
+	local popupPad = Instance.new("UIPadding")
+	popupPad.PaddingTop = UDim.new(0, 4)
+	popupPad.PaddingBottom = UDim.new(0, 4)
+	popupPad.Parent = popup
+
+	local function closePopup()
+		popup.Visible = false
+		popupBlock.Visible = false
+		for _, child in ipairs(popup:GetChildren()) do
+			if child:IsA("TextButton") then
+				child:Destroy()
+			end
+		end
+	end
+	popupBlock.MouseButton1Click:Connect(closePopup)
+
+	local function openPopup(anchor, options, current, callback)
+		closePopup()
+		for _, option in ipairs(options) do
+			local choice = Instance.new("TextButton")
+			choice.AutoButtonColor = false
+			choice.BackgroundColor3 = option == current and Color3.fromRGB(64, 36, 58) or Color3.fromRGB(32, 24, 44)
+			choice.BackgroundTransparency = option == current and 0 or 1
+			choice.Text = "  " .. option
+			choice.Font = Enum.Font.Gotham
+			choice.TextSize = 13
+			choice.TextColor3 = ink
+			choice.TextXAlignment = Enum.TextXAlignment.Left
+			choice.Size = UDim2.new(1, 0, 0, 28)
+			choice.ZIndex = 22
+			choice.Parent = popup
+			choice.MouseButton1Click:Connect(function()
+				callback(option)
+				closePopup()
+			end)
+		end
+		local scale = uiScale.Scale
+		if scale <= 0 then
+			scale = 1
+		end
+		local origin = window.AbsolutePosition
+		local pos = anchor.AbsolutePosition
+		local height = anchor.AbsoluteSize.Y
+		popup.Position = UDim2.fromOffset((pos.X - origin.X) / scale, (pos.Y - origin.Y + height + 6) / scale)
+		popup.Visible = true
+		popupBlock.Visible = true
+	end
+
+	local function makeDropdown(parentBox, name, getValue, options, callback)
+		local row = Instance.new("Frame")
+		row.BackgroundTransparency = 1
+		row.LayoutOrder = 2
+		row.Size = UDim2.new(1, 0, 0, 30)
+		row.ZIndex = 6
+		row.Parent = parentBox
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamMedium
+		title.Text = name
+		title.TextColor3 = ink
+		title.TextSize = 14
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Size = UDim2.new(0.48, 0, 1, 0)
+		title.ZIndex = 6
+		title.Parent = row
+		local pick = Instance.new("TextButton")
+		pick.AutoButtonColor = false
+		pick.Font = Enum.Font.Gotham
+		pick.TextSize = 13
+		pick.TextColor3 = ink
+		pick.Text = getValue()
+		pick.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
+		pick.AnchorPoint = Vector2.new(1, 0.5)
+		pick.Position = UDim2.new(1, 0, 0.5, 0)
+		pick.Size = UDim2.fromOffset(132, 26)
+		pick.ZIndex = 7
+		pick.Parent = row
+		local pickCorner = Instance.new("UICorner")
+		pickCorner.CornerRadius = UDim.new(0, 8)
+		pickCorner.Parent = pick
+		pick.MouseButton1Click:Connect(function()
+			openPopup(pick, options, getValue(), function(option)
+				callback(option)
+				pick.Text = getValue()
+			end)
+		end)
+		remember(row, parentBox, name)
+		return pick
+	end
+
+	STATE.toggleControls = {}
+	STATE.zoneControl = {
+		value = STATE.stealZone,
+		currentOption = { STATE.stealZone },
+	}
+	STATE.rarityControl = {
+		value = STATE.webhookRarity,
+		currentOption = { STATE.webhookRarity or "Divine" },
+	}
+	STATE.webhookControl = {
+		value = STATE.webhook or "",
+		currentValue = STATE.webhook or "",
+	}
+
+	local columns = Instance.new("Frame")
+	columns.BackgroundTransparency = 1
+	columns.Size = UDim2.new(1, 0, 0, 0)
+	columns.AutomaticSize = Enum.AutomaticSize.Y
+	columns.Parent = mainPage
+	local columnLayout = Instance.new("UIListLayout")
+	columnLayout.FillDirection = Enum.FillDirection.Horizontal
+	columnLayout.Padding = UDim.new(0, 10)
+	columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	columnLayout.Parent = columns
+
+	local function column(order)
+		local frame = Instance.new("Frame")
+		frame.BackgroundTransparency = 1
+		frame.LayoutOrder = order
+		frame.Size = UDim2.new(0.5, -5, 0, 0)
+		frame.AutomaticSize = Enum.AutomaticSize.Y
+		frame.Parent = columns
+		local layout = Instance.new("UIListLayout")
+		layout.Padding = UDim.new(0, 10)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = frame
+		return frame
+	end
+	local leftColumn = column(1)
+	local rightColumn = column(2)
+
+	local eggs = card(leftColumn, "EGGS", 1)
+	makeSwitch(eggs, "Auto Steal", "autoSteal", "Teleports onto a rare egg, then comes back")
+	local zoneOptions = {}
+	for _, zoneName in ipairs(Zones.Order) do
+		zoneOptions[#zoneOptions + 1] = zoneName
+	end
+	if #zoneOptions == 0 then
+		zoneOptions[1] = "Prehistoric"
+	end
+	makeDropdown(eggs, "Steal Zone", function()
+		return STATE.stealZone or "Prehistoric"
+	end, zoneOptions, function(option)
+		STATE.stealZone = zoneChoice(option)
+		STATE.zoneControl.value = STATE.stealZone
+		STATE.zoneControl.currentOption = { STATE.stealZone }
+		saveConfig()
 	end)
-	if not testOk then
-		warn("[Zinoos hub] test webhook " .. tostring(testErr))
-	end
-	local unloadOk, unloadErr = pcall(function()
-		tab:CreateButton({
-			name = "Unload",
-			description = "Stops the hub and removes everything it added.",
-			callback = function()
-				task.defer(unloadHub)
-			end,
-		})
+	makeDropdown(eggs, "Alert Rarity", function()
+		return STATE.webhookRarity or "Divine"
+	end, { "Secret", "Eternal", "Divine", "Exclusive" }, function(option)
+		if rarityRank[option] then
+			STATE.webhookRarity = option
+			STATE.rarityControl.value = option
+			STATE.rarityControl.currentOption = { option }
+			saveConfig()
+		end
 	end)
-	if not unloadOk then
-		warn("[Zinoos hub] unload button " .. tostring(unloadErr))
+	makeSwitch(eggs, "Bonus Rocks", "bonusRocks", "Leave off if the rock is too heavy")
+
+	local pets = card(leftColumn, "PETS", 2)
+	makeSwitch(pets, "Auto Open", "autoOpen")
+	makeSwitch(pets, "Equip Best", "equipBest")
+
+	local screenCard = card(leftColumn, "SCREEN", 3)
+	makeSwitch(screenCard, "Lite Pets", "litePets")
+	makeSwitch(screenCard, "Egg ESP", "eggEsp")
+	makeSwitch(screenCard, "Inventory ESP", "invEsp")
+	makeSwitch(screenCard, "Low End", "lowEnd")
+
+	local training = card(rightColumn, "TRAINING", 1)
+	makeSwitch(training, "Auto Train", "autoTrain")
+	makeSwitch(training, "Auto Rebirth", "rebirth")
+
+	local upgrades = card(rightColumn, "UPGRADES", 2)
+	makeSwitch(upgrades, "Auto Upgrade", "upgrade")
+	makeSwitch(upgrades, "Auto Trails", "trails")
+	makeSwitch(upgrades, "Auto Daily", "autoDaily")
+	makeSwitch(upgrades, "Auto Index", "autoIndex")
+	makeSwitch(upgrades, "Free Stash", "freeStash")
+
+	local function statChip(parentFrame, title, order)
+		local chip = Instance.new("Frame")
+		chip.BackgroundColor3 = cardColor
+		chip.BorderSizePixel = 0
+		chip.LayoutOrder = order
+		chip.Size = UDim2.new(0.5, -5, 0, 58)
+		chip.ZIndex = 5
+		chip.Parent = parentFrame
+		local chipCorner = Instance.new("UICorner")
+		chipCorner.CornerRadius = UDim.new(0, 12)
+		chipCorner.Parent = chip
+		local chipTitle = Instance.new("TextLabel")
+		chipTitle.BackgroundTransparency = 1
+		chipTitle.Font = Enum.Font.Gotham
+		chipTitle.Text = title
+		chipTitle.TextColor3 = muted
+		chipTitle.TextSize = 12
+		chipTitle.TextXAlignment = Enum.TextXAlignment.Left
+		chipTitle.Position = UDim2.fromOffset(12, 8)
+		chipTitle.Size = UDim2.new(1, -20, 0, 16)
+		chipTitle.ZIndex = 6
+		chipTitle.Parent = chip
+		local chipValue = Instance.new("TextLabel")
+		chipValue.BackgroundTransparency = 1
+		chipValue.Font = Enum.Font.GothamBold
+		chipValue.Text = "-"
+		chipValue.TextColor3 = ink
+		chipValue.TextSize = 18
+		chipValue.TextXAlignment = Enum.TextXAlignment.Left
+		chipValue.Position = UDim2.fromOffset(12, 26)
+		chipValue.Size = UDim2.new(1, -20, 0, 24)
+		chipValue.ZIndex = 6
+		chipValue.Parent = chip
+		return chipValue
 	end
+
+	local welcome = label(homePage, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
+	welcome.LayoutOrder = 1
+	local blurb = label(homePage, "Stays on your bench. Teleports onto a rare egg, grabs it, and comes back.", 14, muted, Enum.Font.Gotham, 36)
+	blurb.LayoutOrder = 2
+	local statGrid = Instance.new("Frame")
+	statGrid.BackgroundTransparency = 1
+	statGrid.LayoutOrder = 3
+	statGrid.Size = UDim2.new(1, 0, 0, 126)
+	statGrid.Parent = homePage
+	local strengthText = statChip(statGrid, "Strength", 1)
+	strengthText.Parent.Position = UDim2.fromOffset(0, 0)
+	local cashText = statChip(statGrid, "Cash", 2)
+	cashText.Parent.Position = UDim2.new(0.5, 5, 0, 0)
+	local rebirthText = statChip(statGrid, "Rebirths", 3)
+	rebirthText.Parent.Position = UDim2.fromOffset(0, 68)
+	local speedText = statChip(statGrid, "Speed", 4)
+	speedText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
+
+	local note = card(homePage, "HOW IT WORKS", 4)
+	local noteBody = label(note, "Alert Rarity decides which eggs are worth standing up for. Weaker eggs leave you training. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 48)
+	noteBody.LayoutOrder = 1
+
+	local discordBlurb = label(discordPage, "Get a Discord message when a rare egg shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 40)
+	discordBlurb.LayoutOrder = 1
+	local discordCard = card(discordPage, "WEBHOOK", 2)
+	makeSwitch(discordCard, "Webhook Alerts", "webhookOn")
+	local urlBox = Instance.new("TextBox")
+	urlBox.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
+	urlBox.BorderSizePixel = 0
+	urlBox.ClearTextOnFocus = false
+	urlBox.Font = Enum.Font.Gotham
+	urlBox.PlaceholderText = "https://discord.com/api/webhooks/..."
+	urlBox.PlaceholderColor3 = muted
+	urlBox.Text = STATE.webhook or ""
+	urlBox.TextColor3 = ink
+	urlBox.TextSize = 13
+	urlBox.TextXAlignment = Enum.TextXAlignment.Left
+	urlBox.LayoutOrder = 3
+	urlBox.Size = UDim2.new(1, 0, 0, 32)
+	urlBox.ZIndex = 6
+	urlBox.Parent = discordCard
+	local urlCorner = Instance.new("UICorner")
+	urlCorner.CornerRadius = UDim.new(0, 8)
+	urlCorner.Parent = urlBox
+	local urlPad = Instance.new("UIPadding")
+	urlPad.PaddingLeft = UDim.new(0, 8)
+	urlPad.PaddingRight = UDim.new(0, 8)
+	urlPad.Parent = urlBox
+	urlBox.FocusLost:Connect(function()
+		STATE.webhook = urlBox.Text
+		STATE.webhookControl.value = urlBox.Text
+		STATE.webhookControl.currentValue = urlBox.Text
+		saveConfig()
+	end)
+	remember(urlBox, discordCard, "discord webhook")
+
+	local function actionButton(parentFrame, text, order, filled, callback)
+		local button = Instance.new("TextButton")
+		button.AutoButtonColor = false
+		button.Font = Enum.Font.GothamBold
+		button.Text = text
+		button.TextSize = 14
+		button.TextColor3 = filled and Color3.new(1, 1, 1) or ink
+		button.BackgroundColor3 = filled and accent or Color3.fromRGB(28, 20, 38)
+		button.LayoutOrder = order
+		button.Size = UDim2.new(1, 0, 0, 34)
+		button.ZIndex = 6
+		button.Parent = parentFrame
+		local buttonCorner = Instance.new("UICorner")
+		buttonCorner.CornerRadius = UDim.new(0, 8)
+		buttonCorner.Parent = button
+		button.MouseButton1Click:Connect(callback)
+		remember(button, parentFrame, text)
+		return button
+	end
+
+	actionButton(discordCard, "Test Webhook", 4, false, function()
+		local url = webhookUrl()
+		if not url then
+			return
+		end
+		task.spawn(function()
+			local okEncode, body = pcall(function()
+				return game:GetService("HttpService"):JSONEncode({
+					username = "Zinoos hub",
+					content = "Webhook connected. You'll get a ping when a rare egg shows up, is stolen, or hatches.",
+				})
+			end)
+			if okEncode then
+				pcall(request, {
+					Url = url,
+					Method = "POST",
+					Headers = { ["Content-Type"] = "application/json" },
+					Body = body,
+				})
+			end
+		end)
+	end)
+	actionButton(discordCard, "Unload", 5, true, function()
+		task.defer(unloadHub)
+	end)
+
+	local function applySearch()
+		local query = string.lower(search.Text)
+		local used = {}
+		for _, item in ipairs(searchRows) do
+			local show = query == "" or string.find(item.text, query, 1, true) ~= nil
+			item.row.Visible = show
+			if show then
+				used[item.card] = true
+			end
+		end
+		for _, item in ipairs(searchRows) do
+			item.card.Visible = used[item.card] == true or query == ""
+		end
+		if query ~= "" and not mainPage.Visible and not discordPage.Visible then
+			showPage("Main")
+		end
+	end
+	search:GetPropertyChangedSignal("Text"):Connect(applySearch)
+
+	local function refreshHome()
+		local data = readData()
+		local strength = LocalPlayer:GetAttribute("Strength")
+		if type(strength) ~= "number" then
+			strength = data and data.strength or 0
+		end
+		local speed = LocalPlayer:GetAttribute("Speed")
+		if type(speed) ~= "number" then
+			speed = data and data.speed or 0
+		end
+		local rebirths = LocalPlayer:GetAttribute("Rebirths")
+		if type(rebirths) ~= "number" then
+			rebirths = data and data.rebirths or 0
+		end
+		strengthText.Text = Format.Short(strength or 0)
+		cashText.Text = "$" .. Format.Short((data and data.cash) or 0)
+		rebirthText.Text = tostring(rebirths or 0)
+		speedText.Text = Format.Short(speed or 0)
+	end
+	refreshHome()
+	task.spawn(function()
+		while running() and gui.Parent do
+			if homePage.Visible then
+				pcall(refreshHome)
+			end
+			task.wait(1)
+		end
+	end)
+
+	showPage("Home")
+
+	local dragging = false
+	local dragStart = nil
+	local startPos = nil
+	sidebar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = holder.Position
+		end
+	end)
+	sidebar.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	local dragConn = UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragStart and startPos then
+			local delta = input.Position - dragStart
+			holder.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X / uiScale.Scale, startPos.Y.Scale, startPos.Y.Offset + delta.Y / uiScale.Scale)
+		end
+	end)
+	local dragEndConn = UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	local function setOpen(open)
+		holder.Visible = open
+		shadow.Visible = open
+		launcher.Visible = not open
+	end
+	closeButton.MouseButton1Click:Connect(function()
+		setOpen(false)
+	end)
+	launcher.MouseButton1Click:Connect(function()
+		setOpen(true)
+	end)
+
+	local keyConn = UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or search:IsFocused() or urlBox:IsFocused() then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.RightControl then
+			setOpen(not holder.Visible)
+		end
+	end)
+
+	STATE.hubWindow = {
+		Unload = function()
+			if keyConn then
+				keyConn:Disconnect()
+			end
+			if dragConn then
+				dragConn:Disconnect()
+			end
+			if dragEndConn then
+				dragEndConn:Disconnect()
+			end
+			if gui.Parent then
+				gui:Destroy()
+			end
+		end,
+	}
 end
 
 task.spawn(function()
@@ -2823,6 +3677,8 @@ local function scanNewPets()
 	walk(data.backpack)
 	petsReady = true
 end
+
+loadSaved()
 
 local nextBubble = 0
 STATE.connect(RunService.Heartbeat, function()
