@@ -191,9 +191,7 @@ end
 if STATE.autoOpen == nil then
 	STATE.autoOpen = true
 end
-if STATE.autoSell == nil then
-	STATE.autoSell = true
-end
+STATE.autoSell = false
 if STATE.autoDaily == nil then
 	STATE.autoDaily = true
 end
@@ -1181,60 +1179,6 @@ local function dismissPurchase()
 	end
 end
 
-local function petIncome(pet)
-	local ok, income = pcall(Pets.IncomeFor, pet)
-	if ok and type(income) == "number" then
-		return income
-	end
-	return 0
-end
-
-local function stepSellWeak()
-	if STATE.autoSell ~= true then
-		return
-	end
-	if os.clock() < (STATE.nextSell or 0) then
-		return
-	end
-	local data = readData()
-	if not data then
-		return
-	end
-	local worst = math.huge
-	local anyPlot = false
-	for _, pet in pairs(data.plotPets or {}) do
-		if type(pet) == "table" and pet.hatchAt == nil then
-			local spec = Pets.Specs[pet.key]
-			if not (spec and spec.IsEgg) then
-				anyPlot = true
-				worst = math.min(worst, petIncome(pet))
-			end
-		end
-	end
-	if not anyPlot then
-		return
-	end
-	local victim = nil
-	local victimIncome = math.huge
-	for _, pet in pairs(data.backpack or {}) do
-		if type(pet) == "table" and pet.uid and pet.hatchAt == nil then
-			local spec = Pets.Specs[pet.key]
-			if not (spec and spec.IsEgg) then
-				local income = petIncome(pet)
-				if income < worst and income < victimIncome then
-					victim = pet
-					victimIncome = income
-				end
-			end
-		end
-	end
-	if not victim then
-		return
-	end
-	STATE.nextSell = os.clock() + 0.4
-	Net:FireServer("SellPet", victim.uid)
-end
-
 local function stepDaily()
 	if STATE.autoDaily ~= true then
 		return
@@ -1380,7 +1324,6 @@ local function installHub()
 		{ "Auto Steal", "Takes the rarest egg in the zone you pick, only when one is there.", "autoSteal", "AutoSteal" },
 		{ "Auto Open", "Opens a placed egg when its timer is ready.", "autoOpen", "AutoOpen" },
 		{ "Equip Best", "Equips your best pets when your animals change.", "equipBest", "EquipBest" },
-		{ "Auto Sell Weak", "Sells stored pets that earn less than the ones on your plot.", "autoSell", "AutoSell" },
 		{ "Auto Daily", "Claims the daily reward when it is ready.", "autoDaily", "AutoDaily" },
 		{ "Auto Index", "Claims index rewards you have unlocked.", "autoIndex", "AutoIndex" },
 		{ "Free Stash", "Takes Brock's free stash card and leaves the paid ones.", "freeStash", "FreeStash" },
@@ -1648,7 +1591,6 @@ STATE.connect(RunService.Heartbeat, function()
 	pcall(clearBestNotices)
 	pcall(stepOpenEggs)
 	pcall(stepEquipBest)
-	pcall(stepSellWeak)
 	pcall(stepDaily)
 	pcall(stepIndex)
 	pcall(stepStash)
