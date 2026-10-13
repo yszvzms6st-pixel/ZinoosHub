@@ -79,6 +79,7 @@ local Rarities = require(Shared.Configs.Rarities)
 local Wild = require(Shared.Configs.Wild)
 local Zones = require(Shared.Configs.Zones)
 local DailyRewards = require(Shared.Configs.DailyRewards)
+local Format = require(Shared.Format)
 local ClientRegistry = require(LocalPlayer:WaitForChild("PlayerScripts").Client.Lib.ClientRegistry)
 
 local LOOK_POS = Vector3.new(190, 8, -6420)
@@ -200,6 +201,12 @@ if STATE.autoIndex == nil then
 end
 if STATE.freeStash == nil then
 	STATE.freeStash = true
+end
+if STATE.litePets == nil then
+	STATE.litePets = true
+end
+if STATE.eggEsp == nil then
+	STATE.eggEsp = true
 end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Prehistoric"
@@ -459,6 +466,19 @@ STATE.onCleanup(function()
 	end
 	if hubMarker.Parent then
 		hubMarker:Destroy()
+	end
+	local live = workspace:FindFirstChild("Live")
+	if live then
+		for _, child in ipairs(live:GetDescendants()) do
+			if child.Name == "ZinoosEggValue" then
+				child:Destroy()
+			elseif child:IsA("BasePart") then
+				child.LocalTransparencyModifier = 0
+			elseif child:GetAttribute("ZinoosHid") == true then
+				child.Enabled = true
+				child:SetAttribute("ZinoosHid", nil)
+			end
+		end
 	end
 	local hubWindow = STATE.hubWindow
 	if hubWindow then
@@ -1074,44 +1094,49 @@ local function runStealTrip()
 		return
 	end
 	STATE.liftSteal = true
+	STATE.stealGoal = nil
 	LocalPlayer:SetAttribute("CodexMode", "steal")
 	homeSpot()
 	local grabbed = false
 	local stolenName = target.model.Name
-	local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
-	STATE.stealGoal = CFrame.new(stand)
+	local releaseLimit = os.clock() + 0.8
+	while not releaseGym() and os.clock() < releaseLimit and running() do
+		task.wait(0.1)
+	end
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if hrp then
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if hrp and target.model.Parent and target.prompt and target.prompt.Parent then
+		target.prompt.HoldDuration = 0
+		target.prompt.RequiresLineOfSight = false
+		for _, part in ipairs(target.model:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CanCollide = false
+			end
+		end
+		local savedCollide = {}
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				savedCollide[part] = part.CanCollide
+				part.CanCollide = false
+			end
+		end
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid.Sit = false
+		end
+		local stand = target.model:GetPivot().Position + Vector3.new(0, 3, 0)
+		STATE.stealGoal = CFrame.new(stand)
 		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
 		hrp.CFrame = STATE.stealGoal
-	end
-	for _ = 1, 12 do
-		if not running() then
-			break
-		end
-		if releaseGym() then
-			break
-		end
-		task.wait(0.2)
-	end
-	for _ = 1, 6 do
-		if not running() or STATE.autoSteal ~= true or grabbed then
-			break
-		end
-		if not target.model.Parent then
-			break
-		end
-		stolenName = target.model.Name
-		STATE.stealGoal = CFrame.new(target.model:GetPivot().Position + Vector3.new(0, 4, 0))
-		task.wait(0.3)
-		local character = LocalPlayer.Character
-		local hrp = character and character:FindFirstChild("HumanoidRootPart")
-		local dist = hrp and (target.model:GetPivot().Position - hrp.Position).Magnitude or 999
-		if dist <= 18 and target.prompt.Parent then
-			fireproximityprompt(target.prompt)
-			task.wait(0.45)
-			grabbed = LocalPlayer:GetAttribute("holdingFriend") == true
+		fireproximityprompt(target.prompt)
+		task.wait(0.12)
+		grabbed = LocalPlayer:GetAttribute("holdingFriend") == true
+		for part, collide in pairs(savedCollide) do
+			if part.Parent then
+				part.CanCollide = collide
+			end
 		end
 	end
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
@@ -1301,6 +1326,151 @@ local function popFreeBubbles()
 	end
 end
 
+local eggValue = {}
+for _, spec in pairs(Pets.Specs) do
+	if type(spec) == "table" and type(spec.DisplayName) == "string" and type(spec.Income) == "number" and not spec.IsEgg then
+		eggValue[spec.DisplayName] = spec.Income
+		eggValue[spec.DisplayName .. " Egg"] = spec.Income
+	end
+end
+
+local function eggValueText(model)
+	local income = eggValue[model.Name]
+	if not income then
+		income = eggValue[string.gsub(model.Name, " Egg$", "")]
+	end
+	if not income then
+		return model.Name
+	end
+	return model.Name .. "  $" .. Format.Short(income) .. "/s"
+end
+
+local function hideVisual(model)
+	local animator = model:FindFirstChildWhichIsA("Animator", true)
+	if animator then
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+			track:Stop()
+		end
+	end
+	for _, child in ipairs(model:GetDescendants()) do
+		if child:IsA("BasePart") then
+			child.LocalTransparencyModifier = 1
+		elseif child:IsA("ParticleEmitter") or child:IsA("Trail") or child:IsA("Beam") or child:IsA("Light") then
+			if child.Enabled then
+				child:SetAttribute("ZinoosHid", true)
+				child.Enabled = false
+			end
+		end
+	end
+end
+
+local function showVisual(model)
+	for _, child in ipairs(model:GetDescendants()) do
+		if child:IsA("BasePart") then
+			child.LocalTransparencyModifier = 0
+		elseif child:GetAttribute("ZinoosHid") == true then
+			child.Enabled = true
+			child:SetAttribute("ZinoosHid", nil)
+		end
+	end
+end
+
+local function ensureEggTag(model)
+	local existing = model:FindFirstChild("ZinoosEggValue")
+	if existing then
+		return existing
+	end
+	local adornee = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+	if not adornee then
+		return nil
+	end
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "ZinoosEggValue"
+	billboard.Adornee = adornee
+	billboard.AlwaysOnTop = true
+	billboard.LightInfluence = 0
+	billboard.MaxDistance = 280
+	billboard.Size = UDim2.fromOffset(180, 28)
+	billboard.StudsOffset = Vector3.new(0, 3, 0)
+	local label = Instance.new("TextLabel")
+	label.Name = "Value"
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamBold
+	label.Size = UDim2.fromScale(1, 1)
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.TextSize = 14
+	label.TextStrokeTransparency = 0.35
+	label.Parent = billboard
+	billboard.Parent = model
+	return billboard
+end
+
+local function stepView()
+	local live = workspace:FindFirstChild("Live")
+	if not live then
+		return
+	end
+	local friends = live:FindFirstChild("Friends")
+	local owned = live:FindFirstChild("PlayerFriends")
+	local lite = STATE.litePets == true
+	local function eachPlaced(callback)
+		if not owned then
+			return
+		end
+		for _, folder in ipairs(owned:GetChildren()) do
+			for _, model in ipairs(folder:GetChildren()) do
+				if model:IsA("Model") then
+					callback(model)
+				end
+			end
+		end
+	end
+	if lite then
+		eachPlaced(hideVisual)
+		if friends then
+			for _, model in ipairs(friends:GetChildren()) do
+				if model:IsA("Model") then
+					hideVisual(model)
+				end
+			end
+		end
+	elseif STATE._liteWasOn == true then
+		eachPlaced(showVisual)
+		if friends then
+			for _, model in ipairs(friends:GetChildren()) do
+				if model:IsA("Model") then
+					showVisual(model)
+				end
+			end
+		end
+	end
+	STATE._liteWasOn = lite
+	if not friends then
+		return
+	end
+	local zone = stealZone()
+	for _, model in ipairs(friends:GetChildren()) do
+		if model:IsA("Model") then
+			local show = STATE.eggEsp == true and model:GetAttribute("SpawnZone") == zone
+			local tag = model:FindFirstChild("ZinoosEggValue")
+			if show then
+				local pos = model:GetPivot().Position
+				if inZone(pos, zone) then
+					tag = tag or ensureEggTag(model)
+					local label = tag and tag:FindFirstChild("Value")
+					if label then
+						label.Text = eggValueText(model)
+					end
+				elseif tag then
+					tag:Destroy()
+				end
+			elseif tag then
+				tag:Destroy()
+			end
+		end
+	end
+end
+
 local function installHub()
 	local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 	local window = Rayfield:CreateWindow({
@@ -1321,12 +1491,14 @@ local function installHub()
 		{ "Auto Rebirth", "Rebirths when your strength is high enough.", "rebirth", "AutoRebirth" },
 		{ "Auto Upgrade", "Buys the gym, floors, and basement you can afford.", "upgrade", "AutoUpgrade" },
 		{ "Auto Trails", "Buys the best trail you can afford.", "trails", "AutoTrails" },
-		{ "Auto Steal", "Takes the rarest egg in the zone you pick, only when one is there.", "autoSteal", "AutoSteal" },
+		{ "Auto Steal", "Grabs the rarest egg in the zone you pick the moment one is there.", "autoSteal", "AutoSteal" },
 		{ "Auto Open", "Opens a placed egg when its timer is ready.", "autoOpen", "AutoOpen" },
 		{ "Equip Best", "Equips your best pets when your animals change.", "equipBest", "EquipBest" },
 		{ "Auto Daily", "Claims the daily reward when it is ready.", "autoDaily", "AutoDaily" },
 		{ "Auto Index", "Claims index rewards you have unlocked.", "autoIndex", "AutoIndex" },
 		{ "Free Stash", "Takes Brock's free stash card and leaves the paid ones.", "freeStash", "FreeStash" },
+		{ "Lite Pets", "Hides pet models on your screen so the game runs lighter. Your pets stay saved.", "litePets", "LitePets" },
+		{ "Egg ESP", "A small label with the egg name and cash per second.", "eggEsp", "EggEsp" },
 	}
 	STATE.toggleControls = {}
 	for _, item in ipairs(toggles) do
@@ -1576,6 +1748,10 @@ STATE.connect(RunService.Heartbeat, function()
 	STATE.train = false
 	STATE.stealing = false
 	syncToggles()
+	if os.clock() >= (STATE.nextView or 0) then
+		STATE.nextView = os.clock() + 0.5
+		pcall(stepView)
+	end
 	stepTrain()
 	task.defer(function()
 		task.defer(pullHomeIfEmpty)
