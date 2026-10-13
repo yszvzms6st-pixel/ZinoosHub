@@ -2315,6 +2315,19 @@ local function loadSaved()
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
+	if type(saved.MenuX) == "number" then
+		STATE.menuX = saved.MenuX
+	end
+	if type(saved.MenuY) == "number" then
+		STATE.menuY = saved.MenuY
+	end
+	if type(saved.DockX) == "number" then
+		STATE.dockX = saved.DockX
+	end
+	if type(saved.DockY) == "number" then
+		STATE.dockY = saved.DockY
+	end
+	STATE.dockCustom = saved.DockCustom == true
 	applyLowEnd(STATE.lowEnd == true)
 end
 
@@ -2332,6 +2345,11 @@ local function saveConfig()
 		StealZone = { STATE.stealZone or "Prehistoric" },
 		WebhookRarity = { STATE.webhookRarity or "Divine" },
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
+		MenuX = STATE.menuX,
+		MenuY = STATE.menuY,
+		DockX = STATE.dockX,
+		DockY = STATE.dockY,
+		DockCustom = STATE.dockCustom == true,
 	}
 	for flag, key in pairs(FLAG_KEYS) do
 		payload[flag] = STATE[key] == true
@@ -2374,9 +2392,6 @@ local function installHub()
 		uiScale.Scale = math.clamp(scale, 0.62, 1)
 	end
 	fitScale()
-	if workspace.CurrentCamera then
-		workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fitScale)
-	end
 
 	local launcher = Instance.new("TextButton")
 	launcher.Name = "Zinoos hub"
@@ -2502,7 +2517,10 @@ local function installHub()
 	content.Parent = window
 
 	local header = Instance.new("Frame")
-	header.BackgroundTransparency = 1
+	header.Name = "DragBar"
+	header.Active = true
+	header.BackgroundColor3 = Color3.fromRGB(32, 24, 42)
+	header.BorderSizePixel = 0
 	header.Size = UDim2.new(1, 0, 0, 52)
 	header.ZIndex = 4
 	header.Parent = content
@@ -3213,30 +3231,100 @@ local function installHub()
 
 	showPage("Home")
 
-	local dragging = false
+	local function viewSize()
+		local camera = workspace.CurrentCamera
+		return camera and camera.ViewportSize or Vector2.new(1280, 720)
+	end
+
+	local function placeTopLeft(obj, absX, absY)
+		local parentPos = obj.Parent.AbsolutePosition
+		local scale = uiScale.Scale
+		if scale < 0.05 then
+			scale = 1
+		end
+		local size = obj.AbsoluteSize
+		local anchor = obj.AnchorPoint
+		obj.Position = UDim2.fromOffset((absX - parentPos.X + anchor.X * size.X) / scale, (absY - parentPos.Y + anchor.Y * size.Y) / scale)
+	end
+
+	local function clampObject(obj)
+		local view = viewSize()
+		local size = obj.AbsoluteSize
+		local pos = obj.AbsolutePosition
+		local x = math.clamp(pos.X, 0, math.max(0, view.X - size.X))
+		local y = math.clamp(pos.Y, 0, math.max(0, view.Y - size.Y))
+		if math.abs(x - pos.X) > 1 or math.abs(y - pos.Y) > 1 then
+			placeTopLeft(obj, x, y)
+		end
+	end
+
+	local function rememberSpot(obj, keyX, keyY)
+		local view = viewSize()
+		if view.X < 1 or view.Y < 1 then
+			return
+		end
+		local pos = obj.AbsolutePosition
+		STATE[keyX] = pos.X / view.X
+		STATE[keyY] = pos.Y / view.Y
+		saveConfig()
+	end
+
+	task.defer(function()
+		if not gui.Parent then
+			return
+		end
+		local view = viewSize()
+		if type(STATE.menuX) == "number" and type(STATE.menuY) == "number" then
+			placeTopLeft(holder, STATE.menuX * view.X, STATE.menuY * view.Y)
+			clampObject(holder)
+		end
+		if STATE.dockCustom and type(STATE.dockX) == "number" and type(STATE.dockY) == "number" then
+			placeTopLeft(launcher, STATE.dockX * view.X, STATE.dockY * view.Y)
+			clampObject(launcher)
+		end
+	end)
+
+	local dragTarget = nil
 	local dragStart = nil
-	local startPos = nil
+	local dragOrigin = nil
+	local dragMoved = false
+
+	local function beginDrag(target, input)
+		dragTarget = target
+		dragStart = input.Position
+		dragOrigin = target.AbsolutePosition
+		dragMoved = false
+	end
+
+	local function canDragFrom(input)
+		local hits = gui:GetGuiObjectsAtPosition(input.Position.X, input.Position.Y)
+		for _, hit in ipairs(hits) do
+			if hit:IsA("GuiButton") or hit:IsA("TextBox") then
+				return false
+			end
+		end
+		return true
+	end
+
+	header.InputBegan:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		if canDragFrom(input) then
+			beginDrag(holder, input)
+		end
+	end)
 	sidebar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = holder.Position
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		if canDragFrom(input) then
+			beginDrag(holder, input)
 		end
 	end)
-	sidebar.InputEnded:Connect(function(input)
+	launcher.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
-		end
-	end)
-	local dragConn = UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragStart and startPos then
-			local delta = input.Position - dragStart
-			holder.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X / uiScale.Scale, startPos.Y.Scale, startPos.Y.Offset + delta.Y / uiScale.Scale)
-		end
-	end)
-	local dragEndConn = UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
+			beginDrag(launcher, input)
 		end
 	end)
 
@@ -3245,11 +3333,55 @@ local function installHub()
 		shadow.Visible = open
 		launcher.Visible = not open
 	end
-	closeButton.MouseButton1Click:Connect(function()
-		setOpen(false)
+
+	local dragConn = UserInputService.InputChanged:Connect(function(input)
+		if not dragTarget or not dragStart or not dragOrigin then
+			return
+		end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		local delta = input.Position - dragStart
+		if not dragMoved and delta.Magnitude < 8 then
+			return
+		end
+		dragMoved = true
+		placeTopLeft(dragTarget, dragOrigin.X + delta.X, dragOrigin.Y + delta.Y)
 	end)
-	launcher.MouseButton1Click:Connect(function()
-		setOpen(true)
+	local dragEndConn = UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		local target = dragTarget
+		local moved = dragMoved
+		dragTarget = nil
+		dragStart = nil
+		dragOrigin = nil
+		dragMoved = false
+		if not target or not target.Parent then
+			return
+		end
+		if moved then
+			clampObject(target)
+			if target == holder then
+				rememberSpot(holder, "menuX", "menuY")
+			else
+				STATE.dockCustom = true
+				rememberSpot(launcher, "dockX", "dockY")
+			end
+			return
+		end
+		if target == launcher then
+			setOpen(true)
+		end
+	end)
+
+	closeButton.MouseButton1Click:Connect(function()
+		if not STATE.dockCustom then
+			local spot = holder.AbsolutePosition
+			placeTopLeft(launcher, spot.X + 16, spot.Y + 16)
+		end
+		setOpen(false)
 	end)
 
 	local keyConn = UserInputService.InputBegan:Connect(function(input, processed)
