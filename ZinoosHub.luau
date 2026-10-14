@@ -1883,19 +1883,55 @@ local function resetStealScan()
 	STATE.stealTarget = nil
 end
 
+local function pendingDelivery()
+	return LocalPlayer:GetAttribute("holdingFriend") == true or hasEggTool()
+end
+
 local function runStealTrip()
 	if STATE.autoSteal ~= true or not featureReady("Auto Steal") then
 		return
 	end
-	if hasEggTool() and os.clock() >= (STATE.nextPlace or 0) then
+	if pendingDelivery() then
+		if os.clock() < (STATE.nextPlace or 0) then
+			return nil
+		end
 		STATE.liftSteal = true
 		deliverHeld()
-		STATE.liftSteal = false
-		STATE.stealGoal = nil
-		if hasEggTool() then
+		local deliverySucceeded = not pendingDelivery()
+		backToBench()
+		local previous = STATE.lastStealStatus
+		local eggName = nil
+		local attempt = nil
+		if type(previous) == "table" then
+			if type(previous.eggName) == "string" then
+				eggName = previous.eggName
+			end
+			if type(previous.attempt) == "number" then
+				attempt = previous.attempt
+			end
+		end
+		if type(eggName) ~= "string" and type(STATE.stealTarget) == "string" then
+			eggName = STATE.stealTarget
+		end
+		local status = {
+			outcome = if deliverySucceeded then "Delivery succeeded" else "Pickup succeeded",
+			eggName = eggName,
+			attempt = attempt,
+			failureReason = if deliverySucceeded then nil else "delivery pending",
+			pickupSucceeded = true,
+			deliverySucceeded = deliverySucceeded,
+			timestamp = os.clock(),
+		}
+		STATE.lastStealStatus = status
+		if deliverySucceeded then
+			STATE.stealError = nil
+			STATE.stealTarget = nil
+			STATE.nextPlace = 0
+		else
+			STATE.stealError = "delivery pending"
 			STATE.nextPlace = os.clock() + 8
 		end
-		return
+		return status
 	end
 	if os.clock() < (STATE.nextSteal or 0) then
 		return
