@@ -500,10 +500,21 @@ local FLOORS = {
 	Space = { pos = Vector3.new(198, 34, -4575), size = Vector3.new(96, 67, 1260) },
 	Prehistoric = { pos = Vector3.new(198, 34, -5835), size = Vector3.new(96, 67, 1260) },
 }
+local FALLBACK_RARITIES = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine", "Exclusive" }
+local rarityOptions = {}
 local rarityRank = {}
 if typeof(Rarities) == "table" and typeof(Rarities.Order) == "table" then
 	for index, name in ipairs(Rarities.Order) do
+		if type(name) == "string" and name ~= "" then
+			rarityRank[name] = index
+			rarityOptions[#rarityOptions + 1] = name
+		end
+	end
+end
+if #rarityOptions == 0 then
+	for index, name in ipairs(FALLBACK_RARITIES) do
 		rarityRank[name] = index
+		rarityOptions[index] = name
 	end
 end
 local mutationRank = { None = 0, Golden = 1, Diamond = 2, Rainbow = 3, Cursed = 4 }
@@ -728,6 +739,9 @@ end
 if STATE.webhookOn == nil then
 	STATE.webhookOn = true
 end
+if STATE.antiAfk == nil then
+	STATE.antiAfk = true
+end
 if type(STATE.webhook) ~= "string" then
 	STATE.webhook = ""
 end
@@ -735,7 +749,7 @@ if rarityRank[STATE.webhookRarity] == nil then
 	STATE.webhookRarity = "Divine"
 end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
-	STATE.stealZone = "Prehistoric"
+	STATE.stealZone = "Meadow"
 end
 genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
 local token = genv.ZinoosGen
@@ -1256,7 +1270,7 @@ local function stealZone()
 	if type(name) == "string" and FLOORS[name] then
 		return name
 	end
-	return "Prehistoric"
+	return "Meadow"
 end
 
 local function zoneChoice(value)
@@ -1266,7 +1280,7 @@ local function zoneChoice(value)
 	if type(value) == "string" and FLOORS[value] then
 		return value
 	end
-	return "Prehistoric"
+	return "Meadow"
 end
 
 local alertedEggs = setmetatable({}, { __mode = "k" })
@@ -1325,32 +1339,130 @@ local function inZone(pos, zone)
 	return math.abs(pos.X - floor.pos.X) <= halfX and math.abs(pos.Z - floor.pos.Z) <= halfZ
 end
 
-local function listSpawnedEggs()
+local function stealDaytime()
+	local phase = ReplicatedStorage:GetAttribute("TimeOfDayPhase")
+	local dayId = ReplicatedStorage:GetAttribute("TimeOfDayEndsAt")
+	return phase == "Day" and typeof(dayId) == "number"
+end
+
+local function rarityName(rank)
+	local name = rarityOptions[rank]
+	if type(name) == "string" and name ~= "" then
+		return name
+	end
+	return "Unknown"
+end
+
+local function modelAlive(model)
+	if typeof(model) ~= "Instance" then
+		return false
+	end
+	local ok, parent = pcall(function()
+		return model.Parent
+	end)
+	return ok and parent ~= nil
+end
+
+local function assessEgg(model, fromFront)
+	local exists = modelAlive(model)
+	local pos = Vector3.zero
+	if exists then
+		local ok, pivot = pcall(function()
+			return model:GetPivot().Position
+		end)
+		if ok and typeof(pivot) == "Vector3" then
+			pos = pivot
+		else
+			exists = false
+		end
+	end
 	local zone = stealZone()
+	local zoneOk = fromFront == true
+	if exists and not zoneOk then
+		zoneOk = model:GetAttribute("SpawnZone") == zone and inZone(pos, zone)
+	end
+	local rank = exists and eggRank(model) or 0
+	local meets = rank >= alertRank()
+	local bonusId = exists and model:GetAttribute("BonusRock") or nil
+	local locked = type(bonusId) == "string" and not rockIsLifted(bonusId)
+	local prompt = nil
+	if exists then
+		local foundOk, found = pcall(function()
+			return model:FindFirstChild("StealPrompt", true)
+		end)
+		if foundOk and typeof(found) == "Instance" and found:IsA("ProximityPrompt") then
+			prompt = found
+		end
+	end
+	local promptOk = false
+	if prompt then
+		local enabledOk, enabled = pcall(function()
+			return prompt.Enabled
+		end)
+		local distanceOk, distance = pcall(function()
+			return prompt.MaxActivationDistance
+		end)
+		local parentOk, parent = pcall(function()
+			return prompt.Parent
+		end)
+		promptOk = enabledOk and enabled == true and distanceOk and type(distance) == "number" and distance > 0 and parentOk and parent ~= nil
+	end
+	local day = stealDaytime()
+	local worth = exists and zoneOk and meets and not locked and promptOk
+	local reason = nil
+	if not exists then
+		reason = "gone"
+	elseif not zoneOk then
+		reason = "wrong zone"
+	elseif locked then
+		reason = "under a rock"
+	elseif not promptOk then
+		reason = "unavailable"
+	elseif not meets then
+		reason = "below rarity"
+	elseif not day then
+		reason = "waiting for daytime"
+	end
+	local label = exists and eggLabel(model) or "Egg"
+	local mutationName = "None"
+	if exists then
+		local mutationOk, mutation = pcall(function()
+			return model:GetAttribute("Mutation")
+		end)
+		if mutationOk and mutation ~= nil then
+			mutationName = tostring(mutation)
+		end
+	end
+	local petName = string.gsub(label, " Egg$", "")
+	return {
+		model = model,
+		prompt = promptOk and prompt or nil,
+		pos = pos,
+		label = label,
+		rarity = rarityName(rank),
+		rank = rank,
+		mutation = mutationName,
+		mutationScore = mutationRank[mutationName] or 0,
+		weight = weightOfName[petName] or 999,
+		front = fromFront == true,
+		locked = locked,
+		worth = worth == true,
+		canAttempt = worth == true and day == true,
+		reason = reason,
+	}
+end
+
+local function listSpawnedEggs()
 	local list = {}
 	local function addEgg(egg, fromFront)
 		if not egg:IsA("Model") then
 			return
 		end
-		if not fromFront and egg:GetAttribute("SpawnZone") ~= zone then
+		local info = assessEgg(egg, fromFront)
+		if info.reason == "gone" or info.reason == "wrong zone" then
 			return
 		end
-		local pos = egg:GetPivot().Position
-		if not fromFront and not inZone(pos, zone) then
-			return
-		end
-		local bonusId = egg:GetAttribute("BonusRock")
-		local rank = eggRank(egg)
-		local mutation = tostring(egg:GetAttribute("Mutation") or "None")
-		list[#list + 1] = {
-			label = eggLabel(egg),
-			rarity = typeof(Rarities) == "table" and typeof(Rarities.Order) == "table" and Rarities.Order[rank] or "Unknown",
-			rank = rank,
-			mutation = mutation,
-			worth = rank >= alertRank(),
-			front = fromFront == true,
-			locked = type(bonusId) == "string" and not rockIsLifted(bonusId),
-		}
+		list[#list + 1] = info
 	end
 	local live = workspace:FindFirstChild("Live")
 	local folder = live and live:FindFirstChild("Friends")
@@ -1378,7 +1490,7 @@ local function listSpawnedEggs()
 end
 
 local function scanPoints(zone)
-	local floor = FLOORS[zone or stealZone()] or FLOORS.Prehistoric
+	local floor = FLOORS[zone or stealZone()] or FLOORS.Meadow
 	local halfZ = floor.size.Z / 2 - 20
 	local span = math.max(halfZ * 2, 1)
 	local count = math.clamp(math.ceil(span / 400), 1, 4)
@@ -1391,56 +1503,42 @@ local function scanPoints(zone)
 end
 
 function prehistoricEggs()
-	local zone = stealZone()
 	local list = {}
-	local function consider(egg, zoneName)
+	local function consider(egg, fromFront)
 		if not egg:IsA("Model") then
 			return
 		end
-		if zoneName and egg:GetAttribute("SpawnZone") ~= zoneName then
+		local info = assessEgg(egg, fromFront)
+		if not info.worth or not info.prompt or not info.model then
 			return
 		end
-		local pos = egg:GetPivot().Position
-		if zoneName and not inZone(pos, zoneName) then
-			return
-		end
-		local bonusId = egg:GetAttribute("BonusRock")
-		if type(bonusId) == "string" and not rockIsLifted(bonusId) then
-			return
-		end
-		local prompt = egg:FindFirstChild("StealPrompt", true)
-		local rank = eggRank(egg)
-		if rank >= alertRank() and prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and prompt.MaxActivationDistance > 0 then
-			if queueRare and not alertedEggs[egg] then
-				local accepted = queueRare("Rare egg", eggLabel(egg), nil, "egg|" .. tostring(os.clock()) .. "|" .. egg:GetFullName())
-				if accepted then
-					alertedEggs[egg] = true
-				end
+		if queueRare and not alertedEggs[egg] then
+			local accepted = queueRare("Rare egg", info.label, nil, "egg|" .. tostring(os.clock()) .. "|" .. egg:GetFullName())
+			if accepted then
+				alertedEggs[egg] = true
 			end
-			local mutation = egg:GetAttribute("Mutation")
-			local petName = string.gsub(eggLabel(egg), " Egg$", "")
-			list[#list + 1] = {
-				model = egg,
-				prompt = prompt,
-				pos = pos,
-				rarity = rank,
-				weight = weightOfName[petName] or 999,
-				mutation = mutationRank[tostring(mutation)] or 0,
-				label = eggLabel(egg),
-			}
 		end
+		list[#list + 1] = {
+			model = info.model,
+			prompt = info.prompt,
+			pos = info.pos,
+			rarity = info.rank,
+			weight = info.weight,
+			mutation = info.mutationScore,
+			label = info.label,
+		}
 	end
 	local live = workspace:FindFirstChild("Live")
 	local folder = live and live:FindFirstChild("Friends")
 	if folder then
 		for _, egg in ipairs(folder:GetChildren()) do
-			consider(egg, zone)
+			consider(egg, false)
 		end
 	end
 	local stock = workspace:FindFirstChild("_MeadowStock")
 	if stock then
 		for _, egg in ipairs(stock:GetChildren()) do
-			consider(egg, nil)
+			consider(egg, true)
 		end
 	end
 	table.sort(list, function(a, b)
@@ -1676,9 +1774,8 @@ local function runStealTrip()
 	if os.clock() < (STATE.nextSteal or 0) then
 		return
 	end
-	local phase = ReplicatedStorage:GetAttribute("TimeOfDayPhase")
 	local dayId = ReplicatedStorage:GetAttribute("TimeOfDayEndsAt")
-	if phase ~= "Day" or typeof(dayId) ~= "number" then
+	if not stealDaytime() then
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
 		activeGoal = nil
@@ -2750,6 +2847,7 @@ local FLAG_KEYS = {
 	InvEsp = "invEsp",
 	LowEnd = "lowEnd",
 	WebhookAlerts = "webhookOn",
+	AntiAfk = "antiAfk",
 }
 
 local function syncSavedVisuals()
@@ -2766,6 +2864,7 @@ end
 
 local function loadSaved()
 	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(CONFIG_PATH) then
+		STATE.stealZone = "Meadow"
 		syncSavedVisuals()
 		return
 	end
@@ -2773,6 +2872,7 @@ local function loadSaved()
 		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_PATH))
 	end)
 	if not ok or type(saved) ~= "table" then
+		STATE.stealZone = "Meadow"
 		syncSavedVisuals()
 		return
 	end
@@ -2786,8 +2886,10 @@ local function loadSaved()
 	if type(zone) == "table" then
 		zone = zone[1]
 	end
-	if type(zone) == "string" then
-		STATE.stealZone = zoneChoice(zone)
+	if type(zone) == "string" and FLOORS[zone] then
+		STATE.stealZone = zone
+	else
+		STATE.stealZone = "Meadow"
 	end
 	local rarity = saved.WebhookRarity
 	if type(rarity) == "table" then
@@ -2826,7 +2928,7 @@ local function saveConfig()
 	end
 	local payload = {
 		AutoSell = false,
-		StealZone = { STATE.stealZone or "Prehistoric" },
+		StealZone = { STATE.stealZone or "Meadow" },
 		WebhookRarity = { STATE.webhookRarity or "Divine" },
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
@@ -2843,6 +2945,29 @@ local function saveConfig()
 	end)
 	if ok then
 		pcall(writefile, CONFIG_PATH, encoded)
+	end
+end
+
+local function applyAlertRarity(option)
+	if type(option) ~= "string" or rarityRank[option] == nil or option == STATE.webhookRarity then
+		return
+	end
+	STATE.webhookRarity = option
+	if type(STATE.rarityControl) ~= "table" then
+		STATE.rarityControl = {}
+	end
+	STATE.rarityControl.value = option
+	STATE.rarityControl.currentOption = { option }
+	if typeof(STATE._setRarityText) == "function" then
+		pcall(STATE._setRarityText, option)
+	end
+	STATE.nextSteal = 0
+	STATE.triedKeys = {}
+	STATE.openedDay = nil
+	STATE.streamedDay = nil
+	saveConfig()
+	if typeof(STATE.refreshTracker) == "function" then
+		pcall(STATE.refreshTracker)
 	end
 end
 
@@ -3111,6 +3236,12 @@ local function installHub()
 		end
 	end
 
+	local function onActivate(control, callback, selectable)
+		control.Active = true
+		control.Selectable = selectable ~= false
+		control.Activated:Connect(callback)
+	end
+
 	local function addNav(name, order)
 		local button = Instance.new("TextButton")
 		button.Name = name
@@ -3131,7 +3262,7 @@ local function installHub()
 		navCorner.CornerRadius = UDim.new(0, 8)
 		navCorner.Parent = button
 		navButtons[name] = button
-		button.MouseButton1Click:Connect(function()
+		onActivate(button, function()
 			showPage(name)
 		end)
 	end
@@ -3331,7 +3462,7 @@ local function installHub()
 		end
 		control.value = STATE[key] == true
 		paintSwitch(track, knob, control.value)
-		track.MouseButton1Click:Connect(function()
+		onActivate(track, function()
 			control.value = not control.value
 			paintSwitch(track, knob, control.value)
 			onToggle(key, control.value == true)
@@ -3350,9 +3481,9 @@ local function installHub()
 	local popup = Instance.new("Frame")
 	popup.BackgroundColor3 = Color3.fromRGB(32, 24, 44)
 	popup.BorderSizePixel = 0
+	popup.ClipsDescendants = true
 	popup.Visible = false
 	popup.ZIndex = 21
-	popup.AutomaticSize = Enum.AutomaticSize.Y
 	popup.Size = UDim2.fromOffset(180, 0)
 	popup.Parent = window
 	local popupCorner = Instance.new("UICorner")
@@ -3361,28 +3492,47 @@ local function installHub()
 	local popupStroke = Instance.new("UIStroke")
 	popupStroke.Color = line
 	popupStroke.Parent = popup
+	local popupScroll = Instance.new("ScrollingFrame")
+	popupScroll.BackgroundTransparency = 1
+	popupScroll.BorderSizePixel = 0
+	popupScroll.Size = UDim2.fromScale(1, 1)
+	popupScroll.CanvasSize = UDim2.fromOffset(0, 0)
+	popupScroll.ScrollBarThickness = 4
+	popupScroll.ScrollBarImageColor3 = accent
+	popupScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	popupScroll.AutomaticCanvasSize = Enum.AutomaticSize.None
+	popupScroll.ZIndex = 22
+	popupScroll.Parent = popup
 	local popupLayout = Instance.new("UIListLayout")
-	popupLayout.Parent = popup
+	popupLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	popupLayout.Parent = popupScroll
 	local popupPad = Instance.new("UIPadding")
 	popupPad.PaddingTop = UDim.new(0, 4)
 	popupPad.PaddingBottom = UDim.new(0, 4)
-	popupPad.Parent = popup
+	popupPad.Parent = popupScroll
 
 	local function closePopup()
 		popup.Visible = false
 		popupBlock.Visible = false
-		for _, child in ipairs(popup:GetChildren()) do
+		for _, child in ipairs(popupScroll:GetChildren()) do
 			if child:IsA("TextButton") then
 				child:Destroy()
 			end
 		end
 	end
-	popupBlock.MouseButton1Click:Connect(closePopup)
+	onActivate(popupBlock, closePopup, false)
 
 	local function openPopup(anchor, options, current, callback)
 		closePopup()
-		for _, option in ipairs(options) do
+		local rowHeight = 28
+		local selectedIndex = 1
+		for index, option in ipairs(options) do
+			if option == current then
+				selectedIndex = index
+			end
 			local choice = Instance.new("TextButton")
+			choice.Name = "Choice"
+			choice.LayoutOrder = index
 			choice.AutoButtonColor = false
 			choice.BackgroundColor3 = option == current and Color3.fromRGB(64, 36, 58) or Color3.fromRGB(32, 24, 44)
 			choice.BackgroundTransparency = option == current and 0 or 1
@@ -3391,22 +3541,42 @@ local function installHub()
 			choice.TextSize = 13
 			choice.TextColor3 = ink
 			choice.TextXAlignment = Enum.TextXAlignment.Left
-			choice.Size = UDim2.new(1, 0, 0, 28)
-			choice.ZIndex = 22
-			choice.Parent = popup
-			choice.MouseButton1Click:Connect(function()
+			choice.Size = UDim2.new(1, -8, 0, rowHeight)
+			choice.ZIndex = 23
+			choice.Parent = popupScroll
+			onActivate(choice, function()
 				callback(option)
 				closePopup()
 			end)
 		end
+		local contentHeight = #options * rowHeight + 8
 		local scale = uiScale.Scale
-		if scale <= 0 then
+		if scale < 0.05 then
 			scale = 1
 		end
+		local view = viewSize()
 		local origin = window.AbsolutePosition
-		local pos = anchor.AbsolutePosition
-		local height = anchor.AbsoluteSize.Y
-		popup.Position = UDim2.fromOffset((pos.X - origin.X) / scale, (pos.Y - origin.Y + height + 6) / scale)
+		local anchorPos = anchor.AbsolutePosition
+		local anchorHeight = anchor.AbsoluteSize.Y
+		local roomBelow = view.Y - (anchorPos.Y + anchorHeight + 8)
+		local roomAbove = anchorPos.Y - 8
+		local room = math.max(roomBelow, roomAbove)
+		room = math.clamp(room, rowHeight * scale + 8, math.max(rowHeight * scale + 8, view.Y - 16))
+		local popupPixels = math.min(contentHeight * scale, room)
+		local popupHeight = popupPixels / scale
+		popup.Size = UDim2.fromOffset(180, popupHeight)
+		popupScroll.CanvasSize = UDim2.fromOffset(0, contentHeight)
+		local openAbove = roomBelow + 1 < popupPixels and roomAbove > roomBelow
+		local pixelY = openAbove and (anchorPos.Y - popupPixels - 6) or (anchorPos.Y + anchorHeight + 6)
+		pixelY = math.clamp(pixelY, 8, math.max(8, view.Y - popupPixels - 8))
+		local pixelX = math.clamp(anchorPos.X, 8, math.max(8, view.X - 180 * scale - 8))
+		popup.Position = UDim2.fromOffset((pixelX - origin.X) / scale, (pixelY - origin.Y) / scale)
+		local scrollY = math.max(0, (selectedIndex - 1) * rowHeight)
+		local visibleRows = math.max(popupHeight - 8, rowHeight)
+		if scrollY > contentHeight - visibleRows then
+			scrollY = math.max(0, contentHeight - visibleRows)
+		end
+		popupScroll.CanvasPosition = Vector2.new(0, scrollY)
 		popup.Visible = true
 		popupBlock.Visible = true
 	end
@@ -3443,7 +3613,7 @@ local function installHub()
 		local pickCorner = Instance.new("UICorner")
 		pickCorner.CornerRadius = UDim.new(0, 8)
 		pickCorner.Parent = pick
-		pick.MouseButton1Click:Connect(function()
+		onActivate(pick, function()
 			openPopup(pick, options, getValue(), function(option)
 				callback(option)
 				pick.Text = getValue()
@@ -3503,26 +3673,27 @@ local function installHub()
 		end
 	end
 	if #zoneOptions == 0 then
-		zoneOptions[1] = "Prehistoric"
+		zoneOptions[1] = "Meadow"
 	end
 	makeDropdown(eggs, "Steal Zone", function()
-		return STATE.stealZone or "Prehistoric"
+		return STATE.stealZone or "Meadow"
 	end, zoneOptions, function(option)
 		STATE.stealZone = zoneChoice(option)
 		STATE.zoneControl.value = STATE.stealZone
 		STATE.zoneControl.currentOption = { STATE.stealZone }
 		saveConfig()
-	end)
-	makeDropdown(eggs, "Alert Rarity", function()
-		return STATE.webhookRarity or "Divine"
-	end, { "Secret", "Eternal", "Divine", "Exclusive" }, function(option)
-		if rarityRank[option] then
-			STATE.webhookRarity = option
-			STATE.rarityControl.value = option
-			STATE.rarityControl.currentOption = { option }
-			saveConfig()
+		if typeof(STATE.refreshTracker) == "function" then
+			pcall(STATE.refreshTracker)
 		end
 	end)
+	local rarityPick = makeDropdown(eggs, "Alert Rarity", function()
+		return STATE.webhookRarity or "Divine"
+	end, rarityOptions, function(option)
+		applyAlertRarity(option)
+	end)
+	STATE._setRarityText = function(text)
+		rarityPick.Text = tostring(text)
+	end
 
 	local pets = card(leftColumn, "PETS", 2)
 	makeSwitch(pets, "Auto Open", "autoOpen")
@@ -3536,6 +3707,7 @@ local function installHub()
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
+	makeSwitch(training, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
 	makeSwitch(training, "Auto Rebirth", "rebirth")
 
 	local upgrades = card(rightColumn, "UPGRADES", 2)
@@ -3635,18 +3807,18 @@ local function installHub()
 		nameLabel.Text = ""
 		nameLabel.TextColor3 = ink
 		nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-		nameLabel.Size = UDim2.new(0.62, 0, 1, 0)
+		nameLabel.Size = UDim2.new(0.5, 0, 1, 0)
 		nameLabel.ZIndex = 6
 		nameLabel.Parent = row
 		local rareLabel = Instance.new("TextLabel")
 		rareLabel.BackgroundTransparency = 1
 		rareLabel.Font = Enum.Font.GothamBold
-		rareLabel.TextSize = 12
+		rareLabel.TextSize = 11
 		rareLabel.Text = ""
 		rareLabel.TextXAlignment = Enum.TextXAlignment.Right
 		rareLabel.AnchorPoint = Vector2.new(1, 0)
 		rareLabel.Position = UDim2.new(1, 0, 0, 0)
-		rareLabel.Size = UDim2.new(0.38, 0, 1, 0)
+		rareLabel.Size = UDim2.new(0.48, 0, 1, 0)
 		rareLabel.ZIndex = 6
 		rareLabel.Parent = row
 		trackerRows[index] = { row = row, name = nameLabel, rare = rareLabel }
@@ -3663,15 +3835,23 @@ local function installHub()
 			return
 		end
 		local worth = 0
+		local waiting = false
 		for _, egg in ipairs(eggs) do
 			if egg.worth then
 				worth += 1
+			end
+			if egg.worth and not egg.canAttempt then
+				waiting = true
 			end
 		end
 		if #eggs == 0 then
 			trackerStatus.Text = stealZone() .. " · nothing spawned"
 		else
-			trackerStatus.Text = string.format("%d spawned · %d worth taking", #eggs, worth)
+			local text = string.format("%d spawned · %d worth taking", #eggs, worth)
+			if waiting then
+				text ..= " · waiting for daytime"
+			end
+			trackerStatus.Text = text
 		end
 		trackerStatus.TextColor3 = worth > 0 and accent or muted
 		for index, slot in ipairs(trackerRows) do
@@ -3685,19 +3865,22 @@ local function installHub()
 				if egg.front then
 					extra ..= " · Front"
 				end
-				if egg.locked then
-					extra ..= " · under a rock"
-				end
 				slot.name.Text = egg.label .. extra
 				slot.name.TextColor3 = egg.worth and ink or muted
-				slot.rare.Text = egg.rarity
-				slot.rare.TextColor3 = rarityColor(egg.rank)
+				if egg.reason == "under a rock" or egg.reason == "unavailable" or egg.reason == "waiting for daytime" then
+					slot.rare.Text = egg.reason
+					slot.rare.TextColor3 = muted
+				else
+					slot.rare.Text = egg.rarity
+					slot.rare.TextColor3 = rarityColor(egg.rank)
+				end
 			end
 		end
 		local extraCount = #eggs - #trackerRows
 		trackerMore.Visible = extraCount > 0
 		trackerMore.Text = extraCount > 0 and ("+" .. tostring(extraCount) .. " more") or ""
 	end
+	STATE.refreshTracker = refreshTracker
 
 	local discordBlurb = label(discordPage, "Get a Discord message when a rare egg shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 40)
 	discordBlurb.LayoutOrder = 1
@@ -3748,7 +3931,7 @@ local function installHub()
 		local buttonCorner = Instance.new("UICorner")
 		buttonCorner.CornerRadius = UDim.new(0, 8)
 		buttonCorner.Parent = button
-		button.MouseButton1Click:Connect(callback)
+		onActivate(button, callback)
 		remember(button, parentFrame, text)
 		return button
 	end
@@ -4057,7 +4240,7 @@ local function installHub()
 		end
 	end))
 
-	closeButton.MouseButton1Click:Connect(function()
+	onActivate(closeButton, function()
 		if not STATE.dockCustom then
 			local spot = holder.AbsolutePosition
 			placeTopLeft(launcher, spot.X + 16, spot.Y + 16)
@@ -4298,8 +4481,8 @@ local function syncToggles()
 		if type(picked) == "table" then
 			picked = picked[1]
 		end
-		if type(picked) == "string" and rarityRank[picked] and picked ~= STATE.webhookRarity then
-			STATE.webhookRarity = picked
+		if type(picked) == "string" and picked ~= STATE.webhookRarity then
+			applyAlertRarity(picked)
 		end
 	end
 end
@@ -4414,6 +4597,42 @@ local function scanNewPets()
 end
 
 loadSaved()
+
+local antiAfkWarned = false
+local function pulseAntiAfk()
+	if not running() or STATE.antiAfk ~= true then
+		return false
+	end
+	local worked = pcall(function()
+		local virtual = (game:GetService("VirtualUser") :: any)
+		virtual:CaptureController()
+		virtual:ClickButton2(Vector2.new(-1, -1))
+	end)
+	if not worked then
+		if not antiAfkWarned then
+			antiAfkWarned = true
+			warn("[Zinoos hub] Anti AFK is off because VirtualUser is missing.")
+		end
+		return false
+	end
+	STATE.lastAntiAfk = os.clock()
+	return true
+end
+STATE.connect(LocalPlayer.Idled, function()
+	pulseAntiAfk()
+end)
+local antiAfkThread = task.spawn(function()
+	while running() do
+		task.wait(15 * 60)
+		if not running() then
+			return
+		end
+		pulseAntiAfk()
+	end
+end)
+hubCleanup(function()
+	pcall(task.cancel, antiAfkThread)
+end)
 
 local nextBubble = 0
 STATE.connect(RunService.Heartbeat, function()
