@@ -5356,14 +5356,28 @@ pulseAntiAfk = function()
 	if not running() or STATE.antiAfk ~= true then
 		return false
 	end
+	local function nudgeMouse()
+		local input = (game:GetService("VirtualInputManager") :: any)
+		if typeof(input.SendMouseMoveEvent) ~= "function" then
+			error("VirtualInputManager.SendMouseMoveEvent is missing")
+		end
+		local camera = workspace.CurrentCamera
+		local view = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		local x = math.clamp(view.X * 0.5, 1, math.max(1, view.X - 1))
+		local y = math.clamp(view.Y * 0.92, 1, math.max(1, view.Y - 1))
+		input:SendMouseMoveEvent(x, y, game)
+		input:SendMouseMoveEvent(x + 2, y, game)
+		input:SendMouseMoveEvent(x, y, game)
+	end
 	local userOk = pcall(function()
 		local virtual = (game:GetService("VirtualUser") :: any)
 		virtual:CaptureController()
 		virtual:ClickButton2(Vector2.new(-1, -1))
 	end)
-	if userOk then
+	local moveOk, moveErr = pcall(nudgeMouse)
+	if userOk or moveOk then
 		STATE.antiAfkOperational = true
-		STATE.antiAfkMethod = "VirtualUser"
+		STATE.antiAfkMethod = moveOk and "VirtualInputManager" or "VirtualUser"
 		STATE.lastAntiAfk = os.clock()
 		STATE.antiAfkError = nil
 		return true
@@ -5378,7 +5392,7 @@ pulseAntiAfk = function()
 	end
 	STATE.antiAfkOperational = false
 	STATE.antiAfkMethod = nil
-	STATE.antiAfkError = tostring(inputErr)
+	STATE.antiAfkError = tostring(moveErr or inputErr)
 	return false
 end
 local antiAfkConnection = STATE.connect(LocalPlayer.Idled, function()
@@ -5390,7 +5404,7 @@ local antiAfkThread = task.spawn(function()
 		pulseAntiAfk()
 	end
 	while running() do
-		task.wait(8 * 60)
+		task.wait(4 * 60)
 		if not running() then
 			return
 		end
