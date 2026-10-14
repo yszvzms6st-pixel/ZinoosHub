@@ -1204,8 +1204,86 @@ local function homeSpot()
 	return STATE.homePos or Vector3.new(299, 10, 314)
 end
 
-function STATE.placeRank()
-	return rarityRank[STATE.placeRarity] or rarityRank[rarityOptions[1]] or 1
+function STATE.normalizeRarities(list)
+	local ordered = {}
+	if type(list) ~= "table" then
+		return ordered
+	end
+	local seen = {}
+	for _, name in ipairs(rarityOptions) do
+		for _, item in ipairs(list) do
+			if item == name and not seen[name] then
+				seen[name] = true
+				ordered[#ordered + 1] = name
+			end
+		end
+	end
+	return ordered
+end
+
+function STATE.expandRarity(name)
+	local rank = rarityRank[name]
+	local ordered = {}
+	if not rank then
+		return ordered
+	end
+	for _, option in ipairs(rarityOptions) do
+		if (rarityRank[option] or 0) >= rank then
+			ordered[#ordered + 1] = option
+		end
+	end
+	return ordered
+end
+
+function STATE.raritySelected(list, rank)
+	if type(rank) ~= "number" or type(list) ~= "table" then
+		return false
+	end
+	local name = rarityOptions[rank]
+	if type(name) ~= "string" then
+		return false
+	end
+	for _, item in ipairs(list) do
+		if item == name then
+			return true
+		end
+	end
+	return false
+end
+
+function STATE.rarityLabel(list)
+	if type(list) ~= "table" or #list == 0 then
+		return "None"
+	end
+	return table.concat(list, ", ")
+end
+
+function STATE.toggleRarity(list, name)
+	if rarityRank[name] == nil then
+		return STATE.normalizeRarities(list)
+	end
+	local nextList = {}
+	local found = false
+	if type(list) == "table" then
+		for _, item in ipairs(list) do
+			if item == name then
+				found = true
+			else
+				nextList[#nextList + 1] = item
+			end
+		end
+	end
+	if not found then
+		nextList[#nextList + 1] = name
+	end
+	return STATE.normalizeRarities(nextList)
+end
+
+if type(STATE.alertRarities) ~= "table" then
+	STATE.alertRarities = STATE.expandRarity(STATE.webhookRarity or "Divine")
+end
+if type(STATE.placeRarities) ~= "table" then
+	STATE.placeRarities = STATE.expandRarity(STATE.placeRarity or rarityOptions[1] or "Common")
 end
 
 function STATE.toolEggRank(tool)
@@ -1269,9 +1347,9 @@ end
 function STATE.eggWorthPlacing(tool)
 	local rank = STATE.toolEggRank(tool)
 	if rank == nil then
-		return STATE.placeRank() <= (rarityRank[rarityOptions[1]] or 1)
+		return false
 	end
-	return rank >= STATE.placeRank()
+	return STATE.raritySelected(STATE.placeRarities, rank)
 end
 
 local function placeOneEgg()
@@ -1469,7 +1547,7 @@ local function assessEgg(model, fromFront)
 		zoneOk = model:GetAttribute("SpawnZone") == zone and inZone(pos, zone)
 	end
 	local rank = exists and eggRank(model) or 0
-	local meets = rank >= alertRank()
+	local meets = STATE.raritySelected(STATE.alertRarities, rank)
 	local bonusId = exists and model:GetAttribute("BonusRock") or nil
 	local locked = type(bonusId) == "string" and not rockIsLifted(bonusId)
 	local prompt = nil
@@ -2645,8 +2723,7 @@ queueRare = function(kind, name, money, mark)
 	end
 	local clean = string.gsub(tostring(name), " Egg$", "")
 	local rarity = rarityByDisplay[clean] or ""
-	local minRank = rarityRank[STATE.webhookRarity] or rarityRank.Divine or 1
-	if (rarityRank[rarity] or 0) < minRank then
+	if not STATE.raritySelected(STATE.alertRarities, rarityRank[rarity]) then
 		return false
 	end
 	if not webhookRequest() then
@@ -3311,6 +3388,13 @@ local function loadSaved()
 	if type(rarity) == "string" and rarityRank[rarity] then
 		STATE.webhookRarity = rarity
 	end
+	local alertList = STATE.normalizeRarities(saved.WebhookRarities)
+	if #alertList > 0 then
+		STATE.alertRarities = alertList
+	elseif type(rarity) == "string" and rarityRank[rarity] then
+		STATE.alertRarities = STATE.expandRarity(rarity)
+	end
+	STATE.webhookRarity = STATE.alertRarities[1] or STATE.webhookRarity
 	local placeRarity = saved.PlaceRarity
 	if type(placeRarity) == "table" then
 		placeRarity = placeRarity[1]
@@ -3318,6 +3402,13 @@ local function loadSaved()
 	if type(placeRarity) == "string" and rarityRank[placeRarity] then
 		STATE.placeRarity = placeRarity
 	end
+	local placeList = STATE.normalizeRarities(saved.PlaceRarities)
+	if #placeList > 0 then
+		STATE.placeRarities = placeList
+	elseif type(placeRarity) == "string" and rarityRank[placeRarity] then
+		STATE.placeRarities = STATE.expandRarity(placeRarity)
+	end
+	STATE.placeRarity = STATE.placeRarities[1] or STATE.placeRarity
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
@@ -3373,8 +3464,10 @@ local function saveConfig()
 		StealZoneExplicit = STATE.stealZoneExplicit == true,
 		AutoSell = false,
 		StealZone = { STATE.stealZone or "Meadow" },
-		WebhookRarity = { STATE.webhookRarity or "Divine" },
-		PlaceRarity = { STATE.placeRarity or rarityOptions[1] or "Common" },
+		WebhookRarity = { STATE.alertRarities[1] or STATE.webhookRarity or "Divine" },
+		WebhookRarities = STATE.alertRarities,
+		PlaceRarity = { STATE.placeRarities[1] or STATE.placeRarity or rarityOptions[1] or "Common" },
+		PlaceRarities = STATE.placeRarities,
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
 		MenuY = STATE.menuY,
@@ -3394,33 +3487,37 @@ local function saveConfig()
 end
 
 function STATE.applyPlaceRarity(option)
-	if type(option) ~= "string" or rarityRank[option] == nil or option == STATE.placeRarity then
+	if type(option) ~= "string" or rarityRank[option] == nil then
 		return
 	end
-	STATE.placeRarity = option
+	local ordered = STATE.toggleRarity(STATE.placeRarities, option)
+	STATE.placeRarities = ordered
+	STATE.placeRarity = ordered[1] or STATE.placeRarity
 	if type(STATE.placeControl) ~= "table" then
 		STATE.placeControl = {}
 	end
-	STATE.placeControl.value = option
-	STATE.placeControl.currentOption = { option }
+	STATE.placeControl.value = ordered[1]
+	STATE.placeControl.currentOption = ordered
 	if typeof(STATE._setPlaceText) == "function" then
-		pcall(STATE._setPlaceText, option)
+		pcall(STATE._setPlaceText, STATE.rarityLabel(ordered))
 	end
 	saveConfig()
 end
 
 local function applyAlertRarity(option)
-	if type(option) ~= "string" or rarityRank[option] == nil or option == STATE.webhookRarity then
+	if type(option) ~= "string" or rarityRank[option] == nil then
 		return
 	end
-	STATE.webhookRarity = option
+	local ordered = STATE.toggleRarity(STATE.alertRarities, option)
+	STATE.alertRarities = ordered
+	STATE.webhookRarity = ordered[1] or STATE.webhookRarity
 	if type(STATE.rarityControl) ~= "table" then
 		STATE.rarityControl = {}
 	end
-	STATE.rarityControl.value = option
-	STATE.rarityControl.currentOption = { option }
+	STATE.rarityControl.value = ordered[1]
+	STATE.rarityControl.currentOption = ordered
 	if typeof(STATE._setRarityText) == "function" then
-		pcall(STATE._setRarityText, option)
+		pcall(STATE._setRarityText, STATE.rarityLabel(ordered))
 	end
 	resetStealScan()
 	saveConfig()
@@ -3986,21 +4083,34 @@ local function installHub()
 	end
 	onActivate(popupBlock, closePopup, false)
 
-	local function openPopup(anchor, options, current, callback)
+	local function openPopup(anchor, options, current, callback, multiple)
 		closePopup()
 		local rowHeight = 28
+		local selected = {}
+		if multiple and type(current) == "table" then
+			for _, name in ipairs(current) do
+				selected[name] = true
+			end
+		end
 		local selectedIndex = 1
+		local foundSelected = false
+		local function paintChoice(choice, option)
+			local on = (multiple and selected[option] == true) or (not multiple and option == current)
+			choice.BackgroundColor3 = on and Color3.fromRGB(64, 36, 58) or Color3.fromRGB(32, 24, 44)
+			choice.BackgroundTransparency = on and 0 or 1
+			choice.Text = (on and "  ✓ " or "    ") .. option
+		end
 		for index, option in ipairs(options) do
-			if option == current then
+			if multiple and selected[option] and not foundSelected then
+				selectedIndex = index
+				foundSelected = true
+			elseif not multiple and option == current then
 				selectedIndex = index
 			end
 			local choice = Instance.new("TextButton")
 			choice.Name = "Choice"
 			choice.LayoutOrder = index
 			choice.AutoButtonColor = false
-			choice.BackgroundColor3 = option == current and Color3.fromRGB(64, 36, 58) or Color3.fromRGB(32, 24, 44)
-			choice.BackgroundTransparency = option == current and 0 or 1
-			choice.Text = "  " .. option
 			choice.Font = Enum.Font.Gotham
 			choice.TextSize = 13
 			choice.TextColor3 = ink
@@ -4008,9 +4118,16 @@ local function installHub()
 			choice.Size = UDim2.new(1, -8, 0, rowHeight)
 			choice.ZIndex = 23
 			choice.Parent = popupScroll
+			paintChoice(choice, option)
 			onActivate(choice, function()
-				callback(option)
-				closePopup()
+				if multiple then
+					selected[option] = not selected[option]
+					paintChoice(choice, option)
+					callback(option)
+				else
+					callback(option)
+					closePopup()
+				end
 			end)
 		end
 		local contentHeight = #options * rowHeight + 8
@@ -4087,18 +4204,62 @@ local function installHub()
 		return pick
 	end
 
+	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName)
+		local row = Instance.new("Frame")
+		row.BackgroundTransparency = 1
+		row.LayoutOrder = 2
+		row.Size = UDim2.new(1, 0, 0, 30)
+		row.ZIndex = 6
+		row.Parent = parentBox
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamMedium
+		title.Text = name
+		title.TextColor3 = ink
+		title.TextSize = 14
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Size = UDim2.new(0.42, 0, 1, 0)
+		title.ZIndex = 6
+		title.Parent = row
+		local pick = Instance.new("TextButton")
+		pick.AutoButtonColor = false
+		pick.Font = Enum.Font.Gotham
+		pick.TextSize = 13
+		pick.TextColor3 = ink
+		pick.TextXAlignment = Enum.TextXAlignment.Left
+		pick.TextTruncate = Enum.TextTruncate.AtEnd
+		pick.Text = " " .. STATE.rarityLabel(getList())
+		pick.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
+		pick.AnchorPoint = Vector2.new(1, 0.5)
+		pick.Position = UDim2.new(1, 0, 0.5, 0)
+		pick.Size = UDim2.fromOffset(156, 26)
+		pick.ZIndex = 7
+		pick.Parent = row
+		local pickCorner = Instance.new("UICorner")
+		pickCorner.CornerRadius = UDim.new(0, 8)
+		pickCorner.Parent = pick
+		onActivate(pick, function()
+			openPopup(pick, options, getList(), function(option)
+				onToggleName(option)
+				pick.Text = " " .. STATE.rarityLabel(getList())
+			end, true)
+		end)
+		remember(row, parentBox, name)
+		return pick
+	end
+
 	STATE.toggleControls = {}
 	STATE.zoneControl = {
 		value = STATE.stealZone,
 		currentOption = { STATE.stealZone },
 	}
 	STATE.rarityControl = {
-		value = STATE.webhookRarity,
-		currentOption = { STATE.webhookRarity or "Divine" },
+		value = STATE.alertRarities[1],
+		currentOption = STATE.alertRarities,
 	}
 	STATE.placeControl = {
-		value = STATE.placeRarity,
-		currentOption = { STATE.placeRarity or rarityOptions[1] or "Common" },
+		value = STATE.placeRarities[1],
+		currentOption = STATE.placeRarities,
 	}
 	STATE.webhookControl = {
 		value = STATE.webhook or "",
@@ -4133,7 +4294,7 @@ local function installHub()
 	local rightColumn = column(2)
 
 	local eggs = card(leftColumn, "EGGS", 1)
-	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an eligible egg matching the selected rarity, then comes back")
+	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
 		for _, zoneName in ipairs(Zones.Order) do
@@ -4160,21 +4321,21 @@ local function installHub()
 			pcall(STATE.refreshTracker)
 		end
 	end)
-	local rarityPick = makeDropdown(eggs, "Alert Rarity", function()
-		return STATE.webhookRarity or "Divine"
+	local rarityPick = makeMultiDropdown(eggs, "Alert Rarity", function()
+		return STATE.alertRarities
 	end, rarityOptions, function(option)
 		applyAlertRarity(option)
 	end)
 	STATE._setRarityText = function(text)
-		rarityPick.Text = tostring(text)
+		rarityPick.Text = " " .. tostring(text)
 	end
-	local placePick = makeDropdown(eggs, "Place Rarity", function()
-		return STATE.placeRarity or rarityOptions[1] or "Common"
+	local placePick = makeMultiDropdown(eggs, "Place Rarity", function()
+		return STATE.placeRarities
 	end, rarityOptions, function(option)
 		STATE.applyPlaceRarity(option)
 	end)
 	STATE._setPlaceText = function(text)
-		placePick.Text = tostring(text)
+		placePick.Text = " " .. tostring(text)
 	end
 
 	local pets = card(leftColumn, "PETS", 2)
@@ -4237,7 +4398,7 @@ local function installHub()
 
 	local welcome = label(homePage, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
 	welcome.LayoutOrder = 1
-	local blurb = label(homePage, "Stays on your bench. Grabs an eligible egg matching the selected rarity, then comes back.", 14, muted, Enum.Font.Gotham, 36)
+	local blurb = label(homePage, "Stays on your bench. Grabs an egg of a ticked rarity, then comes back.", 14, muted, Enum.Font.Gotham, 36)
 	blurb.LayoutOrder = 2
 	local sessionStarted = os.time()
 	local function sessionClock()
@@ -4267,7 +4428,7 @@ local function installHub()
 	speedText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
 
 	local note = card(homePage, "HOW IT WORKS", 5)
-	local noteBody = label(note, "Alert Rarity decides which eggs are worth standing up for. Weaker eggs leave you training. Place Rarity puts stolen eggs of that rarity or higher on your plot. Weaker eggs stay in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 72)
+	local noteBody = label(note, "Tick every rarity you want stolen. Tick every rarity you want placed on your plot. An unticked egg stays in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 56)
 	noteBody.LayoutOrder = 1
 
 	local trackerCard = card(homePage, "EGG TRACKER", 6)
@@ -4344,7 +4505,7 @@ local function installHub()
 			phase = stealDaytime() and "Day" or "Night"
 		end
 		local lines = {
-			string.format("%s · %s · %s", stealZone(), STATE.webhookRarity or "Divine", tostring(phase)),
+			string.format("%s · %s · %s", stealZone(), STATE.rarityLabel(STATE.alertRarities), tostring(phase)),
 			string.format("%d spawned · %d eligible · %d waiting for daytime", #eggs, eligible, waitingCount),
 		}
 		local status = STATE.lastStealStatus
@@ -5021,23 +5182,22 @@ local function syncToggles()
 		end
 	end
 	local rareControl = STATE.rarityControl
-	if type(rareControl) == "table" then
-		local picked = rareControl.value or rareControl.currentOption
-		if type(picked) == "table" then
-			picked = picked[1]
-		end
-		if type(picked) == "string" and picked ~= STATE.webhookRarity then
-			applyAlertRarity(picked)
+	if type(rareControl) == "table" and type(rareControl.currentOption) == "table" then
+		local ordered = STATE.normalizeRarities(rareControl.currentOption)
+		if STATE.rarityLabel(ordered) ~= STATE.rarityLabel(STATE.alertRarities) then
+			STATE.alertRarities = ordered
+			STATE.webhookRarity = ordered[1] or STATE.webhookRarity
+			resetStealScan()
+			saveConfig()
 		end
 	end
 	local placeControl = STATE.placeControl
-	if type(placeControl) == "table" then
-		local picked = placeControl.value or placeControl.currentOption
-		if type(picked) == "table" then
-			picked = picked[1]
-		end
-		if type(picked) == "string" and picked ~= STATE.placeRarity then
-			STATE.applyPlaceRarity(picked)
+	if type(placeControl) == "table" and type(placeControl.currentOption) == "table" then
+		local ordered = STATE.normalizeRarities(placeControl.currentOption)
+		if STATE.rarityLabel(ordered) ~= STATE.rarityLabel(STATE.placeRarities) then
+			STATE.placeRarities = ordered
+			STATE.placeRarity = ordered[1] or STATE.placeRarity
+			saveConfig()
 		end
 	end
 end
