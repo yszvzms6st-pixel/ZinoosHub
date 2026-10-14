@@ -1513,7 +1513,7 @@ function prehistoricEggs()
 			return
 		end
 		if queueRare and not alertedEggs[egg] then
-			local accepted = queueRare("Rare egg", info.label, nil, "egg|" .. tostring(os.clock()) .. "|" .. egg:GetFullName())
+			local accepted = queueRare("Eligible egg", info.label, nil, "egg|" .. tostring(os.clock()) .. "|" .. egg:GetFullName())
 			if accepted then
 				alertedEggs[egg] = true
 			end
@@ -1757,6 +1757,132 @@ local function backToBench()
 	LocalPlayer:SetAttribute("CodexMode", "train")
 end
 
+local stealAttempts = setmetatable({}, { __mode = "k" })
+local stealIdentities = {}
+local STEAL_ATTEMPT_LIMIT = 3
+local STEAL_RETRY_WAIT = 4
+
+local function clearStealAttempts()
+	table.clear(stealAttempts)
+	table.clear(stealIdentities)
+end
+
+local function eggIdentity(model)
+	if typeof(model) ~= "Instance" then
+		return nil
+	end
+	local zone = model:GetAttribute("SpawnZone")
+	local slot = model:GetAttribute("SlotIndex")
+	local key = model:GetAttribute("Key")
+	if slot ~= nil and key ~= nil then
+		return tostring(zone) .. "|slot|" .. tostring(slot) .. "|" .. tostring(key)
+	end
+	if not (model:IsA("Model") or model:IsA("BasePart")) then
+		return tostring(zone) .. "|" .. model.Name
+	end
+	local ok, pivot = pcall(function()
+		return model:GetPivot().Position
+	end)
+	if not ok or typeof(pivot) ~= "Vector3" then
+		return tostring(zone) .. "|" .. model.Name
+	end
+	return string.format("%s|%s|%d|%d", tostring(zone), model.Name, math.floor(pivot.X / 4), math.floor(pivot.Z / 4))
+end
+
+local function findStealRecord(model)
+	if typeof(model) ~= "Instance" then
+		return nil
+	end
+	local record = stealAttempts[model]
+	if type(record) == "table" then
+		return record
+	end
+	local identity = eggIdentity(model)
+	if identity then
+		local shared = stealIdentities[identity]
+		if type(shared) == "table" then
+			return shared
+		end
+	end
+	return nil
+end
+
+local function stealRecord(model)
+	local record = findStealRecord(model)
+	if type(record) == "table" then
+		stealAttempts[model] = record
+		return record
+	end
+	record = {
+		count = 0,
+		last = 0,
+		cooldown = 0,
+		completed = false,
+		reason = nil,
+	}
+	stealAttempts[model] = record
+	local identity = eggIdentity(model)
+	if identity then
+		stealIdentities[identity] = record
+	end
+	return record
+end
+
+local function canAttemptModel(model)
+	if typeof(model) ~= "Instance" or model.Parent == nil then
+		return false
+	end
+	local record = findStealRecord(model)
+	if type(record) ~= "table" then
+		return true
+	end
+	if record.completed == true or (record.count or 0) >= STEAL_ATTEMPT_LIMIT then
+		return false
+	end
+	return os.clock() >= (record.cooldown or 0)
+end
+
+local function noteStealAttempt(model, reason, completed)
+	if typeof(model) ~= "Instance" then
+		return nil
+	end
+	local record = stealRecord(model)
+	record.last = os.clock()
+	if (record.count or 0) < 1 then
+		record.count = 1
+	end
+	if completed == true then
+		record.completed = true
+		record.reason = nil
+		record.cooldown = 0
+		return record
+	end
+	record.reason = reason
+	record.cooldown = os.clock() + STEAL_RETRY_WAIT
+	return record
+end
+
+local function beginStealAttempt(model)
+	local record = stealRecord(model)
+	record.count = (record.count or 0) + 1
+	record.last = os.clock()
+	record.completed = false
+	return record
+end
+
+local function resetStealScan()
+	STATE.nextSteal = 0
+	STATE.openedDay = nil
+	STATE.streamedDay = nil
+	STATE.triedKeys = {}
+	clearStealAttempts()
+	STATE.stealError = nil
+	STATE.liftSteal = false
+	STATE.stealGoal = nil
+	activeGoal = nil
+	STATE.stealTarget = nil
+end
+
 local function runStealTrip()
 	if STATE.autoSteal ~= true or not featureReady("Auto Steal") then
 		return
@@ -1779,80 +1905,174 @@ local function runStealTrip()
 		STATE.liftSteal = false
 		STATE.stealGoal = nil
 		activeGoal = nil
+		STATE.stealTarget = nil
 		LocalPlayer:SetAttribute("CodexMode", "train")
-		return
+		local waiting = {
+			outcome = "Waiting for daytime",
+			eggName = nil,
+			attempt = nil,
+			failureReason = nil,
+			pickupSucceeded = false,
+			deliverySucceeded = false,
+			timestamp = os.clock(),
+		}
+		STATE.lastStealStatus = waiting
+		return waiting
 	end
 	if STATE.triedDay ~= dayId then
 		STATE.triedDay = dayId
 		STATE.triedKeys = {}
 		STATE.openedDay = nil
 		STATE.streamedDay = nil
+		clearStealAttempts()
 	end
-	if type(STATE.triedKeys) ~= "table" then
-		STATE.triedKeys = {}
-	end
-	local function eggKey(egg)
-		local pos = egg.pos
-		if typeof(pos) ~= "Vector3" and egg.model then
-			pos = egg.model:GetPivot().Position
+	local function finishSteal(fields)
+		local status = {
+			outcome = fields.outcome,
+			eggName = fields.eggName,
+			attempt = fields.attempt,
+			failureReason = fields.failureReason,
+			pickupSucceeded = fields.pickupSucceeded == true,
+			deliverySucceeded = fields.deliverySucceeded == true,
+			timestamp = os.clock(),
+		}
+		STATE.lastStealStatus = status
+		if type(fields.failureReason) == "string" and fields.failureReason ~= "" then
+			STATE.stealError = fields.failureReason
+		elseif status.pickupSucceeded then
+			STATE.stealError = nil
 		end
-		pos = pos or Vector3.zero
-		return string.format("%s|%d|%d", egg.label or (egg.model and egg.model.Name) or "egg", math.floor(pos.X + 0.5), math.floor(pos.Z + 0.5))
+		return status
+	end
+	local function retryOutcome(reason, count)
+		if (count or 0) >= STEAL_ATTEMPT_LIMIT then
+			return "Retry limit reached"
+		end
+		if reason == "arrival timeout" then
+			return "Retrying after arrival timeout"
+		end
+		if type(reason) == "string" and reason ~= "" then
+			return "Retrying after " .. reason
+		end
+		return "Retrying after pickup timeout"
+	end
+	local function failAttempt(model, eggName, reason)
+		local record = noteStealAttempt(model, reason, false)
+		local count = record and record.count or 1
+		restoreStealChanges()
+		backToBench()
+		STATE.nextSteal = os.clock() + STEAL_RETRY_WAIT
+		return finishSteal({
+			outcome = retryOutcome(reason, count),
+			eggName = eggName,
+			attempt = count,
+			failureReason = reason,
+			pickupSucceeded = false,
+			deliverySucceeded = false,
+		})
 	end
 	local function freshTarget()
 		for _, egg in ipairs(prehistoricEggs()) do
-			if egg.model.Parent and STATE.triedKeys[eggKey(egg)] ~= true then
+			if canAttemptModel(egg.model) then
 				return egg
 			end
 		end
 		return nil
 	end
-	local opening = STATE.openedDay ~= dayId
+	local function blockedTarget()
+		local sawLimit = false
+		local sawCooldown = false
+		for _, egg in ipairs(prehistoricEggs()) do
+			local record = findStealRecord(egg.model)
+			if type(record) == "table" and record.completed ~= true then
+				if (record.count or 0) >= STEAL_ATTEMPT_LIMIT then
+					sawLimit = true
+				elseif os.clock() < (record.cooldown or 0) then
+					sawCooldown = true
+				end
+			end
+		end
+		if sawCooldown then
+			return "cooldown"
+		end
+		if sawLimit then
+			return "limit"
+		end
+		return nil
+	end
 	local target = freshTarget()
-	if not target and opening and STATE.streamedDay ~= dayId then
+	if not target and STATE.streamedDay ~= dayId then
 		STATE.streamedDay = dayId
 		local peeked = peekPrehistoric()
-		if peeked and peeked.model and peeked.model.Parent and STATE.triedKeys[eggKey(peeked)] ~= true then
+		if peeked and canAttemptModel(peeked.model) then
 			target = peeked
 		end
 	end
-	if not target and not opening then
-		STATE.liftSteal = false
-		STATE.stealGoal = nil
-		activeGoal = nil
-		LocalPlayer:SetAttribute("CodexMode", "train")
-		return
-	end
-	if not standOutFront() then
-		STATE.liftSteal = false
-		STATE.stealGoal = nil
-		activeGoal = nil
-		LocalPlayer:SetAttribute("CodexMode", "train")
-		STATE.nextSteal = os.clock() + 8
-		return
-	end
-	STATE.openedDay = dayId
 	if not target then
-		local lookUntil = os.clock() + 2
-		while os.clock() < lookUntil and running() and STATE.autoSteal == true do
-			target = freshTarget()
-			if target then
-				break
-			end
-			task.wait(0.2)
+		local blocked = blockedTarget()
+		STATE.liftSteal = false
+		STATE.stealGoal = nil
+		activeGoal = nil
+		STATE.stealTarget = nil
+		LocalPlayer:SetAttribute("CodexMode", "train")
+		if blocked == "cooldown" then
+			return nil
 		end
+		local previous = STATE.lastStealStatus
+		if type(previous) == "table" then
+			if previous.outcome == "Pickup succeeded" or previous.outcome == "Delivery succeeded" or previous.outcome == "Retry limit reached" then
+				return nil
+			end
+		end
+		if blocked == "limit" then
+			return finishSteal({
+				outcome = "Retry limit reached",
+				failureReason = "retry limit reached",
+				pickupSucceeded = false,
+				deliverySucceeded = false,
+			})
+		end
+		return finishSteal({
+			outcome = "No matching eggs",
+			pickupSucceeded = false,
+			deliverySucceeded = false,
+		})
 	end
-	if not target or not target.model.Parent then
+	local stolenName = target.label or target.model.Name
+	STATE.stealTarget = stolenName
+	local started = beginStealAttempt(target.model)
+	finishSteal({
+		outcome = "Preparing to grab",
+		eggName = stolenName,
+		attempt = started.count,
+		pickupSucceeded = false,
+		deliverySucceeded = false,
+	})
+	if not standOutFront() then
+		return failAttempt(target.model, stolenName, "bench exit")
+	end
+	if not target.model.Parent then
+		restoreStealChanges()
 		backToBench()
 		STATE.nextSteal = os.clock() + 2
-		return
+		return finishSteal({
+			outcome = "No matching eggs",
+			eggName = stolenName,
+			failureReason = "gone",
+			pickupSucceeded = false,
+			deliverySucceeded = false,
+		})
 	end
-	STATE.triedKeys[eggKey(target)] = true
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return failAttempt(target.model, stolenName, "missing character")
+	end
 	LocalPlayer:SetAttribute("CodexMode", "steal")
 	homeSpot()
 	local grabbed = false
 	local arrived = false
-	local stolenName = target.label or target.model.Name
+	local tripFault = nil
 	local tripOk, tripErr = pcall(function()
 		local gym = myGym()
 		local bench = gym and gym:FindFirstChild("Bench")
@@ -1866,67 +2086,88 @@ local function runStealTrip()
 			task.wait(0.05)
 		end
 		if LocalPlayer:GetAttribute("Benching") or not running() or STATE.autoSteal ~= true then
+			tripFault = "bench exit"
 			return
 		end
-		local character = LocalPlayer.Character
-		local hrp = character and character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if hrp and target.model.Parent and target.prompt and target.prompt.Parent then
-			rememberSteal(target.prompt, "HoldDuration")
-			rememberSteal(target.prompt, "RequiresLineOfSight")
-			rememberSteal(target.prompt, "MaxActivationDistance")
-			target.prompt.HoldDuration = 0
-			target.prompt.RequiresLineOfSight = false
-			if target.prompt.MaxActivationDistance < 30 then
-				target.prompt.MaxActivationDistance = 30
+		local tripCharacter = LocalPlayer.Character
+		local tripRoot = tripCharacter and tripCharacter:FindFirstChild("HumanoidRootPart")
+		local humanoid = tripCharacter and tripCharacter:FindFirstChildOfClass("Humanoid")
+		if not tripRoot then
+			tripFault = "missing character"
+			return
+		end
+		if not target.model.Parent then
+			tripFault = "gone"
+			return
+		end
+		if not target.prompt or not target.prompt.Parent then
+			tripFault = "prompt failure"
+			return
+		end
+		rememberSteal(target.prompt, "HoldDuration")
+		rememberSteal(target.prompt, "RequiresLineOfSight")
+		rememberSteal(target.prompt, "MaxActivationDistance")
+		target.prompt.HoldDuration = 0
+		target.prompt.RequiresLineOfSight = false
+		if target.prompt.MaxActivationDistance < 30 then
+			target.prompt.MaxActivationDistance = 30
+		end
+		for _, part in ipairs(target.model:GetDescendants()) do
+			if part:IsA("BasePart") then
+				rememberSteal(part, "CanCollide")
+				part.CanCollide = false
 			end
-			for _, part in ipairs(target.model:GetDescendants()) do
-				if part:IsA("BasePart") then
-					rememberSteal(part, "CanCollide")
-					part.CanCollide = false
-				end
+		end
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid.Sit = false
+		end
+		local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
+		local goal = CFrame.new(stand)
+		activeGoal = goal
+		STATE.stealGoal = goal
+		pinGoal(tripRoot, goal)
+		local arriveUntil = os.clock() + 1.5
+		while os.clock() < arriveUntil and running() and STATE.autoSteal == true and target.model.Parent do
+			pinGoal(tripRoot, goal)
+			if (tripRoot.Position - stand).Magnitude < 18 then
+				arrived = true
+				break
 			end
-			if humanoid then
-				humanoid.PlatformStand = false
-				humanoid.Sit = false
+			task.wait(0.05)
+		end
+		if not target.model.Parent then
+			tripFault = "gone"
+			return
+		end
+		if not arrived then
+			tripFault = "arrival timeout"
+			return
+		end
+		local grabUntil = os.clock() + 2
+		while os.clock() < grabUntil and running() and STATE.autoSteal == true and target.prompt.Parent do
+			pinGoal(tripRoot, goal)
+			fireproximityprompt(target.prompt)
+			if LocalPlayer:GetAttribute("holdingFriend") == true then
+				grabbed = true
+				break
 			end
-			local stand = target.model:GetPivot().Position + Vector3.new(0, 4, 0)
-			local goal = CFrame.new(stand)
-			activeGoal = goal
-			STATE.stealGoal = goal
-			pinGoal(hrp, goal)
-			local arriveUntil = os.clock() + 1.5
-			while os.clock() < arriveUntil and running() and STATE.autoSteal == true and target.model.Parent do
-				pinGoal(hrp, goal)
-				if (hrp.Position - stand).Magnitude < 18 then
-					arrived = true
-					break
-				end
-				task.wait(0.05)
-			end
-			if arrived then
-				local grabUntil = os.clock() + 2
-				while os.clock() < grabUntil and running() and STATE.autoSteal == true and target.prompt.Parent do
-					pinGoal(hrp, goal)
-					fireproximityprompt(target.prompt)
-					if LocalPlayer:GetAttribute("holdingFriend") == true then
-						grabbed = true
-						break
-					end
-					task.wait(0.1)
-				end
-				grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
-			end
+			task.wait(0.1)
+		end
+		grabbed = grabbed or LocalPlayer:GetAttribute("holdingFriend") == true
+		if not grabbed then
+			tripFault = "pickup timeout"
 		end
 	end)
 	restoreStealChanges()
 	if not tripOk then
 		grabbed = false
+		tripFault = "script error"
 		warn("[Zinoos hub] steal " .. tostring(tripErr))
 	end
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	local carryingEgg = LocalPlayer:GetAttribute("holdingFriend") == true
-	if backpack and not carryingEgg then
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	if backpack then
 		for _, child in ipairs(backpack:GetChildren()) do
 			if child:IsA("Tool") and child:GetAttribute("isEgg") then
 				carryingEgg = true
@@ -1934,18 +2175,46 @@ local function runStealTrip()
 			end
 		end
 	end
-	if grabbed or carryingEgg then
+	local pickupSucceeded = grabbed or carryingEgg
+	local deliverySucceeded = false
+	if pickupSucceeded then
 		deliverHeld()
+		deliverySucceeded = LocalPlayer:GetAttribute("holdingFriend") ~= true and not hasEggTool()
+		noteStealAttempt(target.model, nil, true)
+	elseif tripFault == "gone" then
+		restoreStealChanges()
+		backToBench()
+		LocalPlayer:SetAttribute("CodexMode", "train")
+		LocalPlayer:SetAttribute("CodexStolen", 0)
+		LocalPlayer:SetAttribute("CodexStealName", stolenName)
+		STATE.nextSteal = os.clock() + 2
+		return finishSteal({
+			outcome = "No matching eggs",
+			eggName = stolenName,
+			failureReason = "gone",
+			pickupSucceeded = false,
+			deliverySucceeded = false,
+		})
+	else
+		return failAttempt(target.model, stolenName, tripFault or "pickup timeout")
 	end
 	LocalPlayer:SetAttribute("CodexMode", "train")
-	LocalPlayer:SetAttribute("CodexStolen", grabbed and 1 or 0)
+	LocalPlayer:SetAttribute("CodexStolen", pickupSucceeded and 1 or 0)
 	LocalPlayer:SetAttribute("CodexStealName", stolenName)
-	if grabbed and queueRare then
+	if pickupSucceeded and queueRare then
 		queueRare("Stolen egg", stolenName)
 	end
 	backToBench()
-	STATE.stealError = nil
-	STATE.nextSteal = os.clock() + (grabbed and 12 or 4)
+	STATE.stealTarget = nil
+	STATE.nextSteal = os.clock() + (pickupSucceeded and 12 or STEAL_RETRY_WAIT)
+	local attemptCount = stealRecord(target.model).count
+	return finishSteal({
+		outcome = deliverySucceeded and "Delivery succeeded" or "Pickup succeeded",
+		eggName = stolenName,
+		attempt = attemptCount,
+		pickupSucceeded = true,
+		deliverySucceeded = deliverySucceeded,
+	})
 end
 
 local savedPadTouch = setmetatable({}, { __mode = "k" })
@@ -2830,6 +3099,7 @@ hubCleanup(function()
 end)
 
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ZinoosHub.rfld"
+local CONFIG_VERSION = 2
 
 local FLAG_KEYS = {
 	AutoTrain = "autoTrain",
@@ -2863,18 +3133,20 @@ local function syncSavedVisuals()
 end
 
 local function loadSaved()
-	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(CONFIG_PATH) then
+	local function useFreshZone()
 		STATE.stealZone = "Meadow"
+		STATE.stealZoneExplicit = false
 		syncSavedVisuals()
-		return
+		return false
+	end
+	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(CONFIG_PATH) then
+		return useFreshZone()
 	end
 	local ok, saved = pcall(function()
 		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_PATH))
 	end)
 	if not ok or type(saved) ~= "table" then
-		STATE.stealZone = "Meadow"
-		syncSavedVisuals()
-		return
+		return useFreshZone()
 	end
 	for flag, key in pairs(FLAG_KEYS) do
 		if type(saved[flag]) == "boolean" then
@@ -2886,11 +3158,7 @@ local function loadSaved()
 	if type(zone) == "table" then
 		zone = zone[1]
 	end
-	if type(zone) == "string" and FLOORS[zone] then
-		STATE.stealZone = zone
-	else
-		STATE.stealZone = "Meadow"
-	end
+	local zoneValid = type(zone) == "string" and FLOORS[zone] ~= nil
 	local rarity = saved.WebhookRarity
 	if type(rarity) == "table" then
 		rarity = rarity[1]
@@ -2914,7 +3182,29 @@ local function loadSaved()
 		STATE.dockY = saved.DockY
 	end
 	STATE.dockCustom = saved.DockCustom == true
+	local legacy = saved.ConfigVersion ~= CONFIG_VERSION and type(saved.StealZoneExplicit) ~= "boolean"
+	local migrated = false
+	if legacy then
+		migrated = true
+		if zoneValid and zone == "Prehistoric" then
+			STATE.stealZone = "Meadow"
+			STATE.stealZoneExplicit = false
+		elseif zoneValid and zone ~= "Meadow" then
+			STATE.stealZone = zone
+			STATE.stealZoneExplicit = true
+		else
+			STATE.stealZone = "Meadow"
+			STATE.stealZoneExplicit = false
+		end
+	elseif saved.StealZoneExplicit == true and zoneValid then
+		STATE.stealZone = zone
+		STATE.stealZoneExplicit = true
+	else
+		STATE.stealZone = "Meadow"
+		STATE.stealZoneExplicit = false
+	end
 	syncSavedVisuals()
+	return migrated
 end
 
 local function saveConfig()
@@ -2927,6 +3217,8 @@ local function saveConfig()
 		pcall(makefolder, "Rayfield/Configurations/ZinoosHub")
 	end
 	local payload = {
+		ConfigVersion = CONFIG_VERSION,
+		StealZoneExplicit = STATE.stealZoneExplicit == true,
 		AutoSell = false,
 		StealZone = { STATE.stealZone or "Meadow" },
 		WebhookRarity = { STATE.webhookRarity or "Divine" },
@@ -2961,19 +3253,17 @@ local function applyAlertRarity(option)
 	if typeof(STATE._setRarityText) == "function" then
 		pcall(STATE._setRarityText, option)
 	end
-	STATE.nextSteal = 0
-	STATE.triedKeys = {}
-	STATE.openedDay = nil
-	STATE.streamedDay = nil
+	resetStealScan()
 	saveConfig()
 	if typeof(STATE.refreshTracker) == "function" then
 		pcall(STATE.refreshTracker)
 	end
 end
 
+local pulseAntiAfk
+
 local function installHub()
 	closeLeftoverMenus()
-	loadSaved()
 
 	local accent = Color3.fromRGB(255, 79, 158)
 	local ink = Color3.fromRGB(245, 240, 248)
@@ -3394,6 +3684,10 @@ local function installHub()
 		if key == "autoTrain" and not on then
 			lastSwitchAt = 0
 			releaseGym()
+		elseif key == "autoSteal" and on then
+			resetStealScan()
+		elseif key == "antiAfk" and on and pulseAntiAfk then
+			task.defer(pulseAntiAfk)
 		elseif key == "lowEnd" then
 			applyLowEnd(on)
 		elseif key == "invEsp" and not on then
@@ -3408,7 +3702,7 @@ local function installHub()
 		row.Name = name
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 1
-		row.Size = UDim2.new(1, 0, 0, hint and 40 or 30)
+		row.Size = UDim2.new(1, 0, 0, hint and 50 or 30)
 		row.ZIndex = 6
 		row.Parent = parentBox
 		local title = Instance.new("TextLabel")
@@ -3428,9 +3722,10 @@ local function installHub()
 			note.Text = hint
 			note.TextColor3 = muted
 			note.TextSize = 11
+			note.TextWrapped = true
 			note.TextXAlignment = Enum.TextXAlignment.Left
 			note.Position = UDim2.fromOffset(0, 18)
-			note.Size = UDim2.new(1, -52, 0, 16)
+			note.Size = UDim2.new(1, -52, 0, 28)
 			note.ZIndex = 6
 			note.Parent = row
 		end
@@ -3665,7 +3960,7 @@ local function installHub()
 	local rightColumn = column(2)
 
 	local eggs = card(leftColumn, "EGGS", 1)
-	makeSwitch(eggs, "Auto Steal", "autoSteal", "Teleports onto a rare egg, then comes back")
+	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an eligible egg matching the selected rarity, then comes back")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
 		for _, zoneName in ipairs(Zones.Order) do
@@ -3678,9 +3973,15 @@ local function installHub()
 	makeDropdown(eggs, "Steal Zone", function()
 		return STATE.stealZone or "Meadow"
 	end, zoneOptions, function(option)
-		STATE.stealZone = zoneChoice(option)
+		local chosen = zoneChoice(option)
+		local changed = chosen ~= STATE.stealZone
+		STATE.stealZone = chosen
+		STATE.stealZoneExplicit = true
 		STATE.zoneControl.value = STATE.stealZone
 		STATE.zoneControl.currentOption = { STATE.stealZone }
+		if changed then
+			resetStealScan()
+		end
 		saveConfig()
 		if typeof(STATE.refreshTracker) == "function" then
 			pcall(STATE.refreshTracker)
@@ -3755,7 +4056,7 @@ local function installHub()
 
 	local welcome = label(homePage, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
 	welcome.LayoutOrder = 1
-	local blurb = label(homePage, "Stays on your bench. Teleports onto a rare egg, grabs it, and comes back.", 14, muted, Enum.Font.Gotham, 36)
+	local blurb = label(homePage, "Stays on your bench. Grabs an eligible egg matching the selected rarity, then comes back.", 14, muted, Enum.Font.Gotham, 36)
 	blurb.LayoutOrder = 2
 	local statGrid = Instance.new("Frame")
 	statGrid.BackgroundTransparency = 1
@@ -3776,7 +4077,7 @@ local function installHub()
 	noteBody.LayoutOrder = 1
 
 	local trackerCard = card(homePage, "EGG TRACKER", 5)
-	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 18)
+	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 78)
 	trackerStatus.LayoutOrder = 1
 	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
 	local trackerRows = {}
@@ -3834,26 +4135,53 @@ local function installHub()
 			trackerStatus.TextColor3 = muted
 			return
 		end
-		local worth = 0
-		local waiting = false
+		local eligible = 0
+		local waitingCount = 0
 		for _, egg in ipairs(eggs) do
 			if egg.worth then
-				worth += 1
+				eligible += 1
 			end
-			if egg.worth and not egg.canAttempt then
-				waiting = true
+			if egg.reason == "waiting for daytime" then
+				waitingCount += 1
 			end
 		end
-		if #eggs == 0 then
-			trackerStatus.Text = stealZone() .. " · nothing spawned"
-		else
-			local text = string.format("%d spawned · %d worth taking", #eggs, worth)
-			if waiting then
-				text ..= " · waiting for daytime"
-			end
-			trackerStatus.Text = text
+		local phase = ReplicatedStorage:GetAttribute("TimeOfDayPhase")
+		if phase ~= "Day" and phase ~= "Night" then
+			phase = stealDaytime() and "Day" or "Night"
 		end
-		trackerStatus.TextColor3 = worth > 0 and accent or muted
+		local lines = {
+			string.format("%s · %s · %s", stealZone(), STATE.webhookRarity or "Divine", tostring(phase)),
+			string.format("%d spawned · %d eligible · %d waiting for daytime", #eggs, eligible, waitingCount),
+		}
+		local status = STATE.lastStealStatus
+		if waitingCount > 0 and not stealDaytime() then
+			lines[#lines + 1] = "Waiting for daytime"
+		elseif type(status) == "table" and type(status.outcome) == "string" and status.outcome ~= "" then
+			local outcome = status.outcome
+			if type(status.failureReason) == "string" and status.failureReason ~= "" and status.pickupSucceeded ~= true then
+				local remain = 0
+				if type(status.timestamp) == "number" and string.find(outcome, "Retrying", 1, true) then
+					remain = math.max(0, math.ceil(status.timestamp + 4 - os.clock()))
+				end
+				if remain > 0 then
+					outcome ..= " · retry in " .. tostring(remain) .. "s"
+				elseif outcome ~= status.failureReason then
+					outcome ..= " · " .. status.failureReason
+				end
+			end
+			lines[#lines + 1] = outcome
+		elseif #eggs == 0 or eligible == 0 then
+			lines[#lines + 1] = "No matching eggs"
+		end
+		if STATE.antiAfk == true then
+			if STATE.antiAfkOperational == true then
+				lines[#lines + 1] = "Anti AFK working through " .. tostring(STATE.antiAfkMethod or "VirtualUser")
+			else
+				lines[#lines + 1] = "Anti AFK requested but unavailable"
+			end
+		end
+		trackerStatus.Text = table.concat(lines, "\n")
+		trackerStatus.TextColor3 = eligible > 0 and accent or muted
 		for index, slot in ipairs(trackerRows) do
 			local egg = eggs[index]
 			slot.row.Visible = egg ~= nil
@@ -3882,7 +4210,7 @@ local function installHub()
 	end
 	STATE.refreshTracker = refreshTracker
 
-	local discordBlurb = label(discordPage, "Get a Discord message when a rare egg shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 40)
+	local discordBlurb = label(discordPage, "Get a Discord message when an eligible egg matching the selected rarity shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 40)
 	discordBlurb.LayoutOrder = 1
 	local discordCard = card(discordPage, "WEBHOOK", 2)
 	makeSwitch(discordCard, "Webhook Alerts", "webhookOn")
@@ -3957,7 +4285,7 @@ local function installHub()
 		task.spawn(function()
 			local ok, message = sendWebhook(url, {
 				username = "Zinoos hub",
-				content = "Webhook connected. You'll get a ping when a rare egg shows up, is stolen, or hatches.",
+				content = "Webhook connected. You'll get a ping when an eligible egg matching the selected rarity shows up, is stolen, or hatches.",
 			})
 			if gui.Parent then
 				showHookResult(message, ok)
@@ -4264,6 +4592,12 @@ local function installHub()
 	}
 end
 
+local configMigrated = loadSaved()
+if configMigrated then
+	resetStealScan()
+	saveConfig()
+end
+
 task.spawn(function()
 	if not running() then
 		return
@@ -4292,20 +4626,28 @@ end)
 task.spawn(function()
 	while running() do
 		STATE.stealTick = os.clock()
-		local ok, err = pcall(runStealTrip)
+		local ok, result = pcall(runStealTrip)
 		if not ok then
-			local message = tostring(err)
+			local message = tostring(result)
 			STATE.liftSteal = false
 			STATE.stealGoal = nil
+			STATE.stealTarget = nil
 			activeGoal = nil
 			restoreStealChanges()
 			STATE.nextSteal = os.clock() + 8
-			if STATE.stealError ~= message then
-				STATE.stealError = message
-				warn("[Zinoos hub] steal " .. message)
-			end
-		else
-			STATE.stealError = nil
+			STATE.stealError = message
+			STATE.lastStealStatus = {
+				outcome = "Retrying after script error",
+				eggName = nil,
+				attempt = nil,
+				failureReason = message,
+				pickupSucceeded = false,
+				deliverySucceeded = false,
+				timestamp = os.clock(),
+			}
+			warn("[Zinoos hub] steal " .. message)
+		elseif type(result) == "table" then
+			STATE.lastStealStatus = result
 		end
 		task.wait(0.6)
 	end
@@ -4457,6 +4799,8 @@ local function syncToggles()
 			if key == "autoTrain" and control.value == false then
 				lastSwitchAt = 0
 				releaseGym()
+			elseif key == "autoSteal" and control.value == true then
+				resetStealScan()
 			elseif key == "lowEnd" then
 				applyLowEnd(control.value == true)
 			elseif key == "invEsp" and control.value == false then
@@ -4596,34 +4940,71 @@ local function scanNewPets()
 	petsReady = true
 end
 
-loadSaved()
+local function pulseVirtualInput()
+	local input = (game:GetService("VirtualInputManager") :: any)
+	if typeof(input.SendMouseButtonEvent) ~= "function" then
+		error("VirtualInputManager.SendMouseButtonEvent is missing")
+	end
+	local calls = {
+		function()
+			input:SendMouseButtonEvent(-10000, -10000, 1, true, game, 0)
+			input:SendMouseButtonEvent(-10000, -10000, 1, false, game, 0)
+		end,
+		function()
+			input:SendMouseButtonEvent(-10000, -10000, 1, true, game)
+			input:SendMouseButtonEvent(-10000, -10000, 1, false, game)
+		end,
+	}
+	local lastError = "VirtualInputManager failed"
+	for _, call in ipairs(calls) do
+		local ok, err = pcall(call)
+		if ok then
+			return
+		end
+		lastError = tostring(err)
+	end
+	error(lastError)
+end
 
-local antiAfkWarned = false
-local function pulseAntiAfk()
+pulseAntiAfk = function()
 	if not running() or STATE.antiAfk ~= true then
 		return false
 	end
-	local worked = pcall(function()
+	local userOk = pcall(function()
 		local virtual = (game:GetService("VirtualUser") :: any)
 		virtual:CaptureController()
 		virtual:ClickButton2(Vector2.new(-1, -1))
 	end)
-	if not worked then
-		if not antiAfkWarned then
-			antiAfkWarned = true
-			warn("[Zinoos hub] Anti AFK is off because VirtualUser is missing.")
-		end
-		return false
+	if userOk then
+		STATE.antiAfkOperational = true
+		STATE.antiAfkMethod = "VirtualUser"
+		STATE.lastAntiAfk = os.clock()
+		STATE.antiAfkError = nil
+		return true
 	end
-	STATE.lastAntiAfk = os.clock()
-	return true
+	local inputOk, inputErr = pcall(pulseVirtualInput)
+	if inputOk then
+		STATE.antiAfkOperational = true
+		STATE.antiAfkMethod = "VirtualInputManager"
+		STATE.lastAntiAfk = os.clock()
+		STATE.antiAfkError = nil
+		return true
+	end
+	STATE.antiAfkOperational = false
+	STATE.antiAfkMethod = nil
+	STATE.antiAfkError = tostring(inputErr)
+	return false
 end
-STATE.connect(LocalPlayer.Idled, function()
+local antiAfkConnection = STATE.connect(LocalPlayer.Idled, function()
 	pulseAntiAfk()
 end)
 local antiAfkThread = task.spawn(function()
+	task.wait(1)
+	if running() and STATE.antiAfk == true then
+		pulseAntiAfk()
+	end
 	while running() do
-		task.wait(15 * 60)
+		task.wait(8 * 60)
 		if not running() then
 			return
 		end
@@ -4632,6 +5013,11 @@ local antiAfkThread = task.spawn(function()
 end)
 hubCleanup(function()
 	pcall(task.cancel, antiAfkThread)
+	if antiAfkConnection then
+		pcall(function()
+			antiAfkConnection:Disconnect()
+		end)
+	end
 end)
 
 local nextBubble = 0

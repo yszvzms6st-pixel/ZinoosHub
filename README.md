@@ -23,15 +23,15 @@ Running it again replaces the hub that is already open. The new run stops the pr
 ## What it does
 
 - Trains strength on the bench until rebirth has no next tier, then trains speed on the treadmill.
-- Leaves training only for an egg in the selected zone that meets Alert Rarity. The fresh default is Divine, in the Meadow zone.
+- Leaves training only for an eligible egg matching the selected rarity in the selected zone. The fresh default is Divine, in the Meadow zone. An old save that still has the automatic Prehistoric zone is moved to Meadow once. A zone you pick yourself is kept.
 - Rebirths, buys gym upgrades and trails, claims the daily reward, and works through the index.
 - Opens eggs when they are ready, and equips a better bag pet only when it earns more than the worst hatched pet on the plot.
 - Can take the free stash, lighten pet visuals, and draw egg and inventory ESP.
 - Low End lowers this session's graphics only. It does not change the saved Roblox quality setting.
-- Sends a Discord message when an eligible egg appears, is stolen, or hatches.
-- Anti AFK keeps the session in the game while you are idle. It does not move the character, leave the bench, or press anything on screen.
+- Sends a Discord message when an eligible egg matching the selected rarity appears, is stolen, or hatches.
+- Anti AFK keeps the session in the game while you are idle. It tries VirtualUser first, then VirtualInputManager, and pulses again every eight minutes. It does not move the character, leave the bench, or press anything on screen. If neither input method exists, the switch stays on and the tracker says Anti AFK is unavailable.
 
-A fresh save turns these on: Auto Train, Anti AFK, Auto Rebirth, Auto Upgrade, Auto Trails, Auto Steal, Auto Open, Equip Best, Auto Daily, Auto Index, Free Stash, Lite Pets, Egg ESP, Inventory ESP, Low End, and Webhook Alerts. An existing configuration file is loaded and kept. Auto Sell stays off.
+A fresh save turns these on: Auto Train, Anti AFK, Auto Rebirth, Auto Upgrade, Auto Trails, Auto Steal, Auto Open, Equip Best, Auto Daily, Auto Index, Free Stash, Lite Pets, Egg ESP, Inventory ESP, Low End, and Webhook Alerts. An existing configuration file is loaded once at startup and kept. Saved toggles, the webhook URL, menu position, and rarity stay as they were. A missing zone, or an old automatic Prehistoric zone, becomes Meadow until you choose a zone. Auto Sell stays off.
 
 Press **Right Control** to open or close the menu. Drag the top bar or the sidebar to move the window. The Zinoos button can be dragged too.
 
