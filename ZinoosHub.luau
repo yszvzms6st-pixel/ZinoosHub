@@ -748,6 +748,9 @@ end
 if rarityRank[STATE.webhookRarity] == nil then
 	STATE.webhookRarity = "Divine"
 end
+if rarityRank[STATE.placeRarity] == nil then
+	STATE.placeRarity = rarityOptions[1] or "Common"
+end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Meadow"
 end
@@ -1201,19 +1204,80 @@ local function homeSpot()
 	return STATE.homePos or Vector3.new(299, 10, 314)
 end
 
+local function placeRank()
+	return rarityRank[STATE.placeRarity] or rarityRank[rarityOptions[1]] or 1
+end
+
+local function toolEggRank(tool)
+	if typeof(tool) ~= "Instance" then
+		return nil
+	end
+	local key = tool:GetAttribute("Key")
+	if key ~= nil then
+		local spec = petSpec(key)
+		if spec and type(spec.Rarity) == "string" and rarityRank[spec.Rarity] then
+			return rarityRank[spec.Rarity]
+		end
+	end
+	local named = tool:GetAttribute("Rarity")
+	if type(named) == "string" and rarityRank[named] then
+		return rarityRank[named]
+	end
+	local uid = tool:GetAttribute("petUID")
+	if type(uid) == "string" then
+		local data = readData()
+		local bag = data and data.backpack
+		local pet = type(bag) == "table" and bag[uid] or nil
+		if type(pet) == "table" then
+			local spec = petSpec(pet.key)
+			if spec and type(spec.Rarity) == "string" and rarityRank[spec.Rarity] then
+				return rarityRank[spec.Rarity]
+			end
+		end
+	end
+	local petName = string.gsub(tool.Name, " Egg$", "")
+	local rank = rarityOfName[petName] or rarityOfName[tool.Name]
+	if rank then
+		return rank
+	end
+	local display = rarityByDisplay[petName] or rarityByDisplay[tool.Name]
+	if type(display) == "string" and rarityRank[display] then
+		return rarityRank[display]
+	end
+	return nil
+end
+
+local function eggWorthPlacing(tool)
+	local rank = toolEggRank(tool)
+	if rank == nil then
+		return placeRank() <= (rarityRank[rarityOptions[1]] or 1)
+	end
+	return rank >= placeRank()
+end
+
 local function placeOneEgg()
 	local character = LocalPlayer.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
 		return false
 	end
-	local tool = character:FindFirstChildWhichIsA("Tool")
-	if not (tool and tool:GetAttribute("isEgg") and tool:GetAttribute("petUID")) then
+	local function accept(child)
+		return child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and eggWorthPlacing(child)
+	end
+	local tool = nil
+	if character then
+		for _, child in ipairs(character:GetChildren()) do
+			if accept(child) then
+				tool = child
+				break
+			end
+		end
+	end
+	if not tool then
 		local backpack = LocalPlayer:FindFirstChild("Backpack")
-		tool = nil
 		if backpack then
 			for _, child in ipairs(backpack:GetChildren()) do
-				if child:IsA("Tool") and child:GetAttribute("isEgg") and child:GetAttribute("petUID") then
+				if accept(child) then
 					tool = child
 					break
 				end
@@ -1602,21 +1666,36 @@ local function streamAround(pos, seconds)
 end
 
 local function hasEggTool()
-	if LocalPlayer:GetAttribute("holdingFriend") == true then
-		return true
-	end
 	local function scan(container)
 		if not container then
 			return false
 		end
 		for _, child in ipairs(container:GetChildren()) do
-			if child:IsA("Tool") and child:GetAttribute("isEgg") and child:GetAttribute("petUID") then
+			if child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and eggWorthPlacing(child) then
 				return true
 			end
 		end
 		return false
 	end
 	return scan(LocalPlayer:FindFirstChild("Backpack")) or scan(LocalPlayer.Character)
+end
+
+local function holdingUnseenEgg()
+	if LocalPlayer:GetAttribute("holdingFriend") ~= true then
+		return false
+	end
+	local function seen(container)
+		if not container then
+			return false
+		end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("isEgg") then
+				return true
+			end
+		end
+		return false
+	end
+	return not seen(LocalPlayer.Character) and not seen(LocalPlayer:FindFirstChild("Backpack"))
 end
 
 local function peekPrehistoric()
@@ -1743,7 +1822,14 @@ local function backToBench()
 	local seat = bench and bench:FindFirstChild("Seat")
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if seat and hrp then
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if seat and hrp and humanoid then
+		standOn(hrp, humanoid, seat)
+		STATE.liftSteal = true
+		activeGoal = hrp.CFrame
+		STATE.stealGoal = activeGoal
+		task.wait(0.25)
+	elseif seat and hrp then
 		local back = CFrame.new(seat.Position + Vector3.new(0, 3, 0))
 		STATE.liftSteal = true
 		activeGoal = back
@@ -1884,7 +1970,7 @@ local function resetStealScan()
 end
 
 local function pendingDelivery()
-	return LocalPlayer:GetAttribute("holdingFriend") == true or hasEggTool()
+	return hasEggTool() or holdingUnseenEgg()
 end
 
 local function runStealTrip()
@@ -3202,6 +3288,13 @@ local function loadSaved()
 	if type(rarity) == "string" and rarityRank[rarity] then
 		STATE.webhookRarity = rarity
 	end
+	local placeRarity = saved.PlaceRarity
+	if type(placeRarity) == "table" then
+		placeRarity = placeRarity[1]
+	end
+	if type(placeRarity) == "string" and rarityRank[placeRarity] then
+		STATE.placeRarity = placeRarity
+	end
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
@@ -3258,6 +3351,7 @@ local function saveConfig()
 		AutoSell = false,
 		StealZone = { STATE.stealZone or "Meadow" },
 		WebhookRarity = { STATE.webhookRarity or "Divine" },
+		PlaceRarity = { STATE.placeRarity or rarityOptions[1] or "Common" },
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
 		MenuY = STATE.menuY,
@@ -3274,6 +3368,22 @@ local function saveConfig()
 	if ok then
 		pcall(writefile, CONFIG_PATH, encoded)
 	end
+end
+
+local function applyPlaceRarity(option)
+	if type(option) ~= "string" or rarityRank[option] == nil or option == STATE.placeRarity then
+		return
+	end
+	STATE.placeRarity = option
+	if type(STATE.placeControl) ~= "table" then
+		STATE.placeControl = {}
+	end
+	STATE.placeControl.value = option
+	STATE.placeControl.currentOption = { option }
+	if typeof(STATE._setPlaceText) == "function" then
+		pcall(STATE._setPlaceText, option)
+	end
+	saveConfig()
 end
 
 local function applyAlertRarity(option)
@@ -3335,13 +3445,13 @@ local function installHub()
 	local launcher = Instance.new("TextButton")
 	launcher.Name = "Zinoos hub"
 	launcher.AutoButtonColor = false
-	launcher.Text = "Zinoos"
+	launcher.Text = "Zinoos  0:00"
 	launcher.Font = Enum.Font.GothamBold
 	launcher.TextSize = 14
 	launcher.TextColor3 = ink
 	launcher.BackgroundColor3 = panel
-	launcher.Size = UDim2.fromOffset(92, 36)
-	launcher.Position = UDim2.new(1, -110, 0.62, 0)
+	launcher.Size = UDim2.fromOffset(132, 36)
+	launcher.Position = UDim2.new(1, -148, 0.62, 0)
 	launcher.Visible = false
 	launcher.Parent = gui
 	local launcherCorner = Instance.new("UICorner")
@@ -3963,6 +4073,10 @@ local function installHub()
 		value = STATE.webhookRarity,
 		currentOption = { STATE.webhookRarity or "Divine" },
 	}
+	STATE.placeControl = {
+		value = STATE.placeRarity,
+		currentOption = { STATE.placeRarity or rarityOptions[1] or "Common" },
+	}
 	STATE.webhookControl = {
 		value = STATE.webhook or "",
 		currentValue = STATE.webhook or "",
@@ -4031,6 +4145,14 @@ local function installHub()
 	STATE._setRarityText = function(text)
 		rarityPick.Text = tostring(text)
 	end
+	local placePick = makeDropdown(eggs, "Place Rarity", function()
+		return STATE.placeRarity or rarityOptions[1] or "Common"
+	end, rarityOptions, function(option)
+		applyPlaceRarity(option)
+	end)
+	STATE._setPlaceText = function(text)
+		placePick.Text = tostring(text)
+	end
 
 	local pets = card(leftColumn, "PETS", 2)
 	makeSwitch(pets, "Auto Open", "autoOpen")
@@ -4094,9 +4216,22 @@ local function installHub()
 	welcome.LayoutOrder = 1
 	local blurb = label(homePage, "Stays on your bench. Grabs an eligible egg matching the selected rarity, then comes back.", 14, muted, Enum.Font.Gotham, 36)
 	blurb.LayoutOrder = 2
+	local sessionStarted = os.time()
+	local function sessionClock()
+		local elapsed = math.max(0, os.time() - sessionStarted)
+		local hours = math.floor(elapsed / 3600)
+		local minutes = math.floor((elapsed % 3600) / 60)
+		local seconds = elapsed % 60
+		if hours > 0 then
+			return string.format("%d:%02d:%02d", hours, minutes, seconds)
+		end
+		return string.format("%d:%02d", minutes, seconds)
+	end
+	local sessionText = label(homePage, "Session 0:00", 14, ink, Enum.Font.GothamBold, 20)
+	sessionText.LayoutOrder = 3
 	local statGrid = Instance.new("Frame")
 	statGrid.BackgroundTransparency = 1
-	statGrid.LayoutOrder = 3
+	statGrid.LayoutOrder = 4
 	statGrid.Size = UDim2.new(1, 0, 0, 126)
 	statGrid.Parent = homePage
 	local strengthText = statChip(statGrid, "Strength", 1)
@@ -4108,11 +4243,11 @@ local function installHub()
 	local speedText = statChip(statGrid, "Speed", 4)
 	speedText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
 
-	local note = card(homePage, "HOW IT WORKS", 4)
-	local noteBody = label(note, "Alert Rarity decides which eggs are worth standing up for. Weaker eggs leave you training. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 48)
+	local note = card(homePage, "HOW IT WORKS", 5)
+	local noteBody = label(note, "Alert Rarity decides which eggs are worth standing up for. Weaker eggs leave you training. Place Rarity puts stolen eggs of that rarity or higher on your plot. Weaker eggs stay in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 72)
 	noteBody.LayoutOrder = 1
 
-	local trackerCard = card(homePage, "EGG TRACKER", 5)
+	local trackerCard = card(homePage, "EGG TRACKER", 6)
 	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 78)
 	trackerStatus.LayoutOrder = 1
 	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
@@ -4396,10 +4531,17 @@ local function installHub()
 	end
 	refreshHome()
 	refreshTracker()
+	local function refreshSession()
+		local clockText = sessionClock()
+		sessionText.Text = "Session " .. clockText
+		launcher.Text = "Zinoos  " .. clockText
+	end
+	refreshSession()
 	task.spawn(function()
 		while running() and gui.Parent do
 			pcall(refreshHome)
 			pcall(refreshTracker)
+			pcall(refreshSession)
 			task.wait(1)
 		end
 	end)
@@ -4865,10 +5007,23 @@ local function syncToggles()
 			applyAlertRarity(picked)
 		end
 	end
+	local placeControl = STATE.placeControl
+	if type(placeControl) == "table" then
+		local picked = placeControl.value or placeControl.currentOption
+		if type(picked) == "table" then
+			picked = picked[1]
+		end
+		if type(picked) == "string" and picked ~= STATE.placeRarity then
+			applyPlaceRarity(picked)
+		end
+	end
 end
 
 local function pullHomeIfEmpty()
 	if not running() then
+		return
+	end
+	if LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true then
 		return
 	end
 	local eggs = prehistoricEggs()
@@ -4877,7 +5032,12 @@ local function pullHomeIfEmpty()
 	end
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if not hrp then
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not hrp or not humanoid then
+		return
+	end
+	local home = homeSpot()
+	if typeof(home) == "Vector3" and (hrp.Position - home).Magnitude < 18 then
 		return
 	end
 	if hrp.Position.Z > -4000 and not inZone(hrp.Position, stealZone()) then
@@ -4886,8 +5046,15 @@ local function pullHomeIfEmpty()
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
 	activeGoal = nil
+	local gym = myGym()
+	local bench = gym and gym:FindFirstChild("Bench")
+	local seat = bench and bench:FindFirstChild("Seat")
+	if seat then
+		standOn(hrp, humanoid, seat)
+		return
+	end
 	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.CFrame = CFrame.new(homeSpot())
+	hrp.CFrame = CFrame.new(home)
 end
 
 local function paintAnimals()
