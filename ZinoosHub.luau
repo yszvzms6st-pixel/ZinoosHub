@@ -1212,6 +1212,13 @@ function STATE.toolEggRank(tool)
 	if typeof(tool) ~= "Instance" then
 		return nil
 	end
+	local named = tool:GetAttribute("Rarity")
+	if type(named) ~= "string" then
+		named = tool:GetAttribute("rarity")
+	end
+	if type(named) == "string" and rarityRank[named] then
+		return rarityRank[named]
+	end
 	local key = tool:GetAttribute("Key")
 	if key ~= nil then
 		local spec = petSpec(key)
@@ -1219,15 +1226,26 @@ function STATE.toolEggRank(tool)
 			return rarityRank[spec.Rarity]
 		end
 	end
-	local named = tool:GetAttribute("Rarity")
-	if type(named) == "string" and rarityRank[named] then
-		return rarityRank[named]
-	end
 	local uid = tool:GetAttribute("petUID")
-	if type(uid) == "string" then
+	if uid ~= nil then
+		uid = tostring(uid)
 		local data = readData()
-		local bag = data and data.backpack
-		local pet = type(bag) == "table" and bag[uid] or nil
+		local function findPet(list)
+			if type(list) ~= "table" then
+				return nil
+			end
+			local direct = list[uid]
+			if type(direct) == "table" then
+				return direct
+			end
+			for _, pet in pairs(list) do
+				if type(pet) == "table" and tostring(pet.uid) == uid then
+					return pet
+				end
+			end
+			return nil
+		end
+		local pet = findPet(data and data.backpack) or findPet(data and data.plotPets)
 		if type(pet) == "table" then
 			local spec = petSpec(pet.key)
 			if spec and type(spec.Rarity) == "string" and rarityRank[spec.Rarity] then
@@ -1235,7 +1253,8 @@ function STATE.toolEggRank(tool)
 			end
 		end
 	end
-	local petName = string.gsub(tool.Name, " Egg$", "")
+	local petName = string.gsub(tool.Name, "%s*%b()%s*$", "")
+	petName = string.gsub(petName, " Egg$", "")
 	local rank = rarityOfName[petName] or rarityOfName[tool.Name]
 	if rank then
 		return rank
@@ -1284,7 +1303,7 @@ local function placeOneEgg()
 			end
 		end
 		if not tool then
-			return false
+			return nil
 		end
 		humanoid:EquipTool(tool)
 		task.wait(0.15)
@@ -1322,8 +1341,12 @@ local function deliverHeld()
 			task.wait(0.25)
 			continue
 		end
-		if not placeOneEgg() then
+		local placed = placeOneEgg()
+		if placed == nil then
 			return true
+		end
+		if not placed then
+			task.wait(0.2)
 		end
 	end
 	return LocalPlayer:GetAttribute("holdingFriend") ~= true

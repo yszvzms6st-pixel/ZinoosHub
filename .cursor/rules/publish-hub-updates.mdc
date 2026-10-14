@@ -1,0 +1,10 @@
+---
+description: Publish finished hub updates to main so everyone gets the script
+alwaysApply: true
+---
+
+# Publish hub updates
+
+When a requested change to `ZinoosHub.luau` is finished and checked, commit it on `main` and push `origin main` in the same turn. That is the script other people run. Do not wait for a separate commit, push, or pull request.
+
+Do not force-push. Do not commit secrets or the Discord webhook URL. Leave the change unpushed only when the user says to hold it.
