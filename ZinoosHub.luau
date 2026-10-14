@@ -3561,6 +3561,14 @@ end)
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ZinoosHub.rfld"
 local CONFIG_VERSION = 2
 
+function STATE.configPath()
+	local id = LocalPlayer.UserId
+	if type(id) == "number" and id > 0 then
+		return "Rayfield/Configurations/ZinoosHub/ZinoosHub_" .. tostring(id) .. ".rfld"
+	end
+	return CONFIG_PATH
+end
+
 local FLAG_KEYS = {
 	AutoTrain = "autoTrain",
 	AutoRebirth = "rebirth",
@@ -3600,11 +3608,15 @@ local function loadSaved()
 		syncSavedVisuals()
 		return false
 	end
-	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(CONFIG_PATH) then
+	local path = CONFIG_PATH
+	if typeof(isfile) == "function" and isfile(STATE.configPath()) then
+		path = STATE.configPath()
+	end
+	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" or not isfile(path) then
 		return useFreshZone()
 	end
 	local ok, saved = pcall(function()
-		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_PATH))
+		return game:GetService("HttpService"):JSONDecode(readfile(path))
 	end)
 	if not ok or type(saved) ~= "table" then
 		return useFreshZone()
@@ -3723,7 +3735,7 @@ local function saveConfig()
 		return game:GetService("HttpService"):JSONEncode(payload)
 	end)
 	if ok then
-		pcall(writefile, CONFIG_PATH, encoded)
+		pcall(writefile, STATE.configPath(), encoded)
 	end
 end
 
@@ -3781,6 +3793,14 @@ local function installHub()
 	local off = Color3.fromRGB(62, 48, 76)
 	local line = Color3.fromRGB(70, 52, 86)
 
+	local TweenService = game:GetService("TweenService")
+	local motion = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local function playMotion(object, props)
+		local tween = TweenService:Create(object, motion, props)
+		tween:Play()
+		return tween
+	end
+
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "ZinoosHubMenu"
 	gui.ResetOnSpawn = false
@@ -3830,6 +3850,9 @@ local function installHub()
 	holder.Size = UDim2.fromOffset(700, 468)
 	holder.BackgroundTransparency = 1
 	holder.Parent = gui
+	local windowScale = Instance.new("UIScale")
+	windowScale.Name = "WindowMotion"
+	windowScale.Parent = holder
 
 	local shadow = Instance.new("Frame")
 	shadow.BackgroundColor3 = Color3.new(0, 0, 0)
@@ -4015,6 +4038,9 @@ local function installHub()
 		layout.Padding = UDim.new(0, 10)
 		layout.SortOrder = Enum.SortOrder.LayoutOrder
 		layout.Parent = page
+		local pageScale = Instance.new("UIScale")
+		pageScale.Name = "PageMotion"
+		pageScale.Parent = page
 		pages[name] = page
 		return page
 	end
@@ -4025,11 +4051,19 @@ local function installHub()
 
 	local function showPage(name)
 		for pageName, page in pairs(pages) do
-			page.Visible = pageName == name
+			local show = pageName == name
+			page.Visible = show
+			if show then
+				local pageScale = page:FindFirstChild("PageMotion")
+				if pageScale and pageScale:IsA("UIScale") then
+					pageScale.Scale = 0.985
+					playMotion(pageScale, { Scale = 1 })
+				end
+			end
 		end
 		pageTitle.Text = name
 		for buttonName, button in pairs(navButtons) do
-			button.BackgroundTransparency = buttonName == name and 0 or 1
+			playMotion(button, { BackgroundTransparency = buttonName == name and 0 or 1 })
 		end
 	end
 
@@ -4181,9 +4215,16 @@ local function installHub()
 		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text), page = page }
 	end
 
-	local function paintSwitch(track, knob, on)
-		track.BackgroundColor3 = on and accent or off
-		knob.Position = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+	local function paintSwitch(track, knob, on, instant)
+		local goal = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+		local color = on and accent or off
+		if instant then
+			knob.Position = goal
+			track.BackgroundColor3 = color
+			return
+		end
+		playMotion(knob, { Position = goal })
+		playMotion(track, { BackgroundColor3 = color })
 	end
 
 	local function onToggle(key, on)
@@ -4267,7 +4308,7 @@ local function installHub()
 			STATE.toggleControls[key] = control
 		end
 		control.value = STATE[key] == true
-		paintSwitch(track, knob, control.value)
+		paintSwitch(track, knob, control.value, true)
 		onActivate(track, function()
 			control.value = not control.value
 			paintSwitch(track, knob, control.value)
@@ -4400,7 +4441,8 @@ local function installHub()
 		room = math.clamp(room, rowHeight * scale + 8, math.max(rowHeight * scale + 8, view.Y - 16))
 		local popupPixels = math.min(contentHeight * scale, room)
 		local popupHeight = popupPixels / scale
-		popup.Size = UDim2.fromOffset(popupWidth, popupHeight)
+		popup.Size = UDim2.fromOffset(popupWidth, 0)
+		playMotion(popup, { Size = UDim2.fromOffset(popupWidth, popupHeight) })
 		popupScroll.CanvasSize = UDim2.fromOffset(0, contentHeight)
 		local openAbove = roomBelow + 1 < popupPixels and roomAbove > roomBelow
 		local pixelY = openAbove and (anchorPos.Y - popupPixels - 6) or (anchorPos.Y + anchorHeight + 6)
@@ -5150,10 +5192,28 @@ local function installHub()
 		end
 	end)
 
+	local openToken = 0
 	local function setOpen(open)
-		holder.Visible = open
-		shadow.Visible = open
-		launcher.Visible = not open
+		openToken += 1
+		local token = openToken
+		if open then
+			holder.Visible = true
+			shadow.Visible = true
+			launcher.Visible = false
+			windowScale.Scale = 0.92
+			playMotion(windowScale, { Scale = 1 })
+			return
+		end
+		playMotion(windowScale, { Scale = 0.94 })
+		task.delay(0.16, function()
+			if token ~= openToken or not gui.Parent then
+				return
+			end
+			holder.Visible = false
+			shadow.Visible = false
+			launcher.Visible = true
+			windowScale.Scale = 1
+		end)
 	end
 
 	local dragConn = trackConnection(UserInputService.InputChanged:Connect(function(input)
@@ -5214,6 +5274,20 @@ local function installHub()
 			setOpen(not holder.Visible)
 		end
 	end))
+
+	local saveCard = card(homePage, "CONFIG", 7)
+	local saveNote = label(saveCard, "Saves the toggles, rarities, zone, and priority for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
+	saveNote.LayoutOrder = 1
+	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
+	saveResult.LayoutOrder = 3
+	actionButton(saveCard, "Save Config", 2, true, function()
+		saveConfig()
+		saveResult.Text = "Saved for " .. LocalPlayer.DisplayName
+		saveResult.TextColor3 = accent
+	end)
+
+	windowScale.Scale = 0.92
+	playMotion(windowScale, { Scale = 1 })
 
 	STATE.hubWindow = {
 		Unload = function()
