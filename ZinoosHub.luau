@@ -1204,11 +1204,11 @@ local function homeSpot()
 	return STATE.homePos or Vector3.new(299, 10, 314)
 end
 
-local function placeRank()
+function STATE.placeRank()
 	return rarityRank[STATE.placeRarity] or rarityRank[rarityOptions[1]] or 1
 end
 
-local function toolEggRank(tool)
+function STATE.toolEggRank(tool)
 	if typeof(tool) ~= "Instance" then
 		return nil
 	end
@@ -1247,12 +1247,12 @@ local function toolEggRank(tool)
 	return nil
 end
 
-local function eggWorthPlacing(tool)
-	local rank = toolEggRank(tool)
+function STATE.eggWorthPlacing(tool)
+	local rank = STATE.toolEggRank(tool)
 	if rank == nil then
-		return placeRank() <= (rarityRank[rarityOptions[1]] or 1)
+		return STATE.placeRank() <= (rarityRank[rarityOptions[1]] or 1)
 	end
-	return rank >= placeRank()
+	return rank >= STATE.placeRank()
 end
 
 local function placeOneEgg()
@@ -1262,7 +1262,7 @@ local function placeOneEgg()
 		return false
 	end
 	local function accept(child)
-		return child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and eggWorthPlacing(child)
+		return child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and STATE.eggWorthPlacing(child)
 	end
 	local tool = nil
 	if character then
@@ -1671,7 +1671,7 @@ local function hasEggTool()
 			return false
 		end
 		for _, child in ipairs(container:GetChildren()) do
-			if child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and eggWorthPlacing(child) then
+			if child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and STATE.eggWorthPlacing(child) then
 				return true
 			end
 		end
@@ -1680,7 +1680,7 @@ local function hasEggTool()
 	return scan(LocalPlayer:FindFirstChild("Backpack")) or scan(LocalPlayer.Character)
 end
 
-local function holdingUnseenEgg()
+function STATE.holdingUnseenEgg()
 	if LocalPlayer:GetAttribute("holdingFriend") ~= true then
 		return false
 	end
@@ -1970,7 +1970,7 @@ local function resetStealScan()
 end
 
 local function pendingDelivery()
-	return hasEggTool() or holdingUnseenEgg()
+	return hasEggTool() or STATE.holdingUnseenEgg()
 end
 
 local function runStealTrip()
@@ -3370,7 +3370,7 @@ local function saveConfig()
 	end
 end
 
-local function applyPlaceRarity(option)
+function STATE.applyPlaceRarity(option)
 	if type(option) ~= "string" or rarityRank[option] == nil or option == STATE.placeRarity then
 		return
 	end
@@ -4148,7 +4148,7 @@ local function installHub()
 	local placePick = makeDropdown(eggs, "Place Rarity", function()
 		return STATE.placeRarity or rarityOptions[1] or "Common"
 	end, rarityOptions, function(option)
-		applyPlaceRarity(option)
+		STATE.applyPlaceRarity(option)
 	end)
 	STATE._setPlaceText = function(text)
 		placePick.Text = tostring(text)
@@ -5014,7 +5014,7 @@ local function syncToggles()
 			picked = picked[1]
 		end
 		if type(picked) == "string" and picked ~= STATE.placeRarity then
-			applyPlaceRarity(picked)
+			STATE.applyPlaceRarity(picked)
 		end
 	end
 end
