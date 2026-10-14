@@ -1406,6 +1406,25 @@ function STATE.plotRoom()
 	}
 end
 
+function STATE.placeHoldActive()
+	local room = STATE.plotRoom()
+	if room and room.free == true then
+		STATE.placeHoldUntil = 0
+		STATE.placeHoldCount = nil
+	elseif room and type(STATE.placeHoldCount) == "number" and room.occupied < STATE.placeHoldCount then
+		STATE.placeHoldUntil = 0
+		STATE.placeHoldCount = nil
+	end
+	return os.clock() < (STATE.placeHoldUntil or 0)
+end
+
+function STATE.markPlaceHold()
+	local room = STATE.plotRoom()
+	STATE.placeHoldCount = room and room.occupied or nil
+	STATE.placeHoldUntil = os.clock() + 12
+	STATE.placeStatus = "Plot full"
+end
+
 function STATE.petOnPlot(uid)
 	if type(uid) ~= "string" then
 		return false
@@ -1482,11 +1501,7 @@ function STATE.placeSelectedEgg(fromSteal)
 		local reach = Vector3.new(base.Size.X, 0, base.Size.Z).Magnitude / 2 + 30
 		return offset.Magnitude <= reach
 	end
-	local room = STATE.plotRoom()
-	if room == nil then
-		return false
-	end
-	if room.free ~= true then
+	if STATE.placeHoldActive() then
 		note("Plot full")
 		return "full"
 	end
@@ -1556,11 +1571,6 @@ function STATE.placeSelectedEgg(fromSteal)
 		if tool.Parent ~= nil and not STATE.eggWorthPlacing(tool) then
 			return finish(nil)
 		end
-		local roomNow = STATE.plotRoom()
-		if roomNow == nil or roomNow.free ~= true then
-			note("Plot full")
-			return finish("full")
-		end
 		if tool.Parent ~= character then
 			local backpack = LocalPlayer:FindFirstChild("Backpack")
 			if tool.Parent ~= backpack then
@@ -1569,14 +1579,15 @@ function STATE.placeSelectedEgg(fromSteal)
 			humanoid:EquipTool(tool)
 			task.wait(0.15)
 		end
-		local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
-		local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
+		local spread = attempt == 1 and 0.25 or (attempt == 2 and 0.45 or 0.7)
+		local x = (math.random() - 0.5) * base.Size.X * spread
+		local z = (math.random() - 0.5) * base.Size.Z * spread
 		if type(x) ~= "number" or type(z) ~= "number" then
 			break
 		end
 		Net:FireServer("PlacePet", uid, x, z)
 		fired = true
-		task.wait(0.4)
+		task.wait(0.8)
 		if tool.Parent == nil or STATE.petOnPlot(uid) then
 			note("Placed " .. eggName)
 			return finish(true)
@@ -1586,8 +1597,8 @@ function STATE.placeSelectedEgg(fromSteal)
 		end
 	end
 	if fired then
-		note("Placement failed after retries")
-		return finish(false)
+		STATE.markPlaceHold()
+		return finish("full")
 	end
 	return finish("away")
 end
@@ -1608,14 +1619,9 @@ function STATE.stepAutoPlace()
 		STATE.nextAutoPlace = os.clock() + 1.2
 		return
 	end
-	local room = STATE.plotRoom()
-	if room == nil then
-		STATE.nextAutoPlace = os.clock() + 2
-		return
-	end
-	if room.free ~= true then
+	if STATE.placeHoldActive() then
 		STATE.placeStatus = "Plot full"
-		STATE.nextAutoPlace = os.clock() + 3
+		STATE.nextAutoPlace = STATE.placeHoldUntil
 		return
 	end
 	STATE.placeStatus = "Scanning inventory"
@@ -2297,7 +2303,13 @@ local function resetStealScan()
 end
 
 local function pendingDelivery()
-	return hasEggTool() or STATE.holdingUnseenEgg()
+	if STATE.holdingUnseenEgg() then
+		return true
+	end
+	if STATE.placeHoldActive() then
+		return false
+	end
+	return hasEggTool()
 end
 
 local function runStealTrip()
