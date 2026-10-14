@@ -625,6 +625,14 @@ local function bindFeatures()
 			return typeof(Pets) == "table" and typeof(Pets.Specs) == "table"
 		end },
 	})
+	bindFeature("Auto Place", {
+		{ name = "Net.FireServer", test = function()
+			return hasFire
+		end },
+		{ name = "Plot.Slots", test = function()
+			return typeof(Plot) == "table" and typeof(Plot.Slots) == "function"
+		end },
+	})
 	bindFeature("Auto Open", {
 		{ name = "Net.FireServer", test = function()
 			return hasFire
@@ -710,6 +718,12 @@ if STATE.equipBest == nil then
 end
 if STATE.autoSteal == nil then
 	STATE.autoSteal = true
+end
+if STATE.autoPlace ~= true then
+	STATE.autoPlace = false
+end
+if STATE.placementPriority ~= "Lowest Rarity First" and STATE.placementPriority ~= "Inventory Order" then
+	STATE.placementPriority = "Highest Rarity First"
 end
 if STATE.autoOpen == nil then
 	STATE.autoOpen = true
@@ -994,6 +1008,7 @@ hubCleanup(function()
 	activeGoal = nil
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
+	STATE.placeBusy = false
 end)
 
 local function pinGoal(part, goal)
@@ -1018,6 +1033,10 @@ local function stepTrain()
 				end
 			end)
 		end
+		return
+	end
+	if STATE.placeBusy == true then
+		releaseGym()
 		return
 	end
 	if not featureReady("Auto Train") or STATE.autoTrain ~= true then
@@ -1352,60 +1371,269 @@ function STATE.eggWorthPlacing(tool)
 	return STATE.raritySelected(STATE.placeRarities, rank)
 end
 
-local function placeOneEgg()
+function STATE.placementChoice(value)
+	if value == "Lowest Rarity First" or value == "Inventory Order" or value == "Highest Rarity First" then
+		return value
+	end
+	return "Highest Rarity First"
+end
+
+function STATE.plotRoom()
+	local data = readData()
+	if type(data) ~= "table" or typeof(Plot) ~= "table" or typeof(Plot.Slots) ~= "function" then
+		return nil
+	end
+	local level = data.baseLevel
+	if type(level) ~= "number" then
+		level = 0
+	end
+	local ok, slots = pcall(Plot.Slots, level)
+	if not ok or type(slots) ~= "number" then
+		return nil
+	end
+	local occupied = 0
+	if type(data.plotPets) == "table" then
+		for _, pet in pairs(data.plotPets) do
+			if type(pet) == "table" then
+				occupied += 1
+			end
+		end
+	end
+	return {
+		slots = slots,
+		occupied = occupied,
+		free = occupied < slots,
+	}
+end
+
+function STATE.petOnPlot(uid)
+	if type(uid) ~= "string" then
+		return false
+	end
+	local data = readData()
+	local pets = data and data.plotPets
+	if type(pets) ~= "table" then
+		return false
+	end
+	if type(pets[uid]) == "table" then
+		return true
+	end
+	for _, pet in pairs(pets) do
+		if type(pet) == "table" and pet.uid ~= nil and tostring(pet.uid) == uid then
+			return true
+		end
+	end
+	return false
+end
+
+function STATE.collectPlaceEggs()
+	local list = {}
+	local function scan(container, equipped)
+		if not container then
+			return
+		end
+		for index, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and STATE.eggWorthPlacing(child) then
+				list[#list + 1] = {
+					tool = child,
+					rank = STATE.toolEggRank(child) or 0,
+					order = (equipped and 0 or 1000) + index,
+					name = child.Name,
+					uid = child:GetAttribute("petUID"),
+				}
+			end
+		end
+	end
+	scan(LocalPlayer.Character, true)
+	scan(LocalPlayer:FindFirstChild("Backpack"), false)
+	local priority = STATE.placementChoice(STATE.placementPriority)
+	table.sort(list, function(a, b)
+		if priority == "Inventory Order" or a.rank == b.rank then
+			return a.order < b.order
+		end
+		if priority == "Lowest Rarity First" then
+			return a.rank < b.rank
+		end
+		return a.rank > b.rank
+	end)
+	return list
+end
+
+function STATE.placeSelectedEgg(fromSteal)
+	if not running() then
+		return false
+	end
+	if not fromSteal and STATE.autoPlace ~= true then
+		return nil
+	end
+	local function note(text)
+		if fromSteal and STATE.autoPlace ~= true and text ~= "Plot full" then
+			return
+		end
+		STATE.placeStatus = text
+	end
+	local function withinReach(base)
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		if not hrp or not (base and base:IsA("BasePart")) then
+			return false
+		end
+		local offset = Vector3.new(base.Position.X - hrp.Position.X, 0, base.Position.Z - hrp.Position.Z)
+		local reach = Vector3.new(base.Size.X, 0, base.Size.Z).Magnitude / 2 + 30
+		return offset.Magnitude <= reach
+	end
+	local room = STATE.plotRoom()
+	if room == nil then
+		return false
+	end
+	if room.free ~= true then
+		note("Plot full")
+		return "full"
+	end
+	local chosen = STATE.collectPlaceEggs()[1]
+	if not chosen or typeof(chosen.tool) ~= "Instance" then
+		if not fromSteal then
+			note("No selected eggs")
+		end
+		return nil
+	end
+	local tool = chosen.tool
+	local uid = chosen.uid
+	local eggName = type(chosen.name) == "string" and chosen.name or "egg"
+	if type(uid) ~= "string" or not STATE.eggWorthPlacing(tool) then
+		return nil
+	end
 	local character = LocalPlayer.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
 		return false
 	end
-	local function accept(child)
-		return child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and STATE.eggWorthPlacing(child)
-	end
-	local tool = nil
-	if character then
-		for _, child in ipairs(character:GetChildren()) do
-			if accept(child) then
-				tool = child
+	local leftTraining = false
+	if not fromSteal and (LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true) then
+		STATE.placeBusy = true
+		leftTraining = true
+		local releaseUntil = os.clock() + 2
+		while os.clock() < releaseUntil and running() and STATE.autoPlace == true do
+			if releaseGym() and not LocalPlayer:GetAttribute("Benching") and LocalPlayer:GetAttribute("TrainingMounted") ~= true then
 				break
 			end
+			task.wait(0.1)
 		end
 	end
-	if not tool then
-		local backpack = LocalPlayer:FindFirstChild("Backpack")
-		if backpack then
-			for _, child in ipairs(backpack:GetChildren()) do
-				if accept(child) then
-					tool = child
-					break
-				end
-			end
+	local function finish(result)
+		if leftTraining then
+			STATE.placeBusy = false
 		end
-		if not tool then
-			return nil
-		end
-		humanoid:EquipTool(tool)
-		task.wait(0.15)
-	end
-	local uid = tool:GetAttribute("petUID")
-	if type(uid) ~= "string" then
-		return false
+		return result
 	end
 	if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.Get) ~= "function" then
-		return false
+		return finish(false)
 	end
 	local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
 	local base = plot and plot:FindFirstChild("Base")
 	if not (base and base:IsA("BasePart")) then
-		return false
+		return finish(false)
 	end
-	local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
-	local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
-	if type(x) ~= "number" or type(z) ~= "number" then
-		return false
+	if fromSteal then
+		local homeUntil = os.clock() + 3
+		while not withinReach(base) and os.clock() < homeUntil and running() do
+			task.wait(0.1)
+		end
 	end
-	Net:FireServer("PlacePet", uid, x, z)
-	task.wait(0.4)
-	return tool.Parent == nil
+	if not withinReach(base) then
+		return finish("away")
+	end
+	note("Placing " .. eggName)
+	local fired = false
+	for attempt = 1, 3 do
+		if not running() or (not fromSteal and STATE.autoPlace ~= true) then
+			return finish(false)
+		end
+		if fired and (tool.Parent == nil or STATE.petOnPlot(uid)) then
+			note("Placed " .. eggName)
+			return finish(true)
+		end
+		if tool.Parent ~= nil and not STATE.eggWorthPlacing(tool) then
+			return finish(nil)
+		end
+		local roomNow = STATE.plotRoom()
+		if roomNow == nil or roomNow.free ~= true then
+			note("Plot full")
+			return finish("full")
+		end
+		if tool.Parent ~= character then
+			local backpack = LocalPlayer:FindFirstChild("Backpack")
+			if tool.Parent ~= backpack then
+				break
+			end
+			humanoid:EquipTool(tool)
+			task.wait(0.15)
+		end
+		local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
+		local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
+		if type(x) ~= "number" or type(z) ~= "number" then
+			break
+		end
+		Net:FireServer("PlacePet", uid, x, z)
+		fired = true
+		task.wait(0.4)
+		if tool.Parent == nil or STATE.petOnPlot(uid) then
+			note("Placed " .. eggName)
+			return finish(true)
+		end
+		if attempt < 3 then
+			task.wait(0.3)
+		end
+	end
+	if fired then
+		note("Placement failed after retries")
+		return finish(false)
+	end
+	return finish("away")
+end
+
+function STATE.stepAutoPlace()
+	if not running() or STATE.autoPlace ~= true or not featureReady("Auto Place") then
+		return
+	end
+	if os.clock() < (STATE.nextAutoPlace or 0) then
+		return
+	end
+	if STATE.placeBusy == true then
+		return
+	end
+	local eggs = STATE.collectPlaceEggs()
+	if #eggs == 0 then
+		STATE.placeStatus = "No selected eggs"
+		STATE.nextAutoPlace = os.clock() + 1.2
+		return
+	end
+	local room = STATE.plotRoom()
+	if room == nil then
+		STATE.nextAutoPlace = os.clock() + 2
+		return
+	end
+	if room.free ~= true then
+		STATE.placeStatus = "Plot full"
+		STATE.nextAutoPlace = os.clock() + 3
+		return
+	end
+	STATE.placeStatus = "Scanning inventory"
+	local placed = STATE.placeSelectedEgg(false)
+	if placed == "full" then
+		STATE.placeStatus = "Plot full"
+		STATE.nextAutoPlace = os.clock() + 3
+	elseif placed == "away" then
+		STATE.placeStatus = "Scanning inventory"
+		STATE.nextAutoPlace = os.clock() + 2
+	elseif placed == true then
+		STATE.nextAutoPlace = os.clock() + 0.6
+	elseif placed == nil then
+		STATE.placeStatus = "No selected eggs"
+		STATE.nextAutoPlace = os.clock() + 1.2
+	else
+		STATE.nextAutoPlace = os.clock() + 4
+	end
 end
 
 local function deliverHeld()
@@ -1419,13 +1647,11 @@ local function deliverHeld()
 			task.wait(0.25)
 			continue
 		end
-		local placed = placeOneEgg()
-		if placed == nil then
+		local placed = STATE.placeSelectedEgg(true)
+		if placed == nil or placed == true then
 			return true
 		end
-		if not placed then
-			task.wait(0.2)
-		end
+		return false
 	end
 	return LocalPlayer:GetAttribute("holdingFriend") ~= true
 end
@@ -3329,6 +3555,7 @@ local FLAG_KEYS = {
 	AutoUpgrade = "upgrade",
 	AutoTrails = "trails",
 	AutoSteal = "autoSteal",
+	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
 	EquipBest = "equipBest",
 	AutoDaily = "autoDaily",
@@ -3409,6 +3636,7 @@ local function loadSaved()
 		STATE.placeRarities = STATE.expandRarity(placeRarity)
 	end
 	STATE.placeRarity = STATE.placeRarities[1] or STATE.placeRarity
+	STATE.placementPriority = STATE.placementChoice(saved.PlacementPriority)
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
@@ -3468,6 +3696,7 @@ local function saveConfig()
 		WebhookRarities = STATE.alertRarities,
 		PlaceRarity = { STATE.placeRarities[1] or STATE.placeRarity or rarityOptions[1] or "Common" },
 		PlaceRarities = STATE.placeRarities,
+		PlacementPriority = STATE.placementChoice(STATE.placementPriority),
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
 		MenuY = STATE.menuY,
@@ -3952,6 +4181,10 @@ local function installHub()
 			releaseGym()
 		elseif key == "autoSteal" and on then
 			resetStealScan()
+		elseif key == "autoPlace" then
+			STATE.placeBusy = false
+			STATE.nextAutoPlace = 0
+			STATE.placeStatus = on and "Scanning inventory" or nil
 		elseif key == "antiAfk" and on and pulseAntiAfk then
 			task.defer(pulseAntiAfk)
 		elseif key == "lowEnd" then
@@ -4130,6 +4363,16 @@ local function installHub()
 				end
 			end)
 		end
+		local popupWidth = 180
+		for _, option in ipairs(options) do
+			local estimate = 36 + #tostring(option) * 7
+			if estimate > popupWidth then
+				popupWidth = estimate
+			end
+		end
+		if popupWidth > 280 then
+			popupWidth = 280
+		end
 		local contentHeight = #options * rowHeight + 8
 		local scale = uiScale.Scale
 		if scale < 0.05 then
@@ -4145,12 +4388,12 @@ local function installHub()
 		room = math.clamp(room, rowHeight * scale + 8, math.max(rowHeight * scale + 8, view.Y - 16))
 		local popupPixels = math.min(contentHeight * scale, room)
 		local popupHeight = popupPixels / scale
-		popup.Size = UDim2.fromOffset(180, popupHeight)
+		popup.Size = UDim2.fromOffset(popupWidth, popupHeight)
 		popupScroll.CanvasSize = UDim2.fromOffset(0, contentHeight)
 		local openAbove = roomBelow + 1 < popupPixels and roomAbove > roomBelow
 		local pixelY = openAbove and (anchorPos.Y - popupPixels - 6) or (anchorPos.Y + anchorHeight + 6)
 		pixelY = math.clamp(pixelY, 8, math.max(8, view.Y - popupPixels - 8))
-		local pixelX = math.clamp(anchorPos.X, 8, math.max(8, view.X - 180 * scale - 8))
+		local pixelX = math.clamp(anchorPos.X, 8, math.max(8, view.X - popupWidth * scale - 8))
 		popup.Position = UDim2.fromOffset((pixelX - origin.X) / scale, (pixelY - origin.Y) / scale)
 		local scrollY = math.max(0, (selectedIndex - 1) * rowHeight)
 		local visibleRows = math.max(popupHeight - 8, rowHeight)
@@ -4162,11 +4405,11 @@ local function installHub()
 		popupBlock.Visible = true
 	end
 
-	local function makeDropdown(parentBox, name, getValue, options, callback)
+	local function makeDropdown(parentBox, name, getValue, options, callback, stacked)
 		local row = Instance.new("Frame")
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, 30)
+		row.Size = UDim2.new(1, 0, 0, stacked and 52 or 30)
 		row.ZIndex = 6
 		row.Parent = parentBox
 		local title = Instance.new("TextLabel")
@@ -4176,7 +4419,8 @@ local function installHub()
 		title.TextColor3 = ink
 		title.TextSize = 14
 		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Size = UDim2.new(0.48, 0, 1, 0)
+		title.TextTruncate = Enum.TextTruncate.AtEnd
+		title.Size = stacked and UDim2.new(1, 0, 0, 18) or UDim2.new(0.48, 0, 1, 0)
 		title.ZIndex = 6
 		title.Parent = row
 		local pick = Instance.new("TextButton")
@@ -4184,11 +4428,13 @@ local function installHub()
 		pick.Font = Enum.Font.Gotham
 		pick.TextSize = 13
 		pick.TextColor3 = ink
-		pick.Text = getValue()
+		pick.TextXAlignment = stacked and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
+		pick.TextTruncate = Enum.TextTruncate.AtEnd
+		pick.Text = stacked and (" " .. getValue()) or getValue()
 		pick.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
-		pick.AnchorPoint = Vector2.new(1, 0.5)
-		pick.Position = UDim2.new(1, 0, 0.5, 0)
-		pick.Size = UDim2.fromOffset(132, 26)
+		pick.AnchorPoint = stacked and Vector2.new(0, 1) or Vector2.new(1, 0.5)
+		pick.Position = stacked and UDim2.new(0, 0, 1, 0) or UDim2.new(1, 0, 0.5, 0)
+		pick.Size = stacked and UDim2.new(1, 0, 0, 26) or UDim2.fromOffset(132, 26)
 		pick.ZIndex = 7
 		pick.Parent = row
 		local pickCorner = Instance.new("UICorner")
@@ -4197,7 +4443,7 @@ local function installHub()
 		onActivate(pick, function()
 			openPopup(pick, options, getValue(), function(option)
 				callback(option)
-				pick.Text = getValue()
+				pick.Text = stacked and (" " .. getValue()) or getValue()
 			end)
 		end)
 		remember(row, parentBox, name)
@@ -4295,6 +4541,7 @@ local function installHub()
 
 	local eggs = card(leftColumn, "EGGS", 1)
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
+	makeSwitch(eggs, "Auto Place", "autoPlace", "Places ticked eggs from your bag")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
 		for _, zoneName in ipairs(Zones.Order) do
@@ -4337,6 +4584,12 @@ local function installHub()
 	STATE._setPlaceText = function(text)
 		placePick.Text = " " .. tostring(text)
 	end
+	makeDropdown(eggs, "Placement Priority", function()
+		return STATE.placementChoice(STATE.placementPriority)
+	end, { "Highest Rarity First", "Lowest Rarity First", "Inventory Order" }, function(option)
+		STATE.placementPriority = STATE.placementChoice(option)
+		saveConfig()
+	end, true)
 
 	local pets = card(leftColumn, "PETS", 2)
 	makeSwitch(pets, "Auto Open", "autoOpen")
@@ -4432,7 +4685,7 @@ local function installHub()
 	noteBody.LayoutOrder = 1
 
 	local trackerCard = card(homePage, "EGG TRACKER", 6)
-	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 78)
+	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 112)
 	trackerStatus.LayoutOrder = 1
 	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
 	local trackerRows = {}
@@ -4527,6 +4780,9 @@ local function installHub()
 			lines[#lines + 1] = outcome
 		elseif #eggs == 0 or eligible == 0 then
 			lines[#lines + 1] = "No matching eggs"
+		end
+		if STATE.placeStatus == "Plot full" or (STATE.autoPlace == true and type(STATE.placeStatus) == "string" and STATE.placeStatus ~= "") then
+			lines[#lines + 1] = STATE.placeStatus
 		end
 		if STATE.antiAfk == true then
 			if STATE.antiAfkOperational == true then
@@ -5011,6 +5267,12 @@ task.spawn(function()
 		elseif type(result) == "table" then
 			STATE.lastStealStatus = result
 		end
+		if not (STATE.autoSteal == true and pendingDelivery()) then
+			local placedOk = pcall(STATE.stepAutoPlace)
+			if not placedOk then
+				STATE.placeBusy = false
+			end
+		end
 		task.wait(0.6)
 	end
 end)
@@ -5163,6 +5425,10 @@ local function syncToggles()
 				releaseGym()
 			elseif key == "autoSteal" and control.value == true then
 				resetStealScan()
+			elseif key == "autoPlace" then
+				STATE.placeBusy = false
+				STATE.nextAutoPlace = 0
+				STATE.placeStatus = control.value == true and "Scanning inventory" or nil
 			elseif key == "lowEnd" then
 				applyLowEnd(control.value == true)
 			elseif key == "invEsp" and control.value == false then
@@ -5204,6 +5470,9 @@ end
 
 local function pullHomeIfEmpty()
 	if not running() then
+		return
+	end
+	if STATE.placeBusy == true then
 		return
 	end
 	if LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true then
