@@ -3342,18 +3342,9 @@ local function wipeSlots(frame)
 	if not frame then
 		return
 	end
-	for _, child in ipairs(frame:GetChildren()) do
-		local tag = child:FindFirstChild("ZinoosValue")
-		if tag then
-			tag:Destroy()
-		end
-		if child:IsA("GuiObject") then
-			for _, nested in ipairs(child:GetChildren()) do
-				local nestedTag = nested:FindFirstChild("ZinoosValue")
-				if nestedTag then
-					nestedTag:Destroy()
-				end
-			end
+	for _, child in ipairs(frame:GetDescendants()) do
+		if child.Name == "ZinoosValue" then
+			child:Destroy()
 		end
 	end
 end
@@ -3400,15 +3391,9 @@ local function eachSlot(frame, callback)
 	if not frame then
 		return
 	end
-	for _, child in ipairs(frame:GetChildren()) do
+	for _, child in ipairs(frame:GetDescendants()) do
 		if child:IsA("GuiButton") and child:FindFirstChild("ToolName") then
 			callback(child)
-		elseif child:IsA("GuiObject") then
-			for _, nested in ipairs(child:GetChildren()) do
-				if nested:IsA("GuiButton") and nested:FindFirstChild("ToolName") then
-					callback(nested)
-				end
-			end
 		end
 	end
 end
@@ -3526,6 +3511,10 @@ local function stepInventory()
 	local backpackGui = playerGui and playerGui:FindFirstChild("BackpackGui")
 	local root = backpackGui and backpackGui:FindFirstChild("Backpack")
 	local function paint(frame)
+		local remaining = {}
+		for name, list in pairs(queues) do
+			remaining[name] = table.clone(list)
+		end
 		local slots = {}
 		eachSlot(frame, function(slot)
 			slots[#slots + 1] = slot
@@ -3535,7 +3524,7 @@ local function stepInventory()
 		end)
 		for _, slot in ipairs(slots) do
 			local nameLabel = slot:FindFirstChild("ToolName")
-			local queue = nameLabel and queues[nameLabel.Text]
+			local queue = nameLabel and remaining[nameLabel.Text]
 			local valueText = queue and table.remove(queue, 1)
 			local valueLabel = slot:FindFirstChild("ZinoosValue")
 			if valueText then
