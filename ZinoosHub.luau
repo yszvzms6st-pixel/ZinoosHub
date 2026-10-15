@@ -3597,8 +3597,217 @@ local FLAG_KEYS = {
 	AntiAfk = "antiAfk",
 }
 
-STATE.hubThemes = {
-	Asta = {
+STATE.adminIds = {
+	[9346336323] = true,
+}
+STATE.admin = STATE.adminIds[LocalPlayer.UserId] == true
+
+STATE.defaultTheme = {
+	blush = 1,
+	Kind = "theme",
+	Name = "AstaTheme",
+	Theme = {
+		Colors = {
+			Panel = "151110",
+			Text = "f2ece8",
+			Element = "000000",
+			Risky = "ffffff",
+			Outline = "000000",
+			Hover = "000000",
+			Background = "000000",
+			DimText = "ffffff",
+			Accent = "fff1e9",
+		},
+		Glow = false,
+		ElementGlow = true,
+		CardOpacity = 0.66,
+		Wallpaper = {
+			Image = "https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/8239b4cd-652e-4ebf-a692-6a796f1bc0c6.jpg",
+			Transparency = 0.17,
+		},
+		Icon = "https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/63c9defa-4d08-4112-bbfe-d981407516df.jpg",
+	},
+}
+
+function STATE.themeColor(value, fallback)
+	if typeof(value) == "Color3" then
+		return value
+	end
+	if type(value) == "number" then
+		local channel = math.clamp(math.floor(value), 0, 255)
+		return Color3.fromRGB(channel, channel, channel)
+	end
+	if type(value) == "table" then
+		local r = value.r or value.R or value[1]
+		local g = value.g or value.G or value[2]
+		local b = value.b or value.B or value[3]
+		if type(r) == "number" and type(g) == "number" and type(b) == "number" then
+			if r <= 1 and g <= 1 and b <= 1 then
+				return Color3.new(r, g, b)
+			end
+			return Color3.fromRGB(math.clamp(r, 0, 255), math.clamp(g, 0, 255), math.clamp(b, 0, 255))
+		end
+	end
+	if type(value) ~= "string" then
+		return fallback
+	end
+	local hex = string.lower(string.match(value, "^%s*#?([%x]+)%s*$") or "")
+	if string.sub(hex, 1, 2) == "0x" then
+		hex = string.sub(hex, 3)
+	end
+	if #hex == 3 then
+		hex = string.sub(hex, 1, 1) .. string.sub(hex, 1, 1) .. string.sub(hex, 2, 2) .. string.sub(hex, 2, 2) .. string.sub(hex, 3, 3) .. string.sub(hex, 3, 3)
+	end
+	if #hex ~= 6 then
+		return fallback
+	end
+	local r = tonumber(string.sub(hex, 1, 2), 16)
+	local g = tonumber(string.sub(hex, 3, 4), 16)
+	local b = tonumber(string.sub(hex, 5, 6), 16)
+	if not r or not g or not b then
+		return fallback
+	end
+	return Color3.fromRGB(r, g, b)
+end
+
+function STATE.readTheme(raw)
+	local source = raw
+	if type(raw) == "string" then
+		local text = string.match(raw, "^%s*(.-)%s*$") or ""
+		if text == "" then
+			return nil, nil, nil, "Paste a theme first."
+		end
+		local ok, decoded = pcall(function()
+			return game:GetService("HttpService"):JSONDecode(text)
+		end)
+		if not ok or type(decoded) ~= "table" then
+			return nil, nil, nil, "That is not a theme."
+		end
+		source = decoded
+	end
+	if type(source) ~= "table" then
+		return nil, nil, nil, "That is not a theme."
+	end
+	local body = source
+	local name = "Custom"
+	if type(source.Name) == "string" and source.Name ~= "" then
+		name = source.Name
+	elseif type(source.name) == "string" and source.name ~= "" then
+		name = source.name
+	end
+	if type(source.Theme) == "table" then
+		body = source.Theme
+	elseif type(source.theme) == "table" then
+		body = source.theme
+	end
+	local colors = body.Colors or body.colors or body
+	if type(colors) ~= "table" then
+		return nil, nil, nil, "That theme has no colours."
+	end
+	local function pick(group, ...)
+		if type(group) ~= "table" then
+			return nil
+		end
+		for index = 1, select("#", ...) do
+			local key = select(index, ...)
+			if group[key] ~= nil then
+				return group[key]
+			end
+		end
+		return nil
+	end
+	local accent = STATE.themeColor(pick(colors, "Accent", "accent") or pick(body, "Accent", "accent"))
+	local ink = STATE.themeColor(pick(colors, "Text", "text", "MainText") or pick(body, "Text", "text"))
+	local panel = STATE.themeColor(pick(colors, "Background", "background") or pick(body, "Background", "background"))
+	local side = STATE.themeColor(pick(colors, "Panel", "panel", "Sidebar") or pick(body, "Panel", "panel"), panel)
+	local card = STATE.themeColor(pick(colors, "Element", "element", "Card") or pick(body, "Element", "element"), panel or side)
+	if not accent and not ink and not panel and not side and not card then
+		return nil, nil, nil, "That theme has no colours."
+	end
+	accent = accent or Color3.fromRGB(255, 241, 233)
+	ink = ink or Color3.fromRGB(242, 236, 232)
+	panel = panel or Color3.fromRGB(0, 0, 0)
+	side = side or panel
+	card = card or panel
+	local muted = STATE.themeColor(pick(colors, "DimText", "dimText", "Muted", "SubText") or pick(body, "DimText", "dimText"), ink)
+	local hover = STATE.themeColor(pick(colors, "Hover", "hover") or pick(body, "Hover", "hover"), panel)
+	local outline = STATE.themeColor(pick(colors, "Outline", "outline", "Stroke") or pick(body, "Outline", "outline"), accent)
+	local risky = STATE.themeColor(pick(colors, "Risky", "risky") or pick(body, "Risky", "risky"), Color3.new(1, 1, 1))
+	local opacity = pick(body, "CardOpacity", "cardOpacity", "Opacity")
+	if type(opacity) ~= "number" then
+		opacity = 1
+	end
+	opacity = math.clamp(opacity, 0.2, 1)
+	local elementGlow = pick(body, "ElementGlow", "elementGlow")
+	if elementGlow == nil then
+		elementGlow = true
+	end
+	local wall = pick(body, "Wallpaper", "wallpaper", "BackgroundImage")
+	local wallUrl = nil
+	local wallFade = 0
+	if type(wall) == "string" then
+		wallUrl = wall
+	elseif type(wall) == "table" then
+		wallUrl = wall.Image or wall.image or wall.Url or wall.url
+		wallFade = wall.Transparency or wall.transparency or wall.ImageTransparency or 0
+	end
+	if type(wallUrl) ~= "string" or string.sub(wallUrl, 1, 8) ~= "https://" then
+		wallUrl = nil
+	end
+	if type(wallFade) ~= "number" then
+		wallFade = 0
+	end
+	wallFade = math.clamp(wallFade, 0, 0.95)
+	local iconValue = pick(body, "Icon", "icon", "Logo") or pick(source, "Icon", "icon")
+	local iconUrl = nil
+	if type(iconValue) == "string" then
+		iconUrl = iconValue
+	elseif type(iconValue) == "table" then
+		iconUrl = iconValue.Image or iconValue.image or iconValue.Url or iconValue.url
+	end
+	if type(iconUrl) ~= "string" or string.sub(iconUrl, 1, 8) ~= "https://" then
+		iconUrl = nil
+	end
+	local lightAccent = accent.R + accent.G + accent.B > 2.2
+	local darkHover = hover.R + hover.G + hover.B < 0.45
+	return {
+		accent = accent,
+		ink = ink,
+		muted = muted,
+		panel = panel,
+		side = side,
+		card = card,
+		off = card,
+		inkDark = lightAccent and side or ink,
+		stroke = elementGlow and accent or outline,
+		selected = accent,
+		hover = hover,
+		risky = risky,
+		cardFade = 1 - opacity,
+		strokeFade = elementGlow and 0.58 or 0.4,
+		selectedFade = lightAccent and 0.78 or 0,
+		hoverFade = darkHover and 0.4 or 0.15,
+		barFade = 0.72,
+		wallpaper = wallUrl ~= nil,
+		icon = iconUrl ~= nil,
+		wallFade = wallFade,
+		wallUrl = wallUrl,
+		iconUrl = iconUrl,
+		glow = pick(body, "Glow", "glow") == true,
+		name = name,
+	}, name, source, nil
+end
+
+function STATE.hubThemeDef()
+	if type(STATE.hubThemeLook) == "table" and typeof(STATE.hubThemeLook.accent) == "Color3" then
+		return STATE.hubThemeLook
+	end
+	local look = STATE.readTheme(STATE.defaultTheme)
+	if type(look) == "table" then
+		STATE.hubThemeLook = look
+		return look
+	end
+	return {
 		accent = Color3.fromRGB(255, 241, 233),
 		ink = Color3.fromRGB(242, 236, 232),
 		muted = Color3.fromRGB(255, 255, 255),
@@ -3610,71 +3819,48 @@ STATE.hubThemes = {
 		stroke = Color3.fromRGB(255, 241, 233),
 		selected = Color3.fromRGB(255, 241, 233),
 		hover = Color3.fromRGB(0, 0, 0),
+		risky = Color3.new(1, 1, 1),
 		cardFade = 0.34,
 		strokeFade = 0.58,
 		selectedFade = 0.78,
 		hoverFade = 0.4,
 		barFade = 0.72,
-		wallpaper = true,
-		icon = true,
-		wallFade = 0.17,
-	},
-	Plum = {
-		accent = Color3.fromRGB(255, 176, 199),
-		ink = Color3.fromRGB(232, 223, 228),
-		muted = Color3.fromRGB(162, 146, 155),
-		panel = Color3.fromRGB(40, 27, 37),
-		side = Color3.fromRGB(46, 30, 40),
-		card = Color3.fromRGB(71, 54, 62),
-		off = Color3.fromRGB(58, 44, 52),
-		inkDark = Color3.fromRGB(40, 27, 37),
-		stroke = Color3.fromRGB(92, 72, 82),
-		selected = Color3.fromRGB(62, 45, 55),
-		hover = Color3.fromRGB(62, 45, 55),
-		cardFade = 0,
-		strokeFade = 0.55,
-		selectedFade = 0,
-		hoverFade = 0.45,
-		barFade = 0.45,
 		wallpaper = false,
 		icon = false,
 		wallFade = 1,
-	},
-	Night = {
-		accent = Color3.fromRGB(196, 181, 253),
-		ink = Color3.fromRGB(244, 244, 245),
-		muted = Color3.fromRGB(161, 161, 170),
-		panel = Color3.fromRGB(12, 12, 14),
-		side = Color3.fromRGB(20, 20, 22),
-		card = Color3.fromRGB(28, 28, 32),
-		off = Color3.fromRGB(38, 38, 44),
-		inkDark = Color3.fromRGB(20, 20, 22),
-		stroke = Color3.fromRGB(63, 63, 70),
-		selected = Color3.fromRGB(39, 39, 46),
-		hover = Color3.fromRGB(39, 39, 46),
-		cardFade = 0,
-		strokeFade = 0.35,
-		selectedFade = 0,
-		hoverFade = 0.35,
-		barFade = 0.65,
-		wallpaper = false,
-		icon = false,
-		wallFade = 1,
-	},
-}
-STATE.hubThemeOrder = { "Asta", "Plum", "Night" }
-
-function STATE.hubThemeDef()
-	local themes = STATE.hubThemes
-	local name = STATE.hubTheme
-	if type(themes) == "table" and type(name) == "string" and type(themes[name]) == "table" then
-		return themes[name]
-	end
-	return themes.Asta
+	}
 end
 
-if type(STATE.hubTheme) ~= "string" or type(STATE.hubThemes[STATE.hubTheme]) ~= "table" then
-	STATE.hubTheme = "Asta"
+function STATE.useTheme(raw)
+	local look, name, source, err = STATE.readTheme(raw)
+	if type(look) ~= "table" then
+		return nil, err or "That is not a theme."
+	end
+	STATE.hubThemeLook = look
+	STATE.themeName = name or look.name or "Custom"
+	STATE.themeSource = source
+	STATE.themeIcon = nil
+	STATE.themeWall = nil
+	if STATE.writeConfig then
+		STATE.writeConfig()
+	end
+	if STATE.applyLook then
+		STATE.applyLook()
+	end
+	task.spawn(function()
+		if STATE.loadThemeImages then
+			STATE.loadThemeImages()
+		end
+	end)
+	return look
+end
+
+do
+	local look, name = STATE.readTheme(STATE.defaultTheme)
+	if type(look) == "table" then
+		STATE.hubThemeLook = look
+		STATE.themeName = name or "AstaTheme"
+	end
 end
 
 local function syncSavedVisuals()
@@ -3752,8 +3938,15 @@ local function loadSaved()
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
-	if type(saved.Theme) == "string" and type(STATE.hubThemes[saved.Theme]) == "table" then
-		STATE.hubTheme = saved.Theme
+	if type(saved.ThemeData) == "table" then
+		local look, name, source = STATE.readTheme(saved.ThemeData)
+		if type(look) == "table" then
+			STATE.hubThemeLook = look
+			STATE.themeName = name or STATE.themeName
+			STATE.themeSource = source
+		end
+	elseif type(saved.Theme) == "string" and saved.Theme ~= "" then
+		STATE.themeName = saved.Theme
 	end
 	if type(saved.MenuX) == "number" then
 		STATE.menuX = saved.MenuX
@@ -3818,7 +4011,8 @@ local function saveConfig()
 		DockX = STATE.dockX,
 		DockY = STATE.dockY,
 		DockCustom = STATE.dockCustom == true,
-		Theme = type(STATE.hubTheme) == "string" and STATE.hubTheme or "Asta",
+		Theme = type(STATE.themeName) == "string" and STATE.themeName or "AstaTheme",
+		ThemeData = type(STATE.themeSource) == "table" and STATE.themeSource or nil,
 	}
 	for flag, key in pairs(FLAG_KEYS) do
 		payload[flag] = STATE[key] == true
@@ -3830,6 +4024,7 @@ local function saveConfig()
 		pcall(writefile, STATE.configPath(), encoded)
 	end
 end
+STATE.writeConfig = saveConfig
 
 function STATE.applyPlaceRarity(option)
 	if type(option) ~= "string" or rarityRank[option] == nil then
@@ -3895,6 +4090,36 @@ function STATE.themeAsset(url, fileName)
 		return asset
 	end
 	return nil
+end
+
+function STATE.loadThemeImages()
+	local theme = STATE.hubThemeDef()
+	local function tag(url)
+		local clean = string.gsub(url, "[^%w]", "")
+		if #clean > 36 then
+			clean = string.sub(clean, -36)
+		end
+		return clean
+	end
+	if theme.icon and type(theme.iconUrl) == "string" then
+		local icon = STATE.themeAsset(theme.iconUrl, "icon-" .. tag(theme.iconUrl) .. ".jpg")
+		if type(icon) == "string" then
+			STATE.themeIcon = icon
+		end
+	else
+		STATE.themeIcon = nil
+	end
+	if theme.wallpaper and type(theme.wallUrl) == "string" then
+		local photo = STATE.themeAsset(theme.wallUrl, "wall-" .. tag(theme.wallUrl) .. ".jpg")
+		if type(photo) == "string" then
+			STATE.themeWall = photo
+		end
+	else
+		STATE.themeWall = nil
+	end
+	if STATE.applyLook then
+		STATE.applyLook()
+	end
 end
 
 local function installHub()
@@ -4033,9 +4258,9 @@ local function installHub()
 	local dockGame = Instance.new("TextLabel")
 	dockGame.BackgroundTransparency = 1
 	dockGame.Font = Enum.Font.Gotham
-	dockGame.Text = "Lift Rock For Eggs"
-	dockGame.TextColor3 = muted
-	role(dockGame, "muted")
+	dockGame.Text = STATE.admin and "Admin" or "Lift Rock For Eggs"
+	dockGame.TextColor3 = STATE.admin and accent or muted
+	role(dockGame, STATE.admin and "accentText" or "muted")
 	dockGame.TextSize = 12
 	dockGame.TextXAlignment = Enum.TextXAlignment.Left
 	dockGame.Position = UDim2.fromOffset(60, 32)
@@ -4217,19 +4442,7 @@ local function installHub()
 	local markImageCorner = Instance.new("UICorner")
 	markImageCorner.CornerRadius = UDim.new(1, 0)
 	markImageCorner.Parent = markImage
-	task.spawn(function()
-		local icon = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/63c9defa-4d08-4112-bbfe-d981407516df.jpg", "icon.jpg")
-		if type(icon) == "string" then
-			STATE.themeIcon = icon
-		end
-		local photo = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/8239b4cd-652e-4ebf-a692-6a796f1bc0c6.jpg", "wallpaper.jpg")
-		if type(photo) == "string" then
-			STATE.themeWall = photo
-		end
-		if STATE.applyLook then
-			STATE.applyLook()
-		end
-	end)
+	task.spawn(STATE.loadThemeImages)
 
 	local brand = Instance.new("TextLabel")
 	brand.BackgroundTransparency = 1
@@ -4599,9 +4812,9 @@ local function installHub()
 	local profileGame = Instance.new("TextLabel")
 	profileGame.BackgroundTransparency = 1
 	profileGame.Font = Enum.Font.Gotham
-	profileGame.Text = "Lift Rock For Eggs"
-	profileGame.TextColor3 = muted
-	role(profileGame, "muted")
+	profileGame.Text = STATE.admin and "Admin" or "Lift Rock For Eggs"
+	profileGame.TextColor3 = STATE.admin and accent or muted
+	role(profileGame, STATE.admin and "accentText" or "muted")
 	profileGame.TextSize = 11
 	profileGame.TextXAlignment = Enum.TextXAlignment.Left
 	profileGame.Position = UDim2.fromOffset(50, 28)
@@ -5248,18 +5461,70 @@ local function installHub()
 	end
 
 	local lookCard = card(homePage, "THEME", 0)
-	makeDropdown(lookCard, "Theme", function()
-		return STATE.hubTheme or "Asta"
-	end, STATE.hubThemeOrder, function(option)
-		if type(STATE.hubThemes[option]) ~= "table" then
-			return
-		end
-		STATE.hubTheme = option
-		saveConfig()
-		if STATE.applyLook then
-			STATE.applyLook()
+	local themeNote = label(lookCard, "Paste a theme and import it. It saves on this account.", 12, muted, Enum.Font.Gotham, 32)
+	themeNote.LayoutOrder = 1
+	local themeBox = Instance.new("TextBox")
+	themeBox.Name = "ThemeImport"
+	themeBox.BackgroundColor3 = panel
+	themeBox.BackgroundTransparency = cardFade
+	themeBox.BorderSizePixel = 0
+	themeBox.ClearTextOnFocus = false
+	themeBox.MultiLine = true
+	themeBox.TextWrapped = true
+	themeBox.Font = Enum.Font.Gotham
+	themeBox.PlaceholderText = "{\"Kind\":\"theme\",\"Name\":\"My theme\",\"Theme\":{...}}"
+	themeBox.PlaceholderColor3 = muted
+	themeBox.Text = ""
+	themeBox.TextColor3 = ink
+	themeBox.TextSize = 12
+	themeBox.TextXAlignment = Enum.TextXAlignment.Left
+	themeBox.TextYAlignment = Enum.TextYAlignment.Top
+	themeBox.LayoutOrder = 2
+	themeBox.Size = UDim2.new(1, 0, 0, 78)
+	themeBox.ZIndex = 6
+	themeBox.Parent = lookCard
+	role(themeBox, "field")
+	local themeBoxCorner = Instance.new("UICorner")
+	themeBoxCorner.CornerRadius = UDim.new(0, 8)
+	themeBoxCorner.Parent = themeBox
+	local themeBoxPad = Instance.new("UIPadding")
+	themeBoxPad.PaddingTop = UDim.new(0, 6)
+	themeBoxPad.PaddingBottom = UDim.new(0, 6)
+	themeBoxPad.PaddingLeft = UDim.new(0, 8)
+	themeBoxPad.PaddingRight = UDim.new(0, 8)
+	themeBoxPad.Parent = themeBox
+	local themeStatus = label(lookCard, STATE.themeName or "AstaTheme", 12, muted, Enum.Font.Gotham, 16)
+	themeStatus.Name = "ThemeStatus"
+	themeStatus.LayoutOrder = 3
+	local importButton = Instance.new("TextButton")
+	importButton.AutoButtonColor = false
+	importButton.Font = Enum.Font.GothamBold
+	importButton.Text = "Import Theme"
+	importButton.TextSize = 14
+	importButton.TextColor3 = inkDark
+	importButton.BackgroundColor3 = accent
+	importButton.LayoutOrder = 4
+	importButton.Size = UDim2.new(1, 0, 0, 34)
+	importButton.ZIndex = 6
+	importButton.Parent = lookCard
+	role(importButton, "accentFill")
+	importButton:SetAttribute("ZinoosTextRole", "inkDark")
+	local importCorner = Instance.new("UICorner")
+	importCorner.CornerRadius = UDim.new(0, 8)
+	importCorner.Parent = importButton
+	bindPress(importButton)
+	onActivate(importButton, function()
+		local imported, err = STATE.useTheme(themeBox.Text)
+		if imported then
+			themeBox.Text = ""
+			themeStatus.Text = "Imported " .. (STATE.themeName or "theme")
+			themeStatus.TextColor3 = STATE.hubThemeDef().accent
+		else
+			themeStatus.Text = err or "That is not a theme."
+			themeStatus.TextColor3 = Color3.fromRGB(255, 120, 150)
 		end
 	end)
+	remember(importButton, lookCard, "import theme")
 
 	local introSlot = Instance.new("Frame")
 	introSlot.BackgroundTransparency = 1
@@ -5664,7 +5929,8 @@ local function installHub()
 		dockStats.Text = string.format("%d fps    %d ms", fps, ping)
 		local fill = math.clamp(fps / 80, 0.08, 1)
 		fpsBar.Size = UDim2.fromScale(fill, 1)
-		fpsBar.BackgroundColor3 = fps >= 30 and STATE.hubThemeDef().accent or Color3.new(1, 1, 1)
+		local themeNow = STATE.hubThemeDef()
+		fpsBar.BackgroundColor3 = fps >= 30 and themeNow.accent or (themeNow.risky or Color3.new(1, 1, 1))
 	end
 	refreshSession()
 	task.spawn(function()
