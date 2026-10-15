@@ -3789,20 +3789,45 @@ end
 
 local pulseAntiAfk
 
+function STATE.themeAsset(url, fileName)
+	if type(url) ~= "string" or type(fileName) ~= "string" then
+		return nil
+	end
+	if typeof(writefile) ~= "function" or typeof(getcustomasset) ~= "function" then
+		return nil
+	end
+	local ok, body = pcall(function()
+		return game:HttpGet(url)
+	end)
+	if not ok or type(body) ~= "string" or #body < 64 then
+		return nil
+	end
+	local path = "ZinoosHub/theme/" .. fileName
+	if not pcall(writefile, path, body) then
+		return nil
+	end
+	local assetOk, asset = pcall(getcustomasset, path)
+	if assetOk and type(asset) == "string" and asset ~= "" then
+		return asset
+	end
+	return nil
+end
+
 local function installHub()
 	closeLeftoverMenus()
 
-	local accent = Color3.fromRGB(255, 176, 199)
-	local ink = Color3.fromRGB(232, 223, 228)
-	local muted = Color3.fromRGB(162, 146, 155)
-	local panel = Color3.fromRGB(40, 27, 37)
-	local side = Color3.fromRGB(46, 30, 40)
-	local cardColor = Color3.fromRGB(71, 54, 62)
-	local selected = Color3.fromRGB(62, 45, 55)
-	local off = Color3.fromRGB(58, 44, 52)
-	local line = Color3.fromRGB(92, 72, 82)
-	local mint = Color3.fromRGB(166, 214, 184)
-	local inkDark = Color3.fromRGB(40, 27, 37)
+	local accent = Color3.fromRGB(255, 241, 233)
+	local ink = Color3.fromRGB(242, 236, 232)
+	local muted = Color3.fromRGB(255, 255, 255)
+	local panel = Color3.fromRGB(0, 0, 0)
+	local side = Color3.fromRGB(21, 17, 16)
+	local cardColor = Color3.fromRGB(0, 0, 0)
+	local selected = accent
+	local off = Color3.fromRGB(0, 0, 0)
+	local line = accent
+	local mint = accent
+	local inkDark = Color3.fromRGB(21, 17, 16)
+	local cardFade = 0.34
 
 	local TweenService = game:GetService("TweenService")
 	local tweenInfo = {
@@ -3890,7 +3915,7 @@ local function installHub()
 	launcherCorner.Parent = launcher
 	local launcherStroke = Instance.new("UIStroke")
 	launcherStroke.Color = line
-	launcherStroke.Transparency = 0.35
+	launcherStroke.Transparency = 0.45
 	launcherStroke.Thickness = 1
 	launcherStroke.Parent = launcher
 	local dockAvatar = Instance.new("ImageLabel")
@@ -3944,7 +3969,8 @@ local function installHub()
 	dockStats.Size = UDim2.new(1, -28, 0, 16)
 	dockStats.Parent = launcher
 	local barTrack = Instance.new("Frame")
-	barTrack.BackgroundColor3 = off
+	barTrack.BackgroundColor3 = accent
+	barTrack.BackgroundTransparency = 0.72
 	barTrack.BorderSizePixel = 0
 	barTrack.Position = UDim2.fromOffset(14, 86)
 	barTrack.Size = UDim2.new(1, -28, 0, 4)
@@ -3990,7 +4016,7 @@ local function installHub()
 
 	local shadow = Instance.new("Frame")
 	shadow.BackgroundColor3 = Color3.new(0, 0, 0)
-	shadow.BackgroundTransparency = 0.45
+	shadow.BackgroundTransparency = 1
 	shadow.BorderSizePixel = 0
 	shadow.Position = UDim2.fromOffset(0, 8)
 	shadow.Size = UDim2.fromScale(1, 1)
@@ -4012,8 +4038,27 @@ local function installHub()
 	windowCorner.Parent = window
 	local windowStroke = Instance.new("UIStroke")
 	windowStroke.Color = line
+	windowStroke.Transparency = 0.55
 	windowStroke.Thickness = 1
 	windowStroke.Parent = window
+	local wallpaper = Instance.new("CanvasGroup")
+	wallpaper.Name = "Wallpaper"
+	wallpaper.BackgroundTransparency = 1
+	wallpaper.BorderSizePixel = 0
+	wallpaper.Size = UDim2.fromScale(1, 1)
+	wallpaper.ZIndex = 1
+	wallpaper.Parent = window
+	local wallpaperCorner = Instance.new("UICorner")
+	wallpaperCorner.CornerRadius = UDim.new(0, 16)
+	wallpaperCorner.Parent = wallpaper
+	local wallpaperImage = Instance.new("ImageLabel")
+	wallpaperImage.BackgroundTransparency = 1
+	wallpaperImage.BorderSizePixel = 0
+	wallpaperImage.Size = UDim2.fromScale(1, 1)
+	wallpaperImage.ScaleType = Enum.ScaleType.Crop
+	wallpaperImage.ImageTransparency = 1
+	wallpaperImage.ZIndex = 1
+	wallpaperImage.Parent = wallpaper
 
 	local sideWrap = Instance.new("CanvasGroup")
 	sideWrap.Name = "SideWrap"
@@ -4026,6 +4071,7 @@ local function installHub()
 	local sidebar = Instance.new("Frame")
 	sidebar.Name = "Sidebar"
 	sidebar.BackgroundColor3 = side
+	sidebar.BackgroundTransparency = 0
 	sidebar.BorderSizePixel = 0
 	sidebar.Size = UDim2.fromScale(1, 1)
 	sidebar.ZIndex = 3
@@ -4035,6 +4081,7 @@ local function installHub()
 	sideCorner.Parent = sidebar
 	local sideFill = Instance.new("Frame")
 	sideFill.BackgroundColor3 = side
+	sideFill.BackgroundTransparency = 0
 	sideFill.BorderSizePixel = 0
 	sideFill.Position = UDim2.new(1, -16, 0, 0)
 	sideFill.Size = UDim2.new(0, 16, 1, 0)
@@ -4060,6 +4107,29 @@ local function installHub()
 	markText.Size = UDim2.fromScale(1, 1)
 	markText.ZIndex = 5
 	markText.Parent = mark
+	local markImage = Instance.new("ImageLabel")
+	markImage.BackgroundTransparency = 1
+	markImage.BorderSizePixel = 0
+	markImage.Size = UDim2.fromScale(1, 1)
+	markImage.ScaleType = Enum.ScaleType.Crop
+	markImage.ZIndex = 6
+	markImage.Parent = mark
+	local markImageCorner = Instance.new("UICorner")
+	markImageCorner.CornerRadius = UDim.new(1, 0)
+	markImageCorner.Parent = markImage
+	task.spawn(function()
+		local icon = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/63c9defa-4d08-4112-bbfe-d981407516df.jpg", "icon.jpg")
+		if icon and markImage.Parent then
+			markImage.Image = icon
+			mark.BackgroundTransparency = 1
+			markText.Visible = false
+		end
+		local photo = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/8239b4cd-652e-4ebf-a692-6a796f1bc0c6.jpg", "wallpaper.jpg")
+		if photo and wallpaperImage.Parent then
+			wallpaperImage.Image = photo
+			playMotion(wallpaperImage, { ImageTransparency = 0.17 }, tweenInfo.fade)
+		end
+	end)
 
 	local brand = Instance.new("TextLabel")
 	brand.BackgroundTransparency = 1
@@ -4102,6 +4172,7 @@ local function installHub()
 	header.Name = "DragBar"
 	header.Active = true
 	header.BackgroundColor3 = panel
+	header.BackgroundTransparency = 1
 	header.BorderSizePixel = 0
 	header.Size = UDim2.fromScale(1, 1)
 	header.ZIndex = 4
@@ -4121,6 +4192,7 @@ local function installHub()
 	local search = Instance.new("TextBox")
 	search.Name = "Search"
 	search.BackgroundColor3 = cardColor
+	search.BackgroundTransparency = cardFade
 	search.BorderSizePixel = 0
 	search.ClearTextOnFocus = false
 	search.Font = Enum.Font.Gotham
@@ -4138,6 +4210,11 @@ local function installHub()
 	local searchCorner = Instance.new("UICorner")
 	searchCorner.CornerRadius = UDim.new(0, 8)
 	searchCorner.Parent = search
+	local searchStroke = Instance.new("UIStroke")
+	searchStroke.Color = accent
+	searchStroke.Transparency = 0.58
+	searchStroke.Thickness = 1
+	searchStroke.Parent = search
 	local searchPad = Instance.new("UIPadding")
 	searchPad.PaddingLeft = UDim.new(0, 10)
 	searchPad.Parent = search
@@ -4229,7 +4306,9 @@ local function installHub()
 		local function visit(root)
 			local kids = root:GetChildren()
 			table.sort(kids, function(a, b)
-				return (a.LayoutOrder or 0) < (b.LayoutOrder or 0)
+				local aOrder = a:IsA("GuiObject") and a.LayoutOrder or 0
+				local bOrder = b:IsA("GuiObject") and b.LayoutOrder or 0
+				return aOrder < bOrder
 			end)
 			for _, child in ipairs(kids) do
 				if child:GetAttribute("ZinoosSlot") == true then
@@ -4264,8 +4343,8 @@ local function installHub()
 		pageTitle.Text = name
 		for buttonName, button in pairs(navButtons) do
 			local on = buttonName == name
-			button.BackgroundColor3 = selected
-			playMotion(button, { BackgroundTransparency = on and 0 or 1 }, tweenInfo.hover)
+			button.BackgroundColor3 = on and accent or Color3.new(0, 0, 0)
+			playMotion(button, { BackgroundTransparency = on and 0.78 or 1 }, tweenInfo.hover)
 		end
 		if holder.Visible then
 			playCards(pages[name])
@@ -4340,12 +4419,12 @@ local function installHub()
 		bindPress(button)
 		button.MouseEnter:Connect(function()
 			if currentPage ~= name then
-				playMotion(button, { BackgroundTransparency = 0.45 }, tweenInfo.hover)
+				playMotion(button, { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.4 }, tweenInfo.hover)
 			end
 		end)
 		button.MouseLeave:Connect(function()
 			if currentPage ~= name then
-				playMotion(button, { BackgroundTransparency = 1 }, tweenInfo.hover)
+				playMotion(button, { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1 }, tweenInfo.hover)
 			end
 		end)
 		onActivate(button, function()
@@ -4358,6 +4437,7 @@ local function installHub()
 
 	local profile = Instance.new("Frame")
 	profile.BackgroundColor3 = cardColor
+	profile.BackgroundTransparency = cardFade
 	profile.BorderSizePixel = 0
 	profile.AnchorPoint = Vector2.new(0, 1)
 	profile.Position = UDim2.new(0, 12, 1, -14)
@@ -4367,6 +4447,11 @@ local function installHub()
 	local profileCorner = Instance.new("UICorner")
 	profileCorner.CornerRadius = UDim.new(0, 12)
 	profileCorner.Parent = profile
+	local profileStroke = Instance.new("UIStroke")
+	profileStroke.Color = accent
+	profileStroke.Transparency = 0.58
+	profileStroke.Thickness = 1
+	profileStroke.Parent = profile
 	local avatar = Instance.new("ImageLabel")
 	avatar.BackgroundColor3 = cardColor
 	avatar.BorderSizePixel = 0
@@ -4440,6 +4525,7 @@ local function installHub()
 		local box = Instance.new("CanvasGroup")
 		box.Name = "Motion"
 		box.BackgroundColor3 = cardColor
+		box.BackgroundTransparency = cardFade
 		box.BorderSizePixel = 0
 		box.AutomaticSize = Enum.AutomaticSize.Y
 		box.Size = UDim2.new(1, 0, 0, 0)
@@ -4451,7 +4537,7 @@ local function installHub()
 		boxCorner.Parent = box
 		local boxStroke = Instance.new("UIStroke")
 		boxStroke.Color = line
-		boxStroke.Transparency = 0.55
+		boxStroke.Transparency = 0.62
 		boxStroke.Thickness = 1
 		boxStroke.Parent = box
 		local boxPad = Instance.new("UIPadding")
@@ -4493,13 +4579,23 @@ local function installHub()
 	local function paintSwitch(track, knob, on, instant)
 		local goal = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
 		local color = on and accent or off
+		local knobColor = on and inkDark or accent
+		local glow = track:FindFirstChild("Glow")
+		local glowFade = on and 0.82 or 0.35
 		if instant then
 			knob.Position = goal
+			knob.BackgroundColor3 = knobColor
 			track.BackgroundColor3 = color
+			if glow and glow:IsA("UIStroke") then
+				glow.Transparency = glowFade
+			end
 			return
 		end
-		playMotion(knob, { Position = goal }, tweenInfo.toggle)
+		playMotion(knob, { Position = goal, BackgroundColor3 = knobColor }, tweenInfo.toggle)
 		playMotion(track, { BackgroundColor3 = color }, tweenInfo.toggle)
+		if glow and glow:IsA("UIStroke") then
+			playMotion(glow, { Transparency = glowFade }, tweenInfo.toggle)
+		end
 	end
 
 	local function onToggle(key, on)
@@ -4567,6 +4663,12 @@ local function installHub()
 		local trackCorner = Instance.new("UICorner")
 		trackCorner.CornerRadius = UDim.new(1, 0)
 		trackCorner.Parent = track
+		local trackStroke = Instance.new("UIStroke")
+		trackStroke.Name = "Glow"
+		trackStroke.Color = accent
+		trackStroke.Transparency = 0.35
+		trackStroke.Thickness = 1
+		trackStroke.Parent = track
 		local knob = Instance.new("Frame")
 		knob.AnchorPoint = Vector2.new(0, 0.5)
 		knob.Size = UDim2.fromOffset(14, 14)
@@ -4602,6 +4704,7 @@ local function installHub()
 	popupBlock.Parent = window
 	local popup = Instance.new("CanvasGroup")
 	popup.BackgroundColor3 = side
+	popup.BackgroundTransparency = 0.08
 	popup.BorderSizePixel = 0
 	popup.ClipsDescendants = true
 	popup.Visible = false
@@ -4613,6 +4716,7 @@ local function installHub()
 	popupCorner.Parent = popup
 	local popupStroke = Instance.new("UIStroke")
 	popupStroke.Color = line
+	popupStroke.Transparency = 0.45
 	popupStroke.Parent = popup
 	local popupScroll = Instance.new("ScrollingFrame")
 	popupScroll.BackgroundTransparency = 1
@@ -4658,7 +4762,7 @@ local function installHub()
 		local function paintChoice(choice, option)
 			local on = (multiple and picked[option] == true) or (not multiple and option == current)
 			choice.BackgroundColor3 = on and selected or side
-			choice.BackgroundTransparency = on and 0 or 1
+			choice.BackgroundTransparency = on and 0.72 or 1
 			choice.Text = (on and "  ✓ " or "    ") .. option
 		end
 		for index, option in ipairs(options) do
@@ -4765,6 +4869,7 @@ local function installHub()
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
 		pick.Text = stacked and (" " .. getValue()) or getValue()
 		pick.BackgroundColor3 = panel
+		pick.BackgroundTransparency = cardFade
 		pick.AnchorPoint = stacked and Vector2.new(0, 1) or Vector2.new(1, 0.5)
 		pick.Position = stacked and UDim2.new(0, 0, 1, 0) or UDim2.new(1, 0, 0.5, 0)
 		pick.Size = stacked and UDim2.new(1, 0, 0, 26) or UDim2.fromOffset(132, 26)
@@ -4773,6 +4878,11 @@ local function installHub()
 		local pickCorner = Instance.new("UICorner")
 		pickCorner.CornerRadius = UDim.new(0, 8)
 		pickCorner.Parent = pick
+		local pickStroke = Instance.new("UIStroke")
+		pickStroke.Color = accent
+		pickStroke.Transparency = 0.58
+		pickStroke.Thickness = 1
+		pickStroke.Parent = pick
 		bindPress(pick)
 		onActivate(pick, function()
 			openPopup(pick, options, getValue(), function(option)
@@ -4810,6 +4920,7 @@ local function installHub()
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
 		pick.Text = " " .. STATE.rarityLabel(getList())
 		pick.BackgroundColor3 = panel
+		pick.BackgroundTransparency = cardFade
 		pick.AnchorPoint = Vector2.new(1, 0.5)
 		pick.Position = UDim2.new(1, 0, 0.5, 0)
 		pick.Size = UDim2.fromOffset(156, 26)
@@ -4818,6 +4929,11 @@ local function installHub()
 		local pickCorner = Instance.new("UICorner")
 		pickCorner.CornerRadius = UDim.new(0, 8)
 		pickCorner.Parent = pick
+		local pickStroke = Instance.new("UIStroke")
+		pickStroke.Color = accent
+		pickStroke.Transparency = 0.58
+		pickStroke.Thickness = 1
+		pickStroke.Parent = pick
 		bindPress(pick)
 		onActivate(pick, function()
 			openPopup(pick, options, getList(), function(option)
@@ -4951,6 +5067,7 @@ local function installHub()
 	local function statChip(parentFrame, title, order)
 		local chip = Instance.new("Frame")
 		chip.BackgroundColor3 = cardColor
+		chip.BackgroundTransparency = cardFade
 		chip.BorderSizePixel = 0
 		chip.LayoutOrder = order
 		chip.Size = UDim2.new(0.5, -5, 0, 58)
@@ -4959,6 +5076,11 @@ local function installHub()
 		local chipCorner = Instance.new("UICorner")
 		chipCorner.CornerRadius = UDim.new(0, 12)
 		chipCorner.Parent = chip
+		local chipStroke = Instance.new("UIStroke")
+		chipStroke.Color = accent
+		chipStroke.Transparency = 0.62
+		chipStroke.Thickness = 1
+		chipStroke.Parent = chip
 		local chipTitle = Instance.new("TextLabel")
 		chipTitle.BackgroundTransparency = 1
 		chipTitle.Font = Enum.Font.Gotham
@@ -5202,6 +5324,7 @@ local function installHub()
 	makeSwitch(discordCard, "Webhook Alerts", "webhookOn")
 	local urlBox = Instance.new("TextBox")
 	urlBox.BackgroundColor3 = panel
+	urlBox.BackgroundTransparency = cardFade
 	urlBox.BorderSizePixel = 0
 	urlBox.ClearTextOnFocus = false
 	urlBox.Font = Enum.Font.Gotham
@@ -5218,6 +5341,11 @@ local function installHub()
 	local urlCorner = Instance.new("UICorner")
 	urlCorner.CornerRadius = UDim.new(0, 8)
 	urlCorner.Parent = urlBox
+	local urlStroke = Instance.new("UIStroke")
+	urlStroke.Color = accent
+	urlStroke.Transparency = 0.58
+	urlStroke.Thickness = 1
+	urlStroke.Parent = urlBox
 	local urlPad = Instance.new("UIPadding")
 	urlPad.PaddingLeft = UDim.new(0, 8)
 	urlPad.PaddingRight = UDim.new(0, 8)
@@ -5238,6 +5366,7 @@ local function installHub()
 		button.TextSize = 14
 		button.TextColor3 = filled and inkDark or ink
 		button.BackgroundColor3 = filled and accent or panel
+		button.BackgroundTransparency = filled and 0 or cardFade
 		button.LayoutOrder = order
 		button.Size = UDim2.new(1, 0, 0, 34)
 		button.ZIndex = 6
@@ -5245,6 +5374,13 @@ local function installHub()
 		local buttonCorner = Instance.new("UICorner")
 		buttonCorner.CornerRadius = UDim.new(0, 8)
 		buttonCorner.Parent = button
+		if not filled then
+			local buttonStroke = Instance.new("UIStroke")
+			buttonStroke.Color = accent
+			buttonStroke.Transparency = 0.5
+			buttonStroke.Thickness = 1
+			buttonStroke.Parent = button
+		end
 		bindPress(button)
 		button.MouseEnter:Connect(function()
 			playMotion(button, { BackgroundColor3 = (filled and accent or panel):Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
@@ -5366,7 +5502,7 @@ local function installHub()
 		dockStats.Text = string.format("%d fps    %d ms", fps, ping)
 		local fill = math.clamp(fps / 80, 0.08, 1)
 		fpsBar.Size = UDim2.fromScale(fill, 1)
-		fpsBar.BackgroundColor3 = fps >= 30 and mint or accent
+		fpsBar.BackgroundColor3 = fps >= 30 and accent or Color3.new(1, 1, 1)
 	end
 	refreshSession()
 	task.spawn(function()
