@@ -5449,7 +5449,7 @@ local function installHub()
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
-	makeSwitch(training, "Phone Games", "phoneGames", "Plays the bench phone game you picked. Bubbles pause while the phone is open.")
+	makeSwitch(training, "Phone Games", "phoneGames", "Plays the bench phone game you picked and tries not to lose. Bubbles pause while the phone is open.")
 	makeDropdown(training, "Phone Game", function()
 		return STATE.phoneChoice or "Critter Merge"
 	end, { "Critter Merge", "When Pigs Fly", "Snack Stack" }, function(option)
@@ -7290,6 +7290,8 @@ function STATE.openPhoneGame(game)
 	props.page:set(game.key)
 	STATE._phoneIndex = game.index
 	STATE._phoneKey = game.key
+	STATE._phoneStep = nil
+	STATE._phoneScanAt = 0
 	STATE._phoneRoundAt = os.clock()
 	STATE._phoneSubmitAt = os.clock() + 8
 	STATE._phoneSent = nil
@@ -7386,6 +7388,269 @@ function STATE.stepPhoneGames()
 		STATE.submitPhoneScore(game)
 	end
 end
+
+function STATE.phoneStepKind(deep)
+	if type(deep) ~= "table" then
+		return nil
+	end
+	local ninth = deep[9]
+	local props = deep[6]
+	if type(ninth) == "table" and type(deep[10]) == "number" and type(deep[11]) == "number" and type(props) == "table" and props.autoplay ~= nil then
+		return "Flappy"
+	end
+	props = deep[8]
+	if type(deep[2]) == "table" and typeof(deep[12]) == "function" and type(ninth) == "number" and type(props) == "table" and props.autoplay ~= nil then
+		return "Stack"
+	end
+	props = deep[5]
+	if typeof(ninth) == "function" and type(deep[8]) == "number" and type(deep[12]) == "table" and typeof(deep[3]) == "function" and type(props) == "table" and props.autoplay ~= nil then
+		return "Merge"
+	end
+	return nil
+end
+
+function STATE.findPhoneStep()
+	if type(getconnections) ~= "function" or type(getupvalues) ~= "function" then
+		return nil, nil
+	end
+	local cons = getconnections(RunService.Heartbeat)
+	if type(cons) ~= "table" then
+		return nil, nil
+	end
+	local function walk(fn, depth)
+		if depth > 3 or typeof(fn) ~= "function" then
+			return nil, nil
+		end
+		local deep = getupvalues(fn)
+		if type(deep) ~= "table" then
+			return nil, nil
+		end
+		local kind = STATE.phoneStepKind(deep)
+		if kind then
+			return fn, kind
+		end
+		local limit = math.min(#deep, 8)
+		for index = 1, limit do
+			if typeof(deep[index]) == "function" then
+				local found, foundKind = walk(deep[index], depth + 1)
+				if found then
+					return found, foundKind
+				end
+			end
+		end
+		return nil, nil
+	end
+	for _, conn in ipairs(cons) do
+		local found, kind = walk(conn.Function, 0)
+		if found then
+			return found, kind
+		end
+	end
+	return nil, nil
+end
+
+function STATE.steerFlappy(step)
+	local ups = getupvalues(step)
+	if type(ups) ~= "table" or type(ups[6]) ~= "table" or typeof(ups[4]) ~= "function" or typeof(ups[8]) ~= "function" then
+		return
+	end
+	ups[6].autoplay = false
+	local phase = ups[4](ups[5])
+	if phase == "menu" then
+		STATE._phoneHoldAt = nil
+		ups[8]()
+		return
+	end
+	if phase == "over" or phase == "dead" then
+		STATE._phoneHoldAt = STATE._phoneHoldAt or os.clock()
+		if phase == "over" and os.clock() - STATE._phoneHoldAt >= 1.5 then
+			STATE._phoneHoldAt = nil
+			ups[8]()
+		end
+		return
+	end
+	if phase ~= "play" or type(ups[10]) ~= "number" or type(ups[11]) ~= "number" or type(ups[9]) ~= "table" then
+		return
+	end
+	STATE._phoneHoldAt = nil
+	local y = ups[10]
+	local vy = ups[11]
+	local width = type(ups[3]) == "number" and ups[3] or 50
+	local birdX = width * 0.3
+	local gapY, gap, nearest = 46, 28, math.huge
+	for _, pipe in ipairs(ups[9]) do
+		if type(pipe) == "table" and type(pipe.x) == "number" and pipe.x + 14 >= birdX - 1 and pipe.x < nearest then
+			nearest = pipe.x
+			gapY = type(pipe.gapY) == "number" and pipe.gapY or gapY
+			gap = type(pipe.gap) == "number" and pipe.gap or gap
+		end
+	end
+	local nextY = y + math.min(vy + 250 / 55, 120) / 55
+	local floorLine = gapY + math.max(4, gap / 2 - 4.2)
+	if y > 78 or (y > gapY + 5 and vy > -35) or nextY > floorLine then
+		setupvalue(step, 11, -72)
+	elseif y < 8 or (y < gapY - 6 and vy < 0) then
+		setupvalue(step, 11, 35)
+	end
+end
+
+function STATE.steerStack(step)
+	local ups = getupvalues(step)
+	if type(ups) ~= "table" or typeof(ups[6]) ~= "function" or type(ups[2]) ~= "table" then
+		return
+	end
+	if ups[6](ups[7]) ~= "play" then
+		return
+	end
+	local top = ups[2][#ups[2]]
+	local mover = ups[11]
+	if type(top) ~= "table" or type(top.x) ~= "number" or type(mover) ~= "table" then
+		return
+	end
+	local now = os.clock()
+	if now - (STATE._stackNext or 0) >= 0.34 then
+		mover.x = top.x
+		STATE._stackNext = now
+	else
+		local away = top.x + 8
+		if away > 92 then
+			away = top.x - 8
+		end
+		mover.x = away
+	end
+end
+
+function STATE.mergeAim(bodies, tier, radius)
+	local aim = nil
+	local room = -1
+	local tops = { 100, 100, 100, 100, 100, 100, 100, 100 }
+	if type(bodies) == "table" then
+		for _, body in ipairs(bodies) do
+			if type(body) == "table" and body.tier == tier and type(body.x) == "number" and type(body.y) == "number" and type(body.r) == "number" then
+				local space = body.y - body.r
+				if space > 24 and space > room then
+					room = space
+					aim = body.x
+				end
+			end
+		end
+		if aim == nil then
+			for _, body in ipairs(bodies) do
+				if type(body) == "table" and type(body.x) == "number" and type(body.y) == "number" and type(body.r) == "number" then
+					local column = math.clamp(math.floor(body.x / 12.5) + 1, 1, 8)
+					local top = body.y - body.r
+					if top < tops[column] then
+						tops[column] = top
+					end
+				end
+			end
+			local bestColumn, bestTop = 4, -1
+			for column = 1, 8 do
+				if tops[column] > bestTop then
+					bestTop = tops[column]
+					bestColumn = column
+				end
+			end
+			if bestTop >= 22 then
+				aim = (bestColumn - 0.5) * 12.5
+			else
+				local highest = math.huge
+				for _, body in ipairs(bodies) do
+					if type(body) == "table" and body.tier == tier and type(body.y) == "number" and body.y < highest and type(body.x) == "number" then
+						highest = body.y
+						aim = body.x
+					end
+				end
+			end
+		end
+	end
+	if type(aim) ~= "number" then
+		return nil
+	end
+	local edge = math.clamp(type(radius) == "number" and radius or 6, 4, 20)
+	return math.clamp(aim, edge, 100 - edge)
+end
+
+function STATE.steerMerge(step)
+	local ups = getupvalues(step)
+	if type(ups) ~= "table" or type(ups[5]) ~= "table" or typeof(ups[3]) ~= "function" or typeof(ups[9]) ~= "function" then
+		return
+	end
+	ups[5].autoplay = false
+	local phase = ups[3](ups[4])
+	if phase == "over" then
+		STATE._phoneHoldAt = STATE._phoneHoldAt or os.clock()
+		if os.clock() - STATE._phoneHoldAt >= 1.5 and typeof(ups[7]) == "function" then
+			STATE._phoneHoldAt = nil
+			ups[7]()
+		end
+		return
+	end
+	if phase ~= "play" and phase ~= "menu" then
+		return
+	end
+	STATE._phoneHoldAt = nil
+	if os.clock() - (STATE._mergeNext or 0) < 0.12 then
+		return
+	end
+	if type(ups[2]) == "number" and ups[2] > 0 then
+		return
+	end
+	local tier = type(ups[19]) == "number" and ups[19] or 1
+	local radius = 6
+	local ladder = ups[18]
+	if type(ladder) == "table" and type(ladder[tier]) == "table" and type(ladder[tier].r) == "number" then
+		radius = ladder[tier].r
+	end
+	local aim = STATE.mergeAim(ups[12], tier, radius)
+	if aim == nil then
+		if phase == "menu" or type(ups[12]) ~= "table" or #ups[12] == 0 then
+			aim = math.clamp(50, radius, 100 - radius)
+		else
+			return
+		end
+	end
+	STATE._mergeNext = os.clock()
+	setupvalue(step, 8, aim)
+	ups[9]()
+end
+
+function STATE.steerPhone()
+	if STATE.phoneGames ~= true or STATE._phonePaused == true then
+		STATE._phoneStep = nil
+		return
+	end
+	if typeof(getupvalues) ~= "function" or typeof(setupvalue) ~= "function" then
+		return
+	end
+	if os.clock() >= (STATE._phoneScanAt or 0) or typeof(STATE._phoneStep) ~= "function" then
+		STATE._phoneScanAt = os.clock() + 0.2
+		STATE._phoneStep, STATE._phoneKind = STATE.findPhoneStep()
+	end
+	local step = STATE._phoneStep
+	if typeof(step) ~= "function" or STATE._phoneKind ~= STATE._phoneKey then
+		return
+	end
+	if STATE._phoneKind == "Flappy" then
+		STATE.steerFlappy(step)
+	elseif STATE._phoneKind == "Stack" then
+		STATE.steerStack(step)
+	elseif STATE._phoneKind == "Merge" then
+		STATE.steerMerge(step)
+	end
+end
+
+STATE.connect(RunService.RenderStepped, function()
+	if not running() or STATE.phoneGames ~= true then
+		return
+	end
+	local ok, err = pcall(STATE.steerPhone)
+	if not ok then
+		STATE._phoneStep = nil
+		STATE._phoneScanAt = 0
+		STATE.noteFault("Phone Games", false, err)
+	end
+end)
 
 task.spawn(function()
 	while running() do
