@@ -3597,6 +3597,86 @@ local FLAG_KEYS = {
 	AntiAfk = "antiAfk",
 }
 
+STATE.hubThemes = {
+	Asta = {
+		accent = Color3.fromRGB(255, 241, 233),
+		ink = Color3.fromRGB(242, 236, 232),
+		muted = Color3.fromRGB(255, 255, 255),
+		panel = Color3.fromRGB(0, 0, 0),
+		side = Color3.fromRGB(21, 17, 16),
+		card = Color3.fromRGB(0, 0, 0),
+		off = Color3.fromRGB(0, 0, 0),
+		inkDark = Color3.fromRGB(21, 17, 16),
+		stroke = Color3.fromRGB(255, 241, 233),
+		selected = Color3.fromRGB(255, 241, 233),
+		hover = Color3.fromRGB(0, 0, 0),
+		cardFade = 0.34,
+		strokeFade = 0.58,
+		selectedFade = 0.78,
+		hoverFade = 0.4,
+		barFade = 0.72,
+		wallpaper = true,
+		icon = true,
+		wallFade = 0.17,
+	},
+	Plum = {
+		accent = Color3.fromRGB(255, 176, 199),
+		ink = Color3.fromRGB(232, 223, 228),
+		muted = Color3.fromRGB(162, 146, 155),
+		panel = Color3.fromRGB(40, 27, 37),
+		side = Color3.fromRGB(46, 30, 40),
+		card = Color3.fromRGB(71, 54, 62),
+		off = Color3.fromRGB(58, 44, 52),
+		inkDark = Color3.fromRGB(40, 27, 37),
+		stroke = Color3.fromRGB(92, 72, 82),
+		selected = Color3.fromRGB(62, 45, 55),
+		hover = Color3.fromRGB(62, 45, 55),
+		cardFade = 0,
+		strokeFade = 0.55,
+		selectedFade = 0,
+		hoverFade = 0.45,
+		barFade = 0.45,
+		wallpaper = false,
+		icon = false,
+		wallFade = 1,
+	},
+	Night = {
+		accent = Color3.fromRGB(196, 181, 253),
+		ink = Color3.fromRGB(244, 244, 245),
+		muted = Color3.fromRGB(161, 161, 170),
+		panel = Color3.fromRGB(12, 12, 14),
+		side = Color3.fromRGB(20, 20, 22),
+		card = Color3.fromRGB(28, 28, 32),
+		off = Color3.fromRGB(38, 38, 44),
+		inkDark = Color3.fromRGB(20, 20, 22),
+		stroke = Color3.fromRGB(63, 63, 70),
+		selected = Color3.fromRGB(39, 39, 46),
+		hover = Color3.fromRGB(39, 39, 46),
+		cardFade = 0,
+		strokeFade = 0.35,
+		selectedFade = 0,
+		hoverFade = 0.35,
+		barFade = 0.65,
+		wallpaper = false,
+		icon = false,
+		wallFade = 1,
+	},
+}
+STATE.hubThemeOrder = { "Asta", "Plum", "Night" }
+
+function STATE.hubThemeDef()
+	local themes = STATE.hubThemes
+	local name = STATE.hubTheme
+	if type(themes) == "table" and type(name) == "string" and type(themes[name]) == "table" then
+		return themes[name]
+	end
+	return themes.Asta
+end
+
+if type(STATE.hubTheme) ~= "string" or type(STATE.hubThemes[STATE.hubTheme]) ~= "table" then
+	STATE.hubTheme = "Asta"
+end
+
 local function syncSavedVisuals()
 	applyLowEnd(STATE.lowEnd == true)
 	if STATE.litePets == true then
@@ -3672,6 +3752,9 @@ local function loadSaved()
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
+	if type(saved.Theme) == "string" and type(STATE.hubThemes[saved.Theme]) == "table" then
+		STATE.hubTheme = saved.Theme
+	end
 	if type(saved.MenuX) == "number" then
 		STATE.menuX = saved.MenuX
 	end
@@ -3735,6 +3818,7 @@ local function saveConfig()
 		DockX = STATE.dockX,
 		DockY = STATE.dockY,
 		DockCustom = STATE.dockCustom == true,
+		Theme = type(STATE.hubTheme) == "string" and STATE.hubTheme or "Asta",
 	}
 	for flag, key in pairs(FLAG_KEYS) do
 		payload[flag] = STATE[key] == true
@@ -3815,19 +3899,25 @@ end
 
 local function installHub()
 	closeLeftoverMenus()
+	STATE.themeSwitches = {}
 
-	local accent = Color3.fromRGB(255, 241, 233)
-	local ink = Color3.fromRGB(242, 236, 232)
-	local muted = Color3.fromRGB(255, 255, 255)
-	local panel = Color3.fromRGB(0, 0, 0)
-	local side = Color3.fromRGB(21, 17, 16)
-	local cardColor = Color3.fromRGB(0, 0, 0)
-	local selected = accent
-	local off = Color3.fromRGB(0, 0, 0)
-	local line = accent
-	local mint = accent
-	local inkDark = Color3.fromRGB(21, 17, 16)
-	local cardFade = 0.34
+	local theme = STATE.hubThemeDef()
+	local accent = theme.accent
+	local ink = theme.ink
+	local muted = theme.muted
+	local panel = theme.panel
+	local side = theme.side
+	local cardColor = theme.card
+	local selected = theme.selected
+	local off = theme.off
+	local line = theme.stroke
+	local mint = theme.accent
+	local inkDark = theme.inkDark
+	local cardFade = theme.cardFade
+	local function role(object, kind)
+		object:SetAttribute("ZinoosRole", kind)
+		return object
+	end
 
 	local TweenService = game:GetService("TweenService")
 	local tweenInfo = {
@@ -3902,6 +3992,7 @@ local function installHub()
 	local launcher = Instance.new("CanvasGroup")
 	launcher.Name = "Zinoos hub"
 	launcher.BackgroundColor3 = side
+	role(launcher, "side")
 	launcher.BorderSizePixel = 0
 	launcher.AnchorPoint = Vector2.new(0, 0.5)
 	launcher.Position = UDim2.new(0, 28, 0.58, 0)
@@ -3932,6 +4023,7 @@ local function installHub()
 	dockName.Font = Enum.Font.GothamBold
 	dockName.Text = LocalPlayer.DisplayName
 	dockName.TextColor3 = ink
+	role(dockName, "ink")
 	dockName.TextSize = 15
 	dockName.TextXAlignment = Enum.TextXAlignment.Left
 	dockName.TextTruncate = Enum.TextTruncate.AtEnd
@@ -3943,6 +4035,7 @@ local function installHub()
 	dockGame.Font = Enum.Font.Gotham
 	dockGame.Text = "Lift Rock For Eggs"
 	dockGame.TextColor3 = muted
+	role(dockGame, "muted")
 	dockGame.TextSize = 12
 	dockGame.TextXAlignment = Enum.TextXAlignment.Left
 	dockGame.Position = UDim2.fromOffset(60, 32)
@@ -3953,6 +4046,7 @@ local function installHub()
 	dockClock.Font = Enum.Font.GothamBold
 	dockClock.Text = "0:00"
 	dockClock.TextColor3 = ink
+	role(dockClock, "ink")
 	dockClock.TextSize = 14
 	dockClock.TextXAlignment = Enum.TextXAlignment.Right
 	dockClock.Position = UDim2.new(1, -126, 0, 16)
@@ -3963,6 +4057,7 @@ local function installHub()
 	dockStats.Font = Enum.Font.Gotham
 	dockStats.Text = "60 fps    0 ms"
 	dockStats.TextColor3 = mint
+	role(dockStats, "accentText")
 	dockStats.TextSize = 12
 	dockStats.TextXAlignment = Enum.TextXAlignment.Left
 	dockStats.Position = UDim2.fromOffset(14, 64)
@@ -3991,6 +4086,7 @@ local function installHub()
 	dockHint.Font = Enum.Font.Gotham
 	dockHint.Text = "Click or press Right Ctrl to open"
 	dockHint.TextColor3 = muted
+	role(dockHint, "muted")
 	dockHint.TextSize = 12
 	dockHint.TextXAlignment = Enum.TextXAlignment.Left
 	dockHint.Position = UDim2.fromOffset(14, 100)
@@ -4029,6 +4125,7 @@ local function installHub()
 	local window = Instance.new("Frame")
 	window.Name = "Window"
 	window.BackgroundColor3 = panel
+	role(window, "panel")
 	window.BorderSizePixel = 0
 	window.Size = UDim2.fromScale(1, 1)
 	window.ZIndex = 2
@@ -4071,6 +4168,7 @@ local function installHub()
 	local sidebar = Instance.new("Frame")
 	sidebar.Name = "Sidebar"
 	sidebar.BackgroundColor3 = side
+	role(sidebar, "side")
 	sidebar.BackgroundTransparency = 0
 	sidebar.BorderSizePixel = 0
 	sidebar.Size = UDim2.fromScale(1, 1)
@@ -4081,6 +4179,7 @@ local function installHub()
 	sideCorner.Parent = sidebar
 	local sideFill = Instance.new("Frame")
 	sideFill.BackgroundColor3 = side
+	role(sideFill, "side")
 	sideFill.BackgroundTransparency = 0
 	sideFill.BorderSizePixel = 0
 	sideFill.Position = UDim2.new(1, -16, 0, 0)
@@ -4103,6 +4202,7 @@ local function installHub()
 	markText.Font = Enum.Font.GothamBlack
 	markText.Text = "Z"
 	markText.TextColor3 = inkDark
+	role(markText, "inkDark")
 	markText.TextSize = 16
 	markText.Size = UDim2.fromScale(1, 1)
 	markText.ZIndex = 5
@@ -4119,15 +4219,15 @@ local function installHub()
 	markImageCorner.Parent = markImage
 	task.spawn(function()
 		local icon = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/63c9defa-4d08-4112-bbfe-d981407516df.jpg", "icon.jpg")
-		if icon and markImage.Parent then
-			markImage.Image = icon
-			mark.BackgroundTransparency = 1
-			markText.Visible = false
+		if type(icon) == "string" then
+			STATE.themeIcon = icon
 		end
 		local photo = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/8239b4cd-652e-4ebf-a692-6a796f1bc0c6.jpg", "wallpaper.jpg")
-		if photo and wallpaperImage.Parent then
-			wallpaperImage.Image = photo
-			playMotion(wallpaperImage, { ImageTransparency = 0.17 }, tweenInfo.fade)
+		if type(photo) == "string" then
+			STATE.themeWall = photo
+		end
+		if STATE.applyLook then
+			STATE.applyLook()
 		end
 	end)
 
@@ -4136,6 +4236,7 @@ local function installHub()
 	brand.Font = Enum.Font.GothamBold
 	brand.Text = "Zinoos"
 	brand.TextColor3 = ink
+	role(brand, "ink")
 	brand.TextSize = 16
 	brand.TextXAlignment = Enum.TextXAlignment.Left
 	brand.Position = UDim2.fromOffset(52, 14)
@@ -4147,6 +4248,7 @@ local function installHub()
 	brandSub.Font = Enum.Font.Gotham
 	brandSub.Text = "Lift Rock"
 	brandSub.TextColor3 = muted
+	role(brandSub, "muted")
 	brandSub.TextSize = 12
 	brandSub.TextXAlignment = Enum.TextXAlignment.Left
 	brandSub.Position = UDim2.fromOffset(52, 32)
@@ -4182,6 +4284,7 @@ local function installHub()
 	pageTitle.Font = Enum.Font.GothamBold
 	pageTitle.Text = "Home"
 	pageTitle.TextColor3 = ink
+	role(pageTitle, "ink")
 	pageTitle.TextSize = 18
 	pageTitle.TextXAlignment = Enum.TextXAlignment.Left
 	pageTitle.Position = UDim2.fromOffset(28, 0)
@@ -4200,6 +4303,7 @@ local function installHub()
 	search.PlaceholderColor3 = muted
 	search.Text = ""
 	search.TextColor3 = ink
+	role(search, "field")
 	search.TextSize = 14
 	search.TextXAlignment = Enum.TextXAlignment.Left
 	search.AnchorPoint = Vector2.new(1, 0.5)
@@ -4226,6 +4330,7 @@ local function installHub()
 	fullButton.Font = Enum.Font.Gotham
 	fullButton.TextSize = 16
 	fullButton.TextColor3 = muted
+	role(fullButton, "muted")
 	fullButton.BackgroundTransparency = 1
 	fullButton.AnchorPoint = Vector2.new(1, 0.5)
 	fullButton.Position = UDim2.new(1, -48, 0.5, 0)
@@ -4238,6 +4343,7 @@ local function installHub()
 	closeButton.Font = Enum.Font.GothamBold
 	closeButton.TextSize = 14
 	closeButton.TextColor3 = muted
+	role(closeButton, "muted")
 	closeButton.BackgroundTransparency = 1
 	closeButton.AnchorPoint = Vector2.new(1, 0.5)
 	closeButton.Position = UDim2.new(1, -12, 0.5, 0)
@@ -4341,10 +4447,11 @@ local function installHub()
 			page.Visible = pageName == name
 		end
 		pageTitle.Text = name
+		local themeNow = STATE.hubThemeDef()
 		for buttonName, button in pairs(navButtons) do
 			local on = buttonName == name
-			button.BackgroundColor3 = on and accent or Color3.new(0, 0, 0)
-			playMotion(button, { BackgroundTransparency = on and 0.78 or 1 }, tweenInfo.hover)
+			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
+			playMotion(button, { BackgroundTransparency = on and themeNow.selectedFade or 1 }, tweenInfo.hover)
 		end
 		if holder.Visible then
 			playCards(pages[name])
@@ -4375,6 +4482,7 @@ local function installHub()
 			part.Parent = icon
 			local stroke = Instance.new("UIStroke")
 			stroke.Color = ink
+			stroke:SetAttribute("ZinoosRole", "iconStroke")
 			stroke.Thickness = 1.25
 			stroke.Parent = part
 			local corner = Instance.new("UICorner")
@@ -4403,6 +4511,7 @@ local function installHub()
 		button.Font = Enum.Font.GothamMedium
 		button.TextSize = 15
 		button.TextColor3 = ink
+		role(button, "ink")
 		button.TextXAlignment = Enum.TextXAlignment.Left
 		button.BackgroundColor3 = selected
 		button.BackgroundTransparency = 1
@@ -4419,12 +4528,14 @@ local function installHub()
 		bindPress(button)
 		button.MouseEnter:Connect(function()
 			if currentPage ~= name then
-				playMotion(button, { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.4 }, tweenInfo.hover)
+				local themeNow = STATE.hubThemeDef()
+				playMotion(button, { BackgroundColor3 = themeNow.hover, BackgroundTransparency = themeNow.hoverFade }, tweenInfo.hover)
 			end
 		end)
 		button.MouseLeave:Connect(function()
 			if currentPage ~= name then
-				playMotion(button, { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1 }, tweenInfo.hover)
+				local themeNow = STATE.hubThemeDef()
+				playMotion(button, { BackgroundColor3 = themeNow.hover, BackgroundTransparency = 1 }, tweenInfo.hover)
 			end
 		end)
 		onActivate(button, function()
@@ -4438,6 +4549,7 @@ local function installHub()
 	local profile = Instance.new("Frame")
 	profile.BackgroundColor3 = cardColor
 	profile.BackgroundTransparency = cardFade
+	role(profile, "card")
 	profile.BorderSizePixel = 0
 	profile.AnchorPoint = Vector2.new(0, 1)
 	profile.Position = UDim2.new(0, 12, 1, -14)
@@ -4476,6 +4588,7 @@ local function installHub()
 	profileName.Font = Enum.Font.GothamBold
 	profileName.Text = LocalPlayer.DisplayName
 	profileName.TextColor3 = ink
+	role(profileName, "ink")
 	profileName.TextSize = 13
 	profileName.TextXAlignment = Enum.TextXAlignment.Left
 	profileName.TextTruncate = Enum.TextTruncate.AtEnd
@@ -4488,6 +4601,7 @@ local function installHub()
 	profileGame.Font = Enum.Font.Gotham
 	profileGame.Text = "Lift Rock For Eggs"
 	profileGame.TextColor3 = muted
+	role(profileGame, "muted")
 	profileGame.TextSize = 11
 	profileGame.TextXAlignment = Enum.TextXAlignment.Left
 	profileGame.Position = UDim2.fromOffset(50, 28)
@@ -4501,6 +4615,15 @@ local function installHub()
 		item.Font = font or Enum.Font.Gotham
 		item.Text = text
 		item.TextColor3 = color or ink
+		if color == muted then
+			item:SetAttribute("ZinoosRole", "muted")
+		elseif color == accent then
+			item:SetAttribute("ZinoosRole", "accentText")
+		elseif color == inkDark then
+			item:SetAttribute("ZinoosRole", "inkDark")
+		else
+			item:SetAttribute("ZinoosRole", "ink")
+		end
 		item.TextSize = size or 14
 		item.TextWrapped = true
 		item.TextXAlignment = Enum.TextXAlignment.Left
@@ -4526,6 +4649,7 @@ local function installHub()
 		box.Name = "Motion"
 		box.BackgroundColor3 = cardColor
 		box.BackgroundTransparency = cardFade
+		role(box, "card")
 		box.BorderSizePixel = 0
 		box.AutomaticSize = Enum.AutomaticSize.Y
 		box.Size = UDim2.new(1, 0, 0, 0)
@@ -4577,23 +4701,26 @@ local function installHub()
 	end
 
 	local function paintSwitch(track, knob, on, instant)
+		local themeNow = STATE.hubThemeDef()
 		local goal = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
-		local color = on and accent or off
-		local knobColor = on and inkDark or accent
+		local color = on and themeNow.accent or themeNow.off
+		local knobColor = on and themeNow.inkDark or themeNow.accent
 		local glow = track:FindFirstChild("Glow")
 		local glowFade = on and 0.82 or 0.35
 		if instant then
 			knob.Position = goal
 			knob.BackgroundColor3 = knobColor
 			track.BackgroundColor3 = color
-			if glow and glow:IsA("UIStroke") then
-				glow.Transparency = glowFade
-			end
+		if glow and glow:IsA("UIStroke") then
+			glow.Color = themeNow.accent
+			glow.Transparency = glowFade
+		end
 			return
 		end
 		playMotion(knob, { Position = goal, BackgroundColor3 = knobColor }, tweenInfo.toggle)
 		playMotion(track, { BackgroundColor3 = color }, tweenInfo.toggle)
 		if glow and glow:IsA("UIStroke") then
+			glow.Color = themeNow.accent
 			playMotion(glow, { Transparency = glowFade }, tweenInfo.toggle)
 		end
 	end
@@ -4633,6 +4760,7 @@ local function installHub()
 		title.Font = Enum.Font.GothamMedium
 		title.Text = name
 		title.TextColor3 = ink
+		role(title, "ink")
 		title.TextSize = 14
 		title.TextXAlignment = Enum.TextXAlignment.Left
 		title.Size = UDim2.new(1, -52, 0, 18)
@@ -4644,6 +4772,7 @@ local function installHub()
 			note.Font = Enum.Font.Gotham
 			note.Text = hint
 			note.TextColor3 = muted
+			role(note, "muted")
 			note.TextSize = 11
 			note.TextWrapped = true
 			note.TextXAlignment = Enum.TextXAlignment.Left
@@ -4665,6 +4794,7 @@ local function installHub()
 		trackCorner.Parent = track
 		local trackStroke = Instance.new("UIStroke")
 		trackStroke.Name = "Glow"
+		trackStroke:SetAttribute("ZinoosRole", "switchGlow")
 		trackStroke.Color = accent
 		trackStroke.Transparency = 0.35
 		trackStroke.Thickness = 1
@@ -4691,6 +4821,7 @@ local function installHub()
 			paintSwitch(track, knob, control.value)
 			onToggle(key, control.value == true)
 		end)
+		STATE.themeSwitches[#STATE.themeSwitches + 1] = { track = track, knob = knob, key = key }
 		remember(row, parentBox, name .. " " .. (hint or ""))
 		return row
 	end
@@ -4705,6 +4836,7 @@ local function installHub()
 	local popup = Instance.new("CanvasGroup")
 	popup.BackgroundColor3 = side
 	popup.BackgroundTransparency = 0.08
+	role(popup, "side")
 	popup.BorderSizePixel = 0
 	popup.ClipsDescendants = true
 	popup.Visible = false
@@ -4760,9 +4892,11 @@ local function installHub()
 		local selectedIndex = 1
 		local foundSelected = false
 		local function paintChoice(choice, option)
+			local themeNow = STATE.hubThemeDef()
 			local on = (multiple and picked[option] == true) or (not multiple and option == current)
-			choice.BackgroundColor3 = on and selected or side
-			choice.BackgroundTransparency = on and 0.72 or 1
+			choice.BackgroundColor3 = on and themeNow.selected or themeNow.side
+			choice.BackgroundTransparency = on and themeNow.selectedFade or 1
+			choice.TextColor3 = themeNow.ink
 			choice.Text = (on and "  ✓ " or "    ") .. option
 		end
 		for index, option in ipairs(options) do
@@ -4854,6 +4988,7 @@ local function installHub()
 		title.Font = Enum.Font.GothamMedium
 		title.Text = name
 		title.TextColor3 = ink
+		role(title, "ink")
 		title.TextSize = 14
 		title.TextXAlignment = Enum.TextXAlignment.Left
 		title.TextTruncate = Enum.TextTruncate.AtEnd
@@ -4865,6 +5000,7 @@ local function installHub()
 		pick.Font = Enum.Font.Gotham
 		pick.TextSize = 13
 		pick.TextColor3 = ink
+		role(pick, "field")
 		pick.TextXAlignment = stacked and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
 		pick.Text = stacked and (" " .. getValue()) or getValue()
@@ -4906,6 +5042,7 @@ local function installHub()
 		title.Font = Enum.Font.GothamMedium
 		title.Text = name
 		title.TextColor3 = ink
+		role(title, "ink")
 		title.TextSize = 14
 		title.TextXAlignment = Enum.TextXAlignment.Left
 		title.Size = UDim2.new(0.42, 0, 1, 0)
@@ -4916,6 +5053,7 @@ local function installHub()
 		pick.Font = Enum.Font.Gotham
 		pick.TextSize = 13
 		pick.TextColor3 = ink
+		role(pick, "field")
 		pick.TextXAlignment = Enum.TextXAlignment.Left
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
 		pick.Text = " " .. STATE.rarityLabel(getList())
@@ -5068,6 +5206,7 @@ local function installHub()
 		local chip = Instance.new("Frame")
 		chip.BackgroundColor3 = cardColor
 		chip.BackgroundTransparency = cardFade
+		role(chip, "card")
 		chip.BorderSizePixel = 0
 		chip.LayoutOrder = order
 		chip.Size = UDim2.new(0.5, -5, 0, 58)
@@ -5086,6 +5225,7 @@ local function installHub()
 		chipTitle.Font = Enum.Font.Gotham
 		chipTitle.Text = title
 		chipTitle.TextColor3 = muted
+		role(chipTitle, "muted")
 		chipTitle.TextSize = 12
 		chipTitle.TextXAlignment = Enum.TextXAlignment.Left
 		chipTitle.Position = UDim2.fromOffset(12, 8)
@@ -5097,6 +5237,7 @@ local function installHub()
 		chipValue.Font = Enum.Font.GothamBold
 		chipValue.Text = "-"
 		chipValue.TextColor3 = ink
+		role(chipValue, "ink")
 		chipValue.TextSize = 18
 		chipValue.TextXAlignment = Enum.TextXAlignment.Left
 		chipValue.Position = UDim2.fromOffset(12, 26)
@@ -5105,6 +5246,20 @@ local function installHub()
 		chipValue.Parent = chip
 		return chipValue
 	end
+
+	local lookCard = card(homePage, "THEME", 0)
+	makeDropdown(lookCard, "Theme", function()
+		return STATE.hubTheme or "Asta"
+	end, STATE.hubThemeOrder, function(option)
+		if type(STATE.hubThemes[option]) ~= "table" then
+			return
+		end
+		STATE.hubTheme = option
+		saveConfig()
+		if STATE.applyLook then
+			STATE.applyLook()
+		end
+	end)
 
 	local introSlot = Instance.new("Frame")
 	introSlot.BackgroundTransparency = 1
@@ -5223,7 +5378,7 @@ local function installHub()
 		local ok, eggs = pcall(listSpawnedEggs)
 		if not ok or type(eggs) ~= "table" then
 			trackerStatus.Text = "Can't see eggs right now."
-			trackerStatus.TextColor3 = muted
+			trackerStatus.TextColor3 = STATE.hubThemeDef().muted
 			return
 		end
 		local eligible = 0
@@ -5275,7 +5430,8 @@ local function installHub()
 			end
 		end
 		trackerStatus.Text = table.concat(lines, "\n")
-		trackerStatus.TextColor3 = eligible > 0 and accent or muted
+		local themeNow = STATE.hubThemeDef()
+		trackerStatus.TextColor3 = eligible > 0 and themeNow.accent or themeNow.muted
 		for index, slot in ipairs(trackerRows) do
 			local egg = eggs[index]
 			slot.row.Visible = egg ~= nil
@@ -5288,10 +5444,10 @@ local function installHub()
 					extra ..= " · Front"
 				end
 				slot.name.Text = egg.label .. extra
-				slot.name.TextColor3 = egg.worth and ink or muted
+				slot.name.TextColor3 = egg.worth and themeNow.ink or themeNow.muted
 				if egg.reason == "under a rock" or egg.reason == "unavailable" or egg.reason == "waiting for daytime" then
 					slot.rare.Text = egg.reason
-					slot.rare.TextColor3 = muted
+					slot.rare.TextColor3 = themeNow.muted
 				else
 					slot.rare.Text = egg.rarity
 					slot.rare.TextColor3 = rarityColor(egg.rank)
@@ -5332,6 +5488,7 @@ local function installHub()
 	urlBox.PlaceholderColor3 = muted
 	urlBox.Text = STATE.webhook or ""
 	urlBox.TextColor3 = ink
+	role(urlBox, "field")
 	urlBox.TextSize = 13
 	urlBox.TextXAlignment = Enum.TextXAlignment.Left
 	urlBox.LayoutOrder = 3
@@ -5367,6 +5524,8 @@ local function installHub()
 		button.TextColor3 = filled and inkDark or ink
 		button.BackgroundColor3 = filled and accent or panel
 		button.BackgroundTransparency = filled and 0 or cardFade
+		role(button, filled and "accentFill" or "card")
+		button:SetAttribute("ZinoosTextRole", filled and "inkDark" or "ink")
 		button.LayoutOrder = order
 		button.Size = UDim2.new(1, 0, 0, 34)
 		button.ZIndex = 6
@@ -5383,10 +5542,13 @@ local function installHub()
 		end
 		bindPress(button)
 		button.MouseEnter:Connect(function()
-			playMotion(button, { BackgroundColor3 = (filled and accent or panel):Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
+			local themeNow = STATE.hubThemeDef()
+			local base = filled and themeNow.accent or themeNow.card
+			playMotion(button, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
 		end)
 		button.MouseLeave:Connect(function()
-			playMotion(button, { BackgroundColor3 = filled and accent or panel }, tweenInfo.hover)
+			local themeNow = STATE.hubThemeDef()
+			playMotion(button, { BackgroundColor3 = filled and themeNow.accent or themeNow.card }, tweenInfo.hover)
 		end)
 		onActivate(button, callback)
 		remember(button, parentFrame, text)
@@ -5502,7 +5664,7 @@ local function installHub()
 		dockStats.Text = string.format("%d fps    %d ms", fps, ping)
 		local fill = math.clamp(fps / 80, 0.08, 1)
 		fpsBar.Size = UDim2.fromScale(fill, 1)
-		fpsBar.BackgroundColor3 = fps >= 30 and accent or Color3.new(1, 1, 1)
+		fpsBar.BackgroundColor3 = fps >= 30 and STATE.hubThemeDef().accent or Color3.new(1, 1, 1)
 	end
 	refreshSession()
 	task.spawn(function()
@@ -5513,6 +5675,91 @@ local function installHub()
 			task.wait(1)
 		end
 	end)
+
+	local function applyLook()
+		local themeNow = STATE.hubThemeDef()
+		for _, obj in ipairs(gui:GetDescendants()) do
+			if obj:IsA("UIStroke") and obj:GetAttribute("ZinoosRole") == nil then
+				obj:SetAttribute("ZinoosRole", "stroke")
+			end
+			local kind = obj:GetAttribute("ZinoosRole")
+			local textKind = obj:GetAttribute("ZinoosTextRole")
+			if kind == "panel" and obj:IsA("GuiObject") then
+				obj.BackgroundColor3 = themeNow.panel
+			elseif kind == "side" and obj:IsA("GuiObject") then
+				obj.BackgroundColor3 = themeNow.side
+			elseif kind == "card" and obj:IsA("GuiObject") then
+				obj.BackgroundColor3 = themeNow.card
+				obj.BackgroundTransparency = themeNow.cardFade
+			elseif kind == "field" and obj:IsA("GuiObject") then
+				obj.BackgroundColor3 = themeNow.card
+				obj.BackgroundTransparency = themeNow.cardFade
+				if obj:IsA("TextButton") or obj:IsA("TextBox") or obj:IsA("TextLabel") then
+					obj.TextColor3 = themeNow.ink
+				end
+				if obj:IsA("TextBox") then
+					obj.PlaceholderColor3 = themeNow.muted
+				end
+			elseif kind == "accentFill" and obj:IsA("GuiObject") then
+				obj.BackgroundColor3 = themeNow.accent
+				obj.BackgroundTransparency = 0
+			elseif kind == "ink" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+				obj.TextColor3 = themeNow.ink
+			elseif kind == "muted" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+				obj.TextColor3 = themeNow.muted
+			elseif kind == "inkDark" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+				obj.TextColor3 = themeNow.inkDark
+			elseif kind == "accentText" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+				obj.TextColor3 = themeNow.accent
+			elseif kind == "stroke" and obj:IsA("UIStroke") then
+				obj.Color = themeNow.stroke
+				obj.Transparency = themeNow.strokeFade
+			elseif kind == "iconStroke" and obj:IsA("UIStroke") then
+				obj.Color = themeNow.ink
+			end
+			if textKind == "inkDark" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+				obj.TextColor3 = themeNow.inkDark
+			elseif textKind == "ink" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+				obj.TextColor3 = themeNow.ink
+			end
+		end
+		barTrack.BackgroundColor3 = themeNow.accent
+		barTrack.BackgroundTransparency = themeNow.barFade
+		if themeNow.wallpaper and type(STATE.themeWall) == "string" then
+			wallpaperImage.Image = STATE.themeWall
+			wallpaperImage.ImageTransparency = themeNow.wallFade
+		else
+			wallpaperImage.ImageTransparency = 1
+		end
+		if themeNow.icon and type(STATE.themeIcon) == "string" then
+			markImage.Image = STATE.themeIcon
+			markImage.ImageTransparency = 0
+			mark.BackgroundTransparency = 1
+			markText.Visible = false
+		else
+			markImage.ImageTransparency = 1
+			mark.BackgroundColor3 = themeNow.accent
+			mark.BackgroundTransparency = 0
+			markText.TextColor3 = themeNow.inkDark
+			markText.Visible = true
+		end
+		for _, entry in ipairs(STATE.themeSwitches) do
+			if entry.track.Parent then
+				paintSwitch(entry.track, entry.knob, STATE[entry.key] == true, true)
+			end
+		end
+		for buttonName, button in pairs(navButtons) do
+			local on = buttonName == currentPage
+			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
+			button.BackgroundTransparency = on and themeNow.selectedFade or 1
+			button.TextColor3 = themeNow.ink
+		end
+		if STATE.refreshTracker then
+			pcall(STATE.refreshTracker)
+		end
+	end
+	STATE.applyLook = applyLook
+	applyLook()
 
 	showPage("Home")
 
@@ -5770,10 +6017,10 @@ local function installHub()
 	bindPress(closeButton)
 	bindPress(fullButton)
 	fullButton.MouseEnter:Connect(function()
-		playMotion(fullButton, { TextColor3 = ink }, tweenInfo.hover)
+		playMotion(fullButton, { TextColor3 = STATE.hubThemeDef().ink }, tweenInfo.hover)
 	end)
 	fullButton.MouseLeave:Connect(function()
-		playMotion(fullButton, { TextColor3 = muted }, tweenInfo.hover)
+		playMotion(fullButton, { TextColor3 = STATE.hubThemeDef().muted }, tweenInfo.hover)
 	end)
 	onActivate(fullButton, function()
 		fullMode = not fullMode
