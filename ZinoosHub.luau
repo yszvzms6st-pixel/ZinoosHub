@@ -37,7 +37,38 @@ local function disableFeature(name, dependency)
 		return
 	end
 	featureOn[name] = false
+	if type(STATE.featureDown) ~= "table" then
+		STATE.featureDown = {}
+	end
+	STATE.featureDown[name] = dependency
 	warn(string.format("[Zinoos hub] %s is off because %s is missing.", name, dependency))
+end
+
+function STATE.noteFault(name, ok, err)
+	if type(STATE.featureFaults) ~= "table" then
+		STATE.featureFaults = {}
+	end
+	if ok then
+		STATE.featureFaults[name] = nil
+		return true
+	end
+	local message = tostring(err)
+	if #message > 140 then
+		message = string.sub(message, 1, 137) .. "..."
+	end
+	if STATE.featureFaults[name] ~= message then
+		STATE.featureFaults[name] = message
+		if name ~= "Auto Steal" then
+			warn(string.format("[Zinoos hub] %s: %s", tostring(name), message))
+		end
+	end
+	return false
+end
+
+function STATE.watchFeature(name, fn)
+	local ok, result = pcall(fn)
+	STATE.noteFault(name, ok, result)
+	return ok, result
 end
 
 local runtime = {
@@ -576,6 +607,8 @@ local function bindFeature(name, checks)
 end
 
 local function bindFeatures()
+	STATE.featureDown = {}
+	STATE.featureFaults = {}
 	local hasFire = typeof(Net) == "table" and typeof(Net.FireServer) == "function"
 	local hasInvoke = typeof(Net) == "table" and typeof(Net.InvokeServer) == "function"
 	local hasOnClient = typeof(Net) == "table" and typeof(Net.OnClient) == "function"
@@ -2994,7 +3027,7 @@ queueRare = function(kind, name, money, mark)
 		if STATE._unloaded or not running() then
 			return
 		end
-		sendWebhook(url, {
+		local sent, reason = sendWebhook(url, {
 			username = "Zinoos hub",
 			embeds = {
 				{
@@ -3004,6 +3037,9 @@ queueRare = function(kind, name, money, mark)
 				},
 			},
 		})
+		if STATE.noteFault then
+			STATE.noteFault("Webhook Alerts", sent == true, reason)
+		end
 	end)
 	return true
 end
@@ -5572,11 +5608,48 @@ local function installHub()
 	local speedText = statChip(statGrid, "Speed", 4)
 	speedText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
 
-	local note = card(homePage, "HOW IT WORKS", 5)
+	local healthCard = card(homePage, "STATUS", 5)
+	local healthBody = label(healthCard, "", 13, Color3.fromRGB(255, 186, 92), Enum.Font.Gotham, 20)
+	healthBody.LayoutOrder = 1
+	healthBody.AutomaticSize = Enum.AutomaticSize.Y
+	healthBody.Size = UDim2.new(1, 0, 0, 0)
+	healthBody:SetAttribute("ZinoosRole", "status")
+	remember(healthBody, healthCard, "feature status down broken")
+	local healthSlot = healthCard.Parent
+	healthSlot.Visible = false
+	local function refreshHealth()
+		local lines = {}
+		local down = STATE.featureDown
+		if type(down) == "table" then
+			for name, dependency in pairs(down) do
+				lines[#lines + 1] = tostring(name) .. " is down. " .. tostring(dependency) .. " is missing."
+			end
+		end
+		local faults = STATE.featureFaults
+		if type(faults) == "table" then
+			for name, message in pairs(faults) do
+				if type(message) == "string" and message ~= "" then
+					lines[#lines + 1] = tostring(name) .. " · " .. message
+				end
+			end
+		end
+		if STATE.antiAfk == true and STATE.antiAfkOperational ~= true and type(STATE.antiAfkError) == "string" and STATE.antiAfkError ~= "" then
+			lines[#lines + 1] = "Anti AFK · " .. STATE.antiAfkError
+		end
+		table.sort(lines)
+		local text = table.concat(lines, "\n")
+		if healthBody.Text ~= text then
+			healthBody.Text = text
+		end
+		healthSlot.Visible = text ~= ""
+	end
+	STATE.refreshHealth = refreshHealth
+
+	local note = card(homePage, "HOW IT WORKS", 6)
 	local noteBody = label(note, "Tick every rarity you want stolen. Tick every rarity you want placed on your plot. An unticked egg stays in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 56)
 	noteBody.LayoutOrder = 1
 
-	local trackerCard = card(homePage, "EGG TRACKER", 6)
+	local trackerCard = card(homePage, "EGG TRACKER", 7)
 	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 112)
 	trackerStatus.LayoutOrder = 1
 	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
@@ -5926,6 +5999,7 @@ local function installHub()
 		while running() and gui.Parent do
 			pcall(refreshHome)
 			pcall(refreshTracker)
+			pcall(refreshHealth)
 			pcall(refreshSession)
 			task.wait(1)
 		end
@@ -6299,7 +6373,7 @@ local function installHub()
 		end
 	end))
 
-	local saveCard = card(homePage, "CONFIG", 7)
+	local saveCard = card(homePage, "CONFIG", 8)
 	local saveNote = label(saveCard, "Saves the toggles, rarities, zone, and priority for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
 	saveNote.LayoutOrder = 1
 	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -6346,12 +6420,12 @@ end)
 
 task.spawn(function()
 	while running() do
-		pcall(stepUpgrade)
+		STATE.watchFeature("Auto Upgrade", stepUpgrade)
 		task.wait(0.4)
 		if not running() then
 			break
 		end
-		pcall(stepTrails)
+		STATE.watchFeature("Auto Trails", stepTrails)
 		task.wait(1.2)
 	end
 end)
@@ -6360,6 +6434,7 @@ task.spawn(function()
 	while running() do
 		STATE.stealTick = os.clock()
 		local ok, result = pcall(runStealTrip)
+		STATE.noteFault("Auto Steal", ok, result)
 		if not ok then
 			local message = tostring(result)
 			STATE.liftSteal = false
@@ -6383,7 +6458,7 @@ task.spawn(function()
 			STATE.lastStealStatus = result
 		end
 		if not (STATE.autoSteal == true and pendingDelivery()) then
-			local placedOk = pcall(STATE.stepAutoPlace)
+			local placedOk = STATE.watchFeature("Auto Place", STATE.stepAutoPlace)
 			if not placedOk then
 				STATE.placeBusy = false
 			end
@@ -7024,21 +7099,21 @@ STATE.connect(RunService.Heartbeat, function()
 	syncToggles()
 	if os.clock() >= (STATE.nextView or 0) then
 		STATE.nextView = os.clock() + (STATE.lowEnd == true and 1.25 or 0.5)
-		pcall(stepView)
+		STATE.watchFeature("Lite Pets, Egg ESP", stepView)
 	end
 	if os.clock() >= (STATE.nextInv or 0) then
 		STATE.nextInv = os.clock() + (STATE.lowEnd == true and 2 or 1.2)
-		pcall(stepInventory)
+		STATE.watchFeature("Inventory ESP", stepInventory)
 	end
 	if os.clock() >= (STATE.nextHookScan or 0) then
 		STATE.nextHookScan = os.clock() + 2
-		pcall(scanNewPets)
+		STATE.watchFeature("Hatch alerts", scanNewPets)
 	end
 	if os.clock() >= (STATE.nextAnimals or 0) then
 		STATE.nextAnimals = os.clock() + 1
-		pcall(paintAnimals)
+		STATE.watchFeature("Animals menu", paintAnimals)
 	end
-	stepTrain()
+	STATE.watchFeature("Auto Train", stepTrain)
 	if STATE.lowEnd ~= true or os.clock() >= (STATE.nextHome or 0) then
 		if STATE.lowEnd == true then
 			STATE.nextHome = os.clock() + 0.25
@@ -7052,15 +7127,15 @@ STATE.connect(RunService.Heartbeat, function()
 		return
 	end
 	nextBubble = now + 0.4
-	pcall(stepRebirth)
-	pcall(popFreeBubbles)
-	pcall(dismissPurchase)
-	pcall(clearBestNotices)
-	pcall(stepOpenEggs)
-	pcall(stepEquipBest)
-	pcall(stepDaily)
-	pcall(stepIndex)
-	pcall(stepStash)
+	STATE.watchFeature("Auto Rebirth", stepRebirth)
+	STATE.watchFeature("Free bubbles", popFreeBubbles)
+	STATE.watchFeature("Purchase prompts", dismissPurchase)
+	STATE.watchFeature("Best notices", clearBestNotices)
+	STATE.watchFeature("Auto Open", stepOpenEggs)
+	STATE.watchFeature("Equip Best", stepEquipBest)
+	STATE.watchFeature("Auto Daily", stepDaily)
+	STATE.watchFeature("Auto Index", stepIndex)
+	STATE.watchFeature("Free Stash", stepStash)
 end)
 
 startupFinished = true
