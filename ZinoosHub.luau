@@ -3791,21 +3791,60 @@ local pulseAntiAfk
 local function installHub()
 	closeLeftoverMenus()
 
-	local accent = Color3.fromRGB(255, 79, 158)
-	local ink = Color3.fromRGB(245, 240, 248)
-	local muted = Color3.fromRGB(176, 160, 190)
-	local panel = Color3.fromRGB(24, 18, 32)
-	local side = Color3.fromRGB(32, 24, 42)
-	local cardColor = Color3.fromRGB(40, 30, 52)
-	local off = Color3.fromRGB(62, 48, 76)
-	local line = Color3.fromRGB(70, 52, 86)
+	local accent = Color3.fromRGB(255, 176, 199)
+	local ink = Color3.fromRGB(232, 223, 228)
+	local muted = Color3.fromRGB(162, 146, 155)
+	local panel = Color3.fromRGB(40, 27, 37)
+	local side = Color3.fromRGB(46, 30, 40)
+	local cardColor = Color3.fromRGB(71, 54, 62)
+	local selected = Color3.fromRGB(62, 45, 55)
+	local off = Color3.fromRGB(58, 44, 52)
+	local line = Color3.fromRGB(92, 72, 82)
+	local mint = Color3.fromRGB(166, 214, 184)
+	local inkDark = Color3.fromRGB(40, 27, 37)
 
 	local TweenService = game:GetService("TweenService")
-	local motion = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	local function playMotion(object, props)
-		local tween = TweenService:Create(object, motion, props)
+	local tweenInfo = {
+		open = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		fade = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		hover = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		toggle = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		card = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		drop = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	}
+	local liveTweens = {}
+	local function playMotion(object, props, info)
+		local old = liveTweens[object]
+		if old then
+			pcall(function()
+				old:Cancel()
+			end)
+		end
+		local tween = TweenService:Create(object, info or tweenInfo.hover, props)
+		liveTweens[object] = tween
+		tween.Completed:Connect(function()
+			if liveTweens[object] == tween then
+				liveTweens[object] = nil
+			end
+		end)
 		tween:Play()
 		return tween
+	end
+	local function bindPress(gui)
+		local scale = Instance.new("UIScale")
+		scale.Name = "PressScale"
+		scale.Parent = gui
+		gui.MouseButton1Down:Connect(function()
+			playMotion(scale, { Scale = 0.98 }, tweenInfo.hover)
+		end)
+		gui.MouseButton1Up:Connect(function()
+			playMotion(scale, { Scale = 1 }, tweenInfo.hover)
+		end)
+		gui.MouseLeave:Connect(function()
+			if scale.Scale ~= 1 then
+				playMotion(scale, { Scale = 1 }, tweenInfo.hover)
+			end
+		end)
 	end
 
 	local gui = Instance.new("ScreenGui")
@@ -3822,41 +3861,128 @@ local function installHub()
 		local camera = workspace.CurrentCamera
 		return camera and camera.ViewportSize or Vector2.new(1280, 720)
 	end
+	local holder
+	local fullMode = false
 	local function fitScale()
 		local view = viewSize()
-		local margin = 16
-		local scale = math.min((view.X - margin * 2) / 700, (view.Y - margin * 2) / 468, 1)
+		local margin = 24
+		local baseW = fullMode and math.max(760, view.X - margin * 2) or 972
+		local baseH = fullMode and math.max(520, view.Y - margin * 2) or 668
+		holder.Size = UDim2.fromOffset(baseW, baseH)
+		local scale = math.min((view.X - margin * 2) / baseW, (view.Y - margin * 2) / baseH, 1)
 		uiScale.Scale = math.clamp(scale, 0.35, 1)
 	end
-	fitScale()
 
-	local launcher = Instance.new("TextButton")
+	local launcher = Instance.new("CanvasGroup")
 	launcher.Name = "Zinoos hub"
-	launcher.AutoButtonColor = false
-	launcher.Text = "Zinoos  0:00"
-	launcher.Font = Enum.Font.GothamBold
-	launcher.TextSize = 14
-	launcher.TextColor3 = ink
-	launcher.BackgroundColor3 = panel
-	launcher.Size = UDim2.fromOffset(132, 36)
-	launcher.Position = UDim2.new(1, -148, 0.62, 0)
-	launcher.Visible = false
+	launcher.BackgroundColor3 = side
+	launcher.BorderSizePixel = 0
+	launcher.AnchorPoint = Vector2.new(0, 0.5)
+	launcher.Position = UDim2.new(0, 28, 0.58, 0)
+	launcher.Size = UDim2.fromOffset(300, 136)
+	launcher.GroupTransparency = 0
+	launcher.Active = true
+	launcher.Visible = true
 	launcher.Parent = gui
 	local launcherCorner = Instance.new("UICorner")
-	launcherCorner.CornerRadius = UDim.new(1, 0)
+	launcherCorner.CornerRadius = UDim.new(0, 16)
 	launcherCorner.Parent = launcher
 	local launcherStroke = Instance.new("UIStroke")
-	launcherStroke.Color = accent
-	launcherStroke.Thickness = 1.5
+	launcherStroke.Color = line
+	launcherStroke.Transparency = 0.35
+	launcherStroke.Thickness = 1
 	launcherStroke.Parent = launcher
+	local dockAvatar = Instance.new("ImageLabel")
+	dockAvatar.BackgroundColor3 = cardColor
+	dockAvatar.BorderSizePixel = 0
+	dockAvatar.Position = UDim2.fromOffset(14, 14)
+	dockAvatar.Size = UDim2.fromOffset(36, 36)
+	dockAvatar.Parent = launcher
+	local dockAvatarCorner = Instance.new("UICorner")
+	dockAvatarCorner.CornerRadius = UDim.new(1, 0)
+	dockAvatarCorner.Parent = dockAvatar
+	local dockName = Instance.new("TextLabel")
+	dockName.BackgroundTransparency = 1
+	dockName.Font = Enum.Font.GothamBold
+	dockName.Text = LocalPlayer.DisplayName
+	dockName.TextColor3 = ink
+	dockName.TextSize = 15
+	dockName.TextXAlignment = Enum.TextXAlignment.Left
+	dockName.TextTruncate = Enum.TextTruncate.AtEnd
+	dockName.Position = UDim2.fromOffset(60, 14)
+	dockName.Size = UDim2.new(1, -150, 0, 18)
+	dockName.Parent = launcher
+	local dockGame = Instance.new("TextLabel")
+	dockGame.BackgroundTransparency = 1
+	dockGame.Font = Enum.Font.Gotham
+	dockGame.Text = "Lift Rock For Eggs"
+	dockGame.TextColor3 = muted
+	dockGame.TextSize = 12
+	dockGame.TextXAlignment = Enum.TextXAlignment.Left
+	dockGame.Position = UDim2.fromOffset(60, 32)
+	dockGame.Size = UDim2.new(1, -150, 0, 16)
+	dockGame.Parent = launcher
+	local dockClock = Instance.new("TextLabel")
+	dockClock.BackgroundTransparency = 1
+	dockClock.Font = Enum.Font.GothamBold
+	dockClock.Text = "0:00"
+	dockClock.TextColor3 = ink
+	dockClock.TextSize = 14
+	dockClock.TextXAlignment = Enum.TextXAlignment.Right
+	dockClock.Position = UDim2.new(1, -126, 0, 16)
+	dockClock.Size = UDim2.fromOffset(100, 18)
+	dockClock.Parent = launcher
+	local dockStats = Instance.new("TextLabel")
+	dockStats.BackgroundTransparency = 1
+	dockStats.Font = Enum.Font.Gotham
+	dockStats.Text = "60 fps    0 ms"
+	dockStats.TextColor3 = mint
+	dockStats.TextSize = 12
+	dockStats.TextXAlignment = Enum.TextXAlignment.Left
+	dockStats.Position = UDim2.fromOffset(14, 64)
+	dockStats.Size = UDim2.new(1, -28, 0, 16)
+	dockStats.Parent = launcher
+	local barTrack = Instance.new("Frame")
+	barTrack.BackgroundColor3 = off
+	barTrack.BorderSizePixel = 0
+	barTrack.Position = UDim2.fromOffset(14, 86)
+	barTrack.Size = UDim2.new(1, -28, 0, 4)
+	barTrack.Parent = launcher
+	local barTrackCorner = Instance.new("UICorner")
+	barTrackCorner.CornerRadius = UDim.new(1, 0)
+	barTrackCorner.Parent = barTrack
+	local fpsBar = Instance.new("Frame")
+	fpsBar.BackgroundColor3 = mint
+	fpsBar.BorderSizePixel = 0
+	fpsBar.Size = UDim2.fromScale(0.7, 1)
+	fpsBar.Parent = barTrack
+	local fpsBarCorner = Instance.new("UICorner")
+	fpsBarCorner.CornerRadius = UDim.new(1, 0)
+	fpsBarCorner.Parent = fpsBar
+	local dockHint = Instance.new("TextLabel")
+	dockHint.BackgroundTransparency = 1
+	dockHint.Font = Enum.Font.Gotham
+	dockHint.Text = "Click or press Right Ctrl to open"
+	dockHint.TextColor3 = muted
+	dockHint.TextSize = 12
+	dockHint.TextXAlignment = Enum.TextXAlignment.Left
+	dockHint.Position = UDim2.fromOffset(14, 100)
+	dockHint.Size = UDim2.new(1, -28, 0, 18)
+	dockHint.Parent = launcher
+	local fpsCount = 0
+	trackConnection(RunService.Heartbeat:Connect(function()
+		fpsCount += 1
+	end))
 
-	local holder = Instance.new("Frame")
+	holder = Instance.new("Frame")
 	holder.Name = "Holder"
 	holder.AnchorPoint = Vector2.new(0.5, 0.5)
 	holder.Position = UDim2.fromScale(0.5, 0.5)
-	holder.Size = UDim2.fromOffset(700, 468)
+	holder.Size = UDim2.fromOffset(972, 668)
 	holder.BackgroundTransparency = 1
+	holder.Visible = false
 	holder.Parent = gui
+	fitScale()
 	local windowScale = Instance.new("UIScale")
 	windowScale.Name = "WindowMotion"
 	windowScale.Parent = holder
@@ -3888,13 +4014,21 @@ local function installHub()
 	windowStroke.Thickness = 1
 	windowStroke.Parent = window
 
+	local sideWrap = Instance.new("CanvasGroup")
+	sideWrap.Name = "SideWrap"
+	sideWrap.BackgroundTransparency = 1
+	sideWrap.BorderSizePixel = 0
+	sideWrap.Size = UDim2.new(0.25, 0, 1, 0)
+	sideWrap.GroupTransparency = 1
+	sideWrap.ZIndex = 3
+	sideWrap.Parent = window
 	local sidebar = Instance.new("Frame")
 	sidebar.Name = "Sidebar"
 	sidebar.BackgroundColor3 = side
 	sidebar.BorderSizePixel = 0
-	sidebar.Size = UDim2.new(0, 168, 1, 0)
+	sidebar.Size = UDim2.fromScale(1, 1)
 	sidebar.ZIndex = 3
-	sidebar.Parent = window
+	sidebar.Parent = sideWrap
 	local sideCorner = Instance.new("UICorner")
 	sideCorner.CornerRadius = UDim.new(0, 16)
 	sideCorner.Parent = sidebar
@@ -3920,7 +4054,7 @@ local function installHub()
 	markText.BackgroundTransparency = 1
 	markText.Font = Enum.Font.GothamBlack
 	markText.Text = "Z"
-	markText.TextColor3 = Color3.new(1, 1, 1)
+	markText.TextColor3 = inkDark
 	markText.TextSize = 16
 	markText.Size = UDim2.fromScale(1, 1)
 	markText.ZIndex = 5
@@ -3951,19 +4085,26 @@ local function installHub()
 
 	local content = Instance.new("Frame")
 	content.BackgroundTransparency = 1
-	content.Position = UDim2.fromOffset(168, 0)
-	content.Size = UDim2.new(1, -168, 1, 0)
+	content.Position = UDim2.new(0.25, 0, 0, 0)
+	content.Size = UDim2.new(0.75, 0, 1, 0)
 	content.ZIndex = 3
 	content.Parent = window
-
+	local headWrap = Instance.new("CanvasGroup")
+	headWrap.Name = "HeadWrap"
+	headWrap.BackgroundTransparency = 1
+	headWrap.BorderSizePixel = 0
+	headWrap.Size = UDim2.new(1, 0, 0, 64)
+	headWrap.GroupTransparency = 1
+	headWrap.ZIndex = 4
+	headWrap.Parent = content
 	local header = Instance.new("Frame")
 	header.Name = "DragBar"
 	header.Active = true
-	header.BackgroundColor3 = Color3.fromRGB(32, 24, 42)
+	header.BackgroundColor3 = panel
 	header.BorderSizePixel = 0
-	header.Size = UDim2.new(1, 0, 0, 52)
+	header.Size = UDim2.fromScale(1, 1)
 	header.ZIndex = 4
-	header.Parent = content
+	header.Parent = headWrap
 	local pageTitle = Instance.new("TextLabel")
 	pageTitle.BackgroundTransparency = 1
 	pageTitle.Font = Enum.Font.GothamBold
@@ -3971,8 +4112,8 @@ local function installHub()
 	pageTitle.TextColor3 = ink
 	pageTitle.TextSize = 18
 	pageTitle.TextXAlignment = Enum.TextXAlignment.Left
-	pageTitle.Position = UDim2.fromOffset(18, 0)
-	pageTitle.Size = UDim2.new(0.4, 0, 1, 0)
+	pageTitle.Position = UDim2.fromOffset(28, 0)
+	pageTitle.Size = UDim2.new(0.42, 0, 1, 0)
 	pageTitle.ZIndex = 4
 	pageTitle.Parent = header
 
@@ -3989,8 +4130,8 @@ local function installHub()
 	search.TextSize = 14
 	search.TextXAlignment = Enum.TextXAlignment.Left
 	search.AnchorPoint = Vector2.new(1, 0.5)
-	search.Position = UDim2.new(1, -52, 0.5, 0)
-	search.Size = UDim2.fromOffset(180, 32)
+	search.Position = UDim2.new(1, -96, 0.5, 0)
+	search.Size = UDim2.fromOffset(200, 34)
 	search.ZIndex = 5
 	search.Parent = header
 	local searchCorner = Instance.new("UICorner")
@@ -4000,6 +4141,19 @@ local function installHub()
 	searchPad.PaddingLeft = UDim.new(0, 10)
 	searchPad.Parent = search
 
+	local fullButton = Instance.new("TextButton")
+	fullButton.Name = "Fullscreen"
+	fullButton.AutoButtonColor = false
+	fullButton.Text = "⛶"
+	fullButton.Font = Enum.Font.Gotham
+	fullButton.TextSize = 16
+	fullButton.TextColor3 = muted
+	fullButton.BackgroundTransparency = 1
+	fullButton.AnchorPoint = Vector2.new(1, 0.5)
+	fullButton.Position = UDim2.new(1, -48, 0.5, 0)
+	fullButton.Size = UDim2.fromOffset(32, 32)
+	fullButton.ZIndex = 5
+	fullButton.Parent = header
 	local closeButton = Instance.new("TextButton")
 	closeButton.AutoButtonColor = false
 	closeButton.Text = "X"
@@ -4013,12 +4167,20 @@ local function installHub()
 	closeButton.ZIndex = 5
 	closeButton.Parent = header
 
+	local pageWrap = Instance.new("CanvasGroup")
+	pageWrap.Name = "PageWrap"
+	pageWrap.BackgroundTransparency = 1
+	pageWrap.BorderSizePixel = 0
+	pageWrap.Position = UDim2.fromOffset(0, 64)
+	pageWrap.Size = UDim2.new(1, 0, 1, -64)
+	pageWrap.GroupTransparency = 1
+	pageWrap.ZIndex = 4
+	pageWrap.Parent = content
 	local pageHost = Instance.new("Frame")
 	pageHost.BackgroundTransparency = 1
-	pageHost.Position = UDim2.fromOffset(0, 52)
-	pageHost.Size = UDim2.new(1, 0, 1, -52)
+	pageHost.Size = UDim2.fromScale(1, 1)
 	pageHost.ZIndex = 4
-	pageHost.Parent = content
+	pageHost.Parent = pageWrap
 
 	local pages = {}
 	local navButtons = {}
@@ -4028,26 +4190,24 @@ local function installHub()
 		page.BackgroundTransparency = 1
 		page.BorderSizePixel = 0
 		page.Size = UDim2.fromScale(1, 1)
-		page.ScrollBarThickness = 4
-		page.ScrollBarImageColor3 = accent
+		page.ScrollBarThickness = 3
+		page.ScrollBarImageColor3 = muted
+		page.ScrollBarImageTransparency = 0.35
 		page.CanvasSize = UDim2.new()
 		page.AutomaticCanvasSize = Enum.AutomaticSize.Y
 		page.Visible = false
 		page.ZIndex = 4
 		page.Parent = pageHost
 		local pad = Instance.new("UIPadding")
-		pad.PaddingLeft = UDim.new(0, 16)
-		pad.PaddingRight = UDim.new(0, 16)
-		pad.PaddingTop = UDim.new(0, 4)
-		pad.PaddingBottom = UDim.new(0, 16)
+		pad.PaddingLeft = UDim.new(0, 28)
+		pad.PaddingRight = UDim.new(0, 28)
+		pad.PaddingTop = UDim.new(0, 8)
+		pad.PaddingBottom = UDim.new(0, 28)
 		pad.Parent = page
 		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 10)
+		layout.Padding = UDim.new(0, 12)
 		layout.SortOrder = Enum.SortOrder.LayoutOrder
 		layout.Parent = page
-		local pageScale = Instance.new("UIScale")
-		pageScale.Name = "PageMotion"
-		pageScale.Parent = page
 		pages[name] = page
 		return page
 	end
@@ -4056,21 +4216,58 @@ local function installHub()
 	local mainPage = newPage("Main")
 	local discordPage = newPage("Discord")
 
-	local function showPage(name)
-		for pageName, page in pairs(pages) do
-			local show = pageName == name
-			page.Visible = show
-			if show then
-				local pageScale = page:FindFirstChild("PageMotion")
-				if pageScale and pageScale:IsA("UIScale") then
-					pageScale.Scale = 0.985
-					playMotion(pageScale, { Scale = 1 })
+	local currentPage = "Home"
+	local pageToken = 0
+	local function playCards(page)
+		if not page then
+			return
+		end
+		pageToken += 1
+		local token = pageToken
+		local index = 0
+		local function visit(root)
+			local kids = root:GetChildren()
+			table.sort(kids, function(a, b)
+				return (a.LayoutOrder or 0) < (b.LayoutOrder or 0)
+			end)
+			for _, child in ipairs(kids) do
+				if child:GetAttribute("ZinoosSlot") == true then
+					local motion = child:FindFirstChild("Motion")
+					if motion and motion:IsA("CanvasGroup") then
+						index += 1
+						local step = index
+						motion.Position = UDim2.fromOffset(0, 12)
+						motion.GroupTransparency = 1
+						task.delay((step - 1) * 0.035, function()
+							if token ~= pageToken or not motion.Parent then
+								return
+							end
+							playMotion(motion, {
+								Position = UDim2.fromOffset(0, 0),
+								GroupTransparency = 0,
+							}, tweenInfo.card)
+						end)
+					end
+				elseif child:IsA("Frame") and child.BackgroundTransparency >= 1 and child:FindFirstChildOfClass("UIListLayout") then
+					visit(child)
 				end
 			end
 		end
+		visit(page)
+	end
+	local function showPage(name)
+		currentPage = name
+		for pageName, page in pairs(pages) do
+			page.Visible = pageName == name
+		end
 		pageTitle.Text = name
 		for buttonName, button in pairs(navButtons) do
-			playMotion(button, { BackgroundTransparency = buttonName == name and 0 or 1 })
+			local on = buttonName == name
+			button.BackgroundColor3 = selected
+			playMotion(button, { BackgroundTransparency = on and 0 or 1 }, tweenInfo.hover)
+		end
+		if holder.Visible then
+			playCards(pages[name])
 		end
 	end
 
@@ -4080,26 +4277,76 @@ local function installHub()
 		control.Activated:Connect(callback)
 	end
 
+	local function navIcon(parent, kind)
+		local icon = Instance.new("Frame")
+		icon.BackgroundTransparency = 1
+		icon.BorderSizePixel = 0
+		icon.Position = UDim2.fromOffset(12, 10)
+		icon.Size = UDim2.fromOffset(16, 16)
+		icon.ZIndex = 6
+		icon.Parent = parent
+		local function mark(w, h, x, y, round)
+			local part = Instance.new("Frame")
+			part.BackgroundTransparency = 1
+			part.BorderSizePixel = 0
+			part.Position = UDim2.fromOffset(x, y)
+			part.Size = UDim2.fromOffset(w, h)
+			part.ZIndex = 6
+			part.Parent = icon
+			local stroke = Instance.new("UIStroke")
+			stroke.Color = ink
+			stroke.Thickness = 1.25
+			stroke.Parent = part
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(round and 1 or 0, round and 0 or 2)
+			corner.Parent = part
+			return part
+		end
+		if kind == "Home" then
+			mark(10, 7, 3, 8, false)
+			local roof = mark(2, 8, 7, 1, false)
+			roof.Rotation = 40
+		elseif kind == "Main" then
+			mark(6, 6, 0, 0, false)
+			mark(6, 6, 9, 0, false)
+			mark(6, 6, 0, 9, false)
+			mark(6, 6, 9, 9, false)
+		else
+			mark(10, 10, 3, 3, true)
+		end
+	end
 	local function addNav(name, order)
 		local button = Instance.new("TextButton")
 		button.Name = name
 		button.AutoButtonColor = false
-		button.Text = "   " .. name
+		button.Text = "      " .. name
 		button.Font = Enum.Font.GothamMedium
-		button.TextSize = 14
+		button.TextSize = 15
 		button.TextColor3 = ink
 		button.TextXAlignment = Enum.TextXAlignment.Left
-		button.BackgroundColor3 = Color3.fromRGB(54, 36, 64)
+		button.BackgroundColor3 = selected
 		button.BackgroundTransparency = 1
 		button.BorderSizePixel = 0
-		button.Position = UDim2.fromOffset(12, 64 + (order - 1) * 40)
-		button.Size = UDim2.new(1, -24, 0, 34)
+		button.Position = UDim2.fromOffset(12, 78 + (order - 1) * 42)
+		button.Size = UDim2.new(1, -24, 0, 36)
 		button.ZIndex = 4
 		button.Parent = sidebar
 		local navCorner = Instance.new("UICorner")
-		navCorner.CornerRadius = UDim.new(0, 8)
+		navCorner.CornerRadius = UDim.new(0, 10)
 		navCorner.Parent = button
+		navIcon(button, name)
 		navButtons[name] = button
+		bindPress(button)
+		button.MouseEnter:Connect(function()
+			if currentPage ~= name then
+				playMotion(button, { BackgroundTransparency = 0.45 }, tweenInfo.hover)
+			end
+		end)
+		button.MouseLeave:Connect(function()
+			if currentPage ~= name then
+				playMotion(button, { BackgroundTransparency = 1 }, tweenInfo.hover)
+			end
+		end)
 		onActivate(button, function()
 			showPage(name)
 		end)
@@ -4109,17 +4356,21 @@ local function installHub()
 	addNav("Discord", 3)
 
 	local profile = Instance.new("Frame")
-	profile.BackgroundTransparency = 1
+	profile.BackgroundColor3 = cardColor
+	profile.BorderSizePixel = 0
 	profile.AnchorPoint = Vector2.new(0, 1)
-	profile.Position = UDim2.new(0, 12, 1, -12)
-	profile.Size = UDim2.new(1, -24, 0, 42)
+	profile.Position = UDim2.new(0, 12, 1, -14)
+	profile.Size = UDim2.new(1, -24, 0, 56)
 	profile.ZIndex = 4
 	profile.Parent = sidebar
+	local profileCorner = Instance.new("UICorner")
+	profileCorner.CornerRadius = UDim.new(0, 12)
+	profileCorner.Parent = profile
 	local avatar = Instance.new("ImageLabel")
 	avatar.BackgroundColor3 = cardColor
 	avatar.BorderSizePixel = 0
 	avatar.Size = UDim2.fromOffset(32, 32)
-	avatar.Position = UDim2.fromOffset(0, 5)
+	avatar.Position = UDim2.fromOffset(10, 10)
 	avatar.ZIndex = 5
 	avatar.Parent = profile
 	local avatarCorner = Instance.new("UICorner")
@@ -4131,6 +4382,7 @@ local function installHub()
 		end)
 		if ok and gui.Parent then
 			avatar.Image = image
+			dockAvatar.Image = image
 		end
 	end)
 	local profileName = Instance.new("TextLabel")
@@ -4141,8 +4393,8 @@ local function installHub()
 	profileName.TextSize = 13
 	profileName.TextXAlignment = Enum.TextXAlignment.Left
 	profileName.TextTruncate = Enum.TextTruncate.AtEnd
-	profileName.Position = UDim2.fromOffset(40, 4)
-	profileName.Size = UDim2.new(1, -40, 0, 16)
+	profileName.Position = UDim2.fromOffset(50, 10)
+	profileName.Size = UDim2.new(1, -60, 0, 16)
 	profileName.ZIndex = 5
 	profileName.Parent = profile
 	local profileGame = Instance.new("TextLabel")
@@ -4152,8 +4404,8 @@ local function installHub()
 	profileGame.TextColor3 = muted
 	profileGame.TextSize = 11
 	profileGame.TextXAlignment = Enum.TextXAlignment.Left
-	profileGame.Position = UDim2.fromOffset(40, 20)
-	profileGame.Size = UDim2.new(1, -40, 0, 14)
+	profileGame.Position = UDim2.fromOffset(50, 28)
+	profileGame.Size = UDim2.new(1, -60, 0, 14)
 	profileGame.ZIndex = 5
 	profileGame.Parent = profile
 
@@ -4174,23 +4426,38 @@ local function installHub()
 	end
 
 	local function card(parent, title, order)
-		local box = Instance.new("Frame")
-		box.Name = title
+		local slot = Instance.new("Frame")
+		slot.Name = title
+		slot.BackgroundTransparency = 1
+		slot.BorderSizePixel = 0
+		slot.LayoutOrder = order
+		slot.AutomaticSize = Enum.AutomaticSize.Y
+		slot.Size = UDim2.new(1, 0, 0, 0)
+		slot.ZIndex = 5
+		slot:SetAttribute("ZinoosSlot", true)
+		slot.Parent = parent
+		local box = Instance.new("CanvasGroup")
+		box.Name = "Motion"
 		box.BackgroundColor3 = cardColor
 		box.BorderSizePixel = 0
-		box.LayoutOrder = order
 		box.AutomaticSize = Enum.AutomaticSize.Y
 		box.Size = UDim2.new(1, 0, 0, 0)
+		box.GroupTransparency = 0
 		box.ZIndex = 5
-		box.Parent = parent
+		box.Parent = slot
 		local boxCorner = Instance.new("UICorner")
 		boxCorner.CornerRadius = UDim.new(0, 12)
 		boxCorner.Parent = box
+		local boxStroke = Instance.new("UIStroke")
+		boxStroke.Color = line
+		boxStroke.Transparency = 0.55
+		boxStroke.Thickness = 1
+		boxStroke.Parent = box
 		local boxPad = Instance.new("UIPadding")
-		boxPad.PaddingTop = UDim.new(0, 10)
-		boxPad.PaddingBottom = UDim.new(0, 10)
-		boxPad.PaddingLeft = UDim.new(0, 12)
-		boxPad.PaddingRight = UDim.new(0, 12)
+		boxPad.PaddingTop = UDim.new(0, 12)
+		boxPad.PaddingBottom = UDim.new(0, 12)
+		boxPad.PaddingLeft = UDim.new(0, 14)
+		boxPad.PaddingRight = UDim.new(0, 14)
 		boxPad.Parent = box
 		local boxLayout = Instance.new("UIListLayout")
 		boxLayout.Padding = UDim.new(0, 6)
@@ -4230,8 +4497,8 @@ local function installHub()
 			track.BackgroundColor3 = color
 			return
 		end
-		playMotion(knob, { Position = goal })
-		playMotion(track, { BackgroundColor3 = color })
+		playMotion(knob, { Position = goal }, tweenInfo.toggle)
+		playMotion(track, { BackgroundColor3 = color }, tweenInfo.toggle)
 	end
 
 	local function onToggle(key, on)
@@ -4332,8 +4599,8 @@ local function installHub()
 	popupBlock.Visible = false
 	popupBlock.ZIndex = 20
 	popupBlock.Parent = window
-	local popup = Instance.new("Frame")
-	popup.BackgroundColor3 = Color3.fromRGB(32, 24, 44)
+	local popup = Instance.new("CanvasGroup")
+	popup.BackgroundColor3 = side
 	popup.BorderSizePixel = 0
 	popup.ClipsDescendants = true
 	popup.Visible = false
@@ -4389,7 +4656,7 @@ local function installHub()
 		local foundSelected = false
 		local function paintChoice(choice, option)
 			local on = (multiple and selected[option] == true) or (not multiple and option == current)
-			choice.BackgroundColor3 = on and Color3.fromRGB(64, 36, 58) or Color3.fromRGB(32, 24, 44)
+			choice.BackgroundColor3 = on and selected or side
 			choice.BackgroundTransparency = on and 0 or 1
 			choice.Text = (on and "  ✓ " or "    ") .. option
 		end
@@ -4449,7 +4716,11 @@ local function installHub()
 		local popupPixels = math.min(contentHeight * scale, room)
 		local popupHeight = popupPixels / scale
 		popup.Size = UDim2.fromOffset(popupWidth, 0)
-		playMotion(popup, { Size = UDim2.fromOffset(popupWidth, popupHeight) })
+		popup.GroupTransparency = 1
+		playMotion(popup, {
+			Size = UDim2.fromOffset(popupWidth, popupHeight),
+			GroupTransparency = 0,
+		}, tweenInfo.drop)
 		popupScroll.CanvasSize = UDim2.fromOffset(0, contentHeight)
 		local openAbove = roomBelow + 1 < popupPixels and roomAbove > roomBelow
 		local pixelY = openAbove and (anchorPos.Y - popupPixels - 6) or (anchorPos.Y + anchorHeight + 6)
@@ -4492,7 +4763,7 @@ local function installHub()
 		pick.TextXAlignment = stacked and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
 		pick.Text = stacked and (" " .. getValue()) or getValue()
-		pick.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
+		pick.BackgroundColor3 = panel
 		pick.AnchorPoint = stacked and Vector2.new(0, 1) or Vector2.new(1, 0.5)
 		pick.Position = stacked and UDim2.new(0, 0, 1, 0) or UDim2.new(1, 0, 0.5, 0)
 		pick.Size = stacked and UDim2.new(1, 0, 0, 26) or UDim2.fromOffset(132, 26)
@@ -4501,6 +4772,7 @@ local function installHub()
 		local pickCorner = Instance.new("UICorner")
 		pickCorner.CornerRadius = UDim.new(0, 8)
 		pickCorner.Parent = pick
+		bindPress(pick)
 		onActivate(pick, function()
 			openPopup(pick, options, getValue(), function(option)
 				callback(option)
@@ -4536,7 +4808,7 @@ local function installHub()
 		pick.TextXAlignment = Enum.TextXAlignment.Left
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
 		pick.Text = " " .. STATE.rarityLabel(getList())
-		pick.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
+		pick.BackgroundColor3 = panel
 		pick.AnchorPoint = Vector2.new(1, 0.5)
 		pick.Position = UDim2.new(1, 0, 0.5, 0)
 		pick.Size = UDim2.fromOffset(156, 26)
@@ -4545,6 +4817,7 @@ local function installHub()
 		local pickCorner = Instance.new("UICorner")
 		pickCorner.CornerRadius = UDim.new(0, 8)
 		pickCorner.Parent = pick
+		bindPress(pick)
 		onActivate(pick, function()
 			openPopup(pick, options, getList(), function(option)
 				onToggleName(option)
@@ -4580,7 +4853,7 @@ local function installHub()
 	columns.Parent = mainPage
 	local columnLayout = Instance.new("UIListLayout")
 	columnLayout.FillDirection = Enum.FillDirection.Horizontal
-	columnLayout.Padding = UDim.new(0, 10)
+	columnLayout.Padding = UDim.new(0, 12)
 	columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	columnLayout.Parent = columns
 
@@ -4588,11 +4861,11 @@ local function installHub()
 		local frame = Instance.new("Frame")
 		frame.BackgroundTransparency = 1
 		frame.LayoutOrder = order
-		frame.Size = UDim2.new(0.5, -5, 0, 0)
+		frame.Size = UDim2.new(0.5, -6, 0, 0)
 		frame.AutomaticSize = Enum.AutomaticSize.Y
 		frame.Parent = columns
 		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 10)
+		layout.Padding = UDim.new(0, 12)
 		layout.SortOrder = Enum.SortOrder.LayoutOrder
 		layout.Parent = frame
 		return frame
@@ -4710,9 +4983,27 @@ local function installHub()
 		return chipValue
 	end
 
-	local welcome = label(homePage, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
+	local introSlot = Instance.new("Frame")
+	introSlot.BackgroundTransparency = 1
+	introSlot.BorderSizePixel = 0
+	introSlot.LayoutOrder = 1
+	introSlot.AutomaticSize = Enum.AutomaticSize.Y
+	introSlot.Size = UDim2.new(1, 0, 0, 0)
+	introSlot:SetAttribute("ZinoosSlot", true)
+	introSlot.Parent = homePage
+	local intro = Instance.new("CanvasGroup")
+	intro.Name = "Motion"
+	intro.BackgroundTransparency = 1
+	intro.AutomaticSize = Enum.AutomaticSize.Y
+	intro.Size = UDim2.new(1, 0, 0, 0)
+	intro.Parent = introSlot
+	local introLayout = Instance.new("UIListLayout")
+	introLayout.Padding = UDim.new(0, 4)
+	introLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	introLayout.Parent = intro
+	local welcome = label(intro, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
 	welcome.LayoutOrder = 1
-	local blurb = label(homePage, "Stays on your bench. Grabs an egg of a ticked rarity, then comes back.", 14, muted, Enum.Font.Gotham, 36)
+	local blurb = label(intro, "Stays on your bench. Grabs an egg of a ticked rarity, then comes back.", 14, muted, Enum.Font.Gotham, 36)
 	blurb.LayoutOrder = 2
 	local sessionStarted = os.time()
 	local function sessionClock()
@@ -4725,13 +5016,21 @@ local function installHub()
 		end
 		return string.format("%d:%02d", minutes, seconds)
 	end
-	local sessionText = label(homePage, "Session 0:00", 14, ink, Enum.Font.GothamBold, 20)
+	local sessionText = label(intro, "Session 0:00", 14, ink, Enum.Font.GothamBold, 20)
 	sessionText.LayoutOrder = 3
-	local statGrid = Instance.new("Frame")
+	local statSlot = Instance.new("Frame")
+	statSlot.BackgroundTransparency = 1
+	statSlot.BorderSizePixel = 0
+	statSlot.LayoutOrder = 4
+	statSlot.AutomaticSize = Enum.AutomaticSize.Y
+	statSlot.Size = UDim2.new(1, 0, 0, 0)
+	statSlot:SetAttribute("ZinoosSlot", true)
+	statSlot.Parent = homePage
+	local statGrid = Instance.new("CanvasGroup")
+	statGrid.Name = "Motion"
 	statGrid.BackgroundTransparency = 1
-	statGrid.LayoutOrder = 4
-	statGrid.Size = UDim2.new(1, 0, 0, 126)
-	statGrid.Parent = homePage
+	statGrid.Size = UDim2.new(1, 0, 0, 128)
+	statGrid.Parent = statSlot
 	local strengthText = statChip(statGrid, "Strength", 1)
 	strengthText.Parent.Position = UDim2.fromOffset(0, 0)
 	local cashText = statChip(statGrid, "Cash", 2)
@@ -4882,12 +5181,26 @@ local function installHub()
 	end
 	STATE.refreshTracker = refreshTracker
 
-	local discordBlurb = label(discordPage, "Get a Discord message when an eligible egg matching the selected rarity shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 40)
+	local discordSlot = Instance.new("Frame")
+	discordSlot.BackgroundTransparency = 1
+	discordSlot.BorderSizePixel = 0
+	discordSlot.LayoutOrder = 1
+	discordSlot.AutomaticSize = Enum.AutomaticSize.Y
+	discordSlot.Size = UDim2.new(1, 0, 0, 0)
+	discordSlot:SetAttribute("ZinoosSlot", true)
+	discordSlot.Parent = discordPage
+	local discordMotion = Instance.new("CanvasGroup")
+	discordMotion.Name = "Motion"
+	discordMotion.BackgroundTransparency = 1
+	discordMotion.AutomaticSize = Enum.AutomaticSize.Y
+	discordMotion.Size = UDim2.new(1, 0, 0, 0)
+	discordMotion.Parent = discordSlot
+	local discordBlurb = label(discordMotion, "Get a Discord message when an eligible egg matching the selected rarity shows up, when you steal it, and when it hatches.", 14, muted, Enum.Font.Gotham, 48)
 	discordBlurb.LayoutOrder = 1
 	local discordCard = card(discordPage, "WEBHOOK", 2)
 	makeSwitch(discordCard, "Webhook Alerts", "webhookOn")
 	local urlBox = Instance.new("TextBox")
-	urlBox.BackgroundColor3 = Color3.fromRGB(28, 20, 38)
+	urlBox.BackgroundColor3 = panel
 	urlBox.BorderSizePixel = 0
 	urlBox.ClearTextOnFocus = false
 	urlBox.Font = Enum.Font.Gotham
@@ -4922,8 +5235,8 @@ local function installHub()
 		button.Font = Enum.Font.GothamBold
 		button.Text = text
 		button.TextSize = 14
-		button.TextColor3 = filled and Color3.new(1, 1, 1) or ink
-		button.BackgroundColor3 = filled and accent or Color3.fromRGB(28, 20, 38)
+		button.TextColor3 = filled and inkDark or ink
+		button.BackgroundColor3 = filled and accent or panel
 		button.LayoutOrder = order
 		button.Size = UDim2.new(1, 0, 0, 34)
 		button.ZIndex = 6
@@ -4931,6 +5244,13 @@ local function installHub()
 		local buttonCorner = Instance.new("UICorner")
 		buttonCorner.CornerRadius = UDim.new(0, 8)
 		buttonCorner.Parent = button
+		bindPress(button)
+		button.MouseEnter:Connect(function()
+			playMotion(button, { BackgroundColor3 = (filled and accent or panel):Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
+		end)
+		button.MouseLeave:Connect(function()
+			playMotion(button, { BackgroundColor3 = filled and accent or panel }, tweenInfo.hover)
+		end)
 		onActivate(button, callback)
 		remember(button, parentFrame, text)
 		return button
@@ -5035,7 +5355,17 @@ local function installHub()
 	local function refreshSession()
 		local clockText = sessionClock()
 		sessionText.Text = "Session " .. clockText
-		launcher.Text = "Zinoos  " .. clockText
+		dockClock.Text = clockText
+		local fps = fpsCount
+		fpsCount = 0
+		local ping = 0
+		pcall(function()
+			ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5)
+		end)
+		dockStats.Text = string.format("%d fps    %d ms", fps, ping)
+		local fill = math.clamp(fps / 80, 0.08, 1)
+		fpsBar.Size = UDim2.fromScale(fill, 1)
+		fpsBar.BackgroundColor3 = fps >= 30 and mint or accent
 	end
 	refreshSession()
 	task.spawn(function()
@@ -5204,22 +5534,57 @@ local function installHub()
 		openToken += 1
 		local token = openToken
 		if open then
+			playMotion(launcher, { GroupTransparency = 1 }, tweenInfo.hover)
 			holder.Visible = true
 			shadow.Visible = true
-			launcher.Visible = false
-			windowScale.Scale = 0.92
-			playMotion(windowScale, { Scale = 1 })
+			windowScale.Scale = 0.9
+			sideWrap.GroupTransparency = 1
+			headWrap.GroupTransparency = 1
+			pageWrap.GroupTransparency = 1
+			playMotion(windowScale, { Scale = 1 }, tweenInfo.open)
+			task.delay(0.12, function()
+				if token ~= openToken or not gui.Parent then
+					return
+				end
+				launcher.Visible = false
+				launcher.GroupTransparency = 0
+			end)
+			task.delay(0.22, function()
+				if token ~= openToken or not gui.Parent then
+					return
+				end
+				playMotion(sideWrap, { GroupTransparency = 0 }, tweenInfo.fade)
+				task.delay(0.04, function()
+					if token ~= openToken or not gui.Parent then
+						return
+					end
+					playMotion(headWrap, { GroupTransparency = 0 }, tweenInfo.fade)
+				end)
+				task.delay(0.08, function()
+					if token ~= openToken or not gui.Parent then
+						return
+					end
+					playMotion(pageWrap, { GroupTransparency = 0 }, tweenInfo.fade)
+					playCards(pages[currentPage])
+				end)
+			end)
 			return
 		end
-		playMotion(windowScale, { Scale = 0.94 })
-		task.delay(0.16, function()
+		closePopup()
+		playMotion(pageWrap, { GroupTransparency = 1 }, tweenInfo.fade)
+		playMotion(headWrap, { GroupTransparency = 1 }, tweenInfo.fade)
+		playMotion(sideWrap, { GroupTransparency = 1 }, tweenInfo.fade)
+		playMotion(windowScale, { Scale = 0.9 }, tweenInfo.open)
+		task.delay(0.26, function()
 			if token ~= openToken or not gui.Parent then
 				return
 			end
 			holder.Visible = false
 			shadow.Visible = false
-			launcher.Visible = true
 			windowScale.Scale = 1
+			launcher.Visible = true
+			launcher.GroupTransparency = 1
+			playMotion(launcher, { GroupTransparency = 0 }, tweenInfo.fade)
 		end)
 	end
 
@@ -5265,6 +5630,19 @@ local function installHub()
 		end
 	end))
 
+	bindPress(closeButton)
+	bindPress(fullButton)
+	fullButton.MouseEnter:Connect(function()
+		playMotion(fullButton, { TextColor3 = ink }, tweenInfo.hover)
+	end)
+	fullButton.MouseLeave:Connect(function()
+		playMotion(fullButton, { TextColor3 = muted }, tweenInfo.hover)
+	end)
+	onActivate(fullButton, function()
+		fullMode = not fullMode
+		fullButton.Text = fullMode and "▣" or "⛶"
+		fitScale()
+	end)
 	onActivate(closeButton, function()
 		if not STATE.dockCustom then
 			local spot = holder.AbsolutePosition
@@ -5293,8 +5671,13 @@ local function installHub()
 		saveResult.TextColor3 = accent
 	end)
 
-	windowScale.Scale = 0.92
-	playMotion(windowScale, { Scale = 1 })
+	windowScale.Scale = 0.9
+	sideWrap.GroupTransparency = 1
+	headWrap.GroupTransparency = 1
+	pageWrap.GroupTransparency = 1
+	holder.Visible = false
+	shadow.Visible = false
+	launcher.Visible = true
 
 	STATE.hubWindow = {
 		Unload = function()
