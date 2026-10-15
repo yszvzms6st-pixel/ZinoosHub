@@ -58,7 +58,7 @@ function STATE.noteFault(name, ok, err)
 	end
 	if STATE.featureFaults[name] ~= message then
 		STATE.featureFaults[name] = message
-		if name ~= "Auto Steal" then
+		if STATE.admin == true and name ~= "Auto Steal" then
 			warn(string.format("[Zinoos hub] %s: %s", tostring(name), message))
 		end
 	end
@@ -5608,42 +5608,47 @@ local function installHub()
 	local speedText = statChip(statGrid, "Speed", 4)
 	speedText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
 
-	local healthCard = card(homePage, "STATUS", 5)
-	local healthBody = label(healthCard, "", 13, Color3.fromRGB(255, 186, 92), Enum.Font.Gotham, 20)
-	healthBody.LayoutOrder = 1
-	healthBody.AutomaticSize = Enum.AutomaticSize.Y
-	healthBody.Size = UDim2.new(1, 0, 0, 0)
-	healthBody:SetAttribute("ZinoosRole", "status")
-	remember(healthBody, healthCard, "feature status down broken")
-	local healthSlot = healthCard.Parent
-	healthSlot.Visible = false
-	local function refreshHealth()
-		local lines = {}
-		local down = STATE.featureDown
-		if type(down) == "table" then
-			for name, dependency in pairs(down) do
-				lines[#lines + 1] = tostring(name) .. " is down. " .. tostring(dependency) .. " is missing."
-			end
-		end
-		local faults = STATE.featureFaults
-		if type(faults) == "table" then
-			for name, message in pairs(faults) do
-				if type(message) == "string" and message ~= "" then
-					lines[#lines + 1] = tostring(name) .. " · " .. message
+	local refreshHealth
+	if STATE.admin == true then
+		local healthCard = card(homePage, "STATUS", 5)
+		local healthBody = label(healthCard, "", 13, Color3.fromRGB(255, 186, 92), Enum.Font.Gotham, 20)
+		healthBody.LayoutOrder = 1
+		healthBody.AutomaticSize = Enum.AutomaticSize.Y
+		healthBody.Size = UDim2.new(1, 0, 0, 0)
+		healthBody:SetAttribute("ZinoosRole", "status")
+		remember(healthBody, healthCard, "feature status down broken")
+		local healthSlot = healthCard.Parent
+		healthSlot.Visible = false
+		refreshHealth = function()
+			local lines = {}
+			local down = STATE.featureDown
+			if type(down) == "table" then
+				for name, dependency in pairs(down) do
+					lines[#lines + 1] = tostring(name) .. " is down. " .. tostring(dependency) .. " is missing."
 				end
 			end
+			local faults = STATE.featureFaults
+			if type(faults) == "table" then
+				for name, message in pairs(faults) do
+					if type(message) == "string" and message ~= "" then
+						lines[#lines + 1] = tostring(name) .. " · " .. message
+					end
+				end
+			end
+			if STATE.antiAfk == true and STATE.antiAfkOperational ~= true and type(STATE.antiAfkError) == "string" and STATE.antiAfkError ~= "" then
+				lines[#lines + 1] = "Anti AFK · " .. STATE.antiAfkError
+			end
+			table.sort(lines)
+			local text = table.concat(lines, "\n")
+			if healthBody.Text ~= text then
+				healthBody.Text = text
+			end
+			healthSlot.Visible = text ~= ""
 		end
-		if STATE.antiAfk == true and STATE.antiAfkOperational ~= true and type(STATE.antiAfkError) == "string" and STATE.antiAfkError ~= "" then
-			lines[#lines + 1] = "Anti AFK · " .. STATE.antiAfkError
-		end
-		table.sort(lines)
-		local text = table.concat(lines, "\n")
-		if healthBody.Text ~= text then
-			healthBody.Text = text
-		end
-		healthSlot.Visible = text ~= ""
+		STATE.refreshHealth = refreshHealth
+	else
+		STATE.refreshHealth = nil
 	end
-	STATE.refreshHealth = refreshHealth
 
 	local note = card(homePage, "HOW IT WORKS", 6)
 	local noteBody = label(note, "Tick every rarity you want stolen. Tick every rarity you want placed on your plot. An unticked egg stays in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 56)
@@ -5999,7 +6004,9 @@ local function installHub()
 		while running() and gui.Parent do
 			pcall(refreshHome)
 			pcall(refreshTracker)
-			pcall(refreshHealth)
+			if refreshHealth then
+				pcall(refreshHealth)
+			end
 			pcall(refreshSession)
 			task.wait(1)
 		end
