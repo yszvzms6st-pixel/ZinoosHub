@@ -789,6 +789,9 @@ end
 if STATE.antiAfk == nil then
 	STATE.antiAfk = true
 end
+if STATE.phoneGames == nil then
+	STATE.phoneGames = false
+end
 if type(STATE.webhook) ~= "string" then
 	STATE.webhook = ""
 end
@@ -3620,6 +3623,7 @@ local FLAG_KEYS = {
 	LowEnd = "lowEnd",
 	WebhookAlerts = "webhookOn",
 	AntiAfk = "antiAfk",
+	PhoneGames = "phoneGames",
 }
 
 STATE.adminIds = {
@@ -5430,6 +5434,7 @@ local function installHub()
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
+	makeSwitch(training, "Phone Games", "phoneGames", "Plays all three bench phone games for the leaderboards. Bubbles pause while the phone is open.")
 	makeSwitch(training, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
 	makeSwitch(training, "Auto Rebirth", "rebirth")
 
@@ -7090,6 +7095,262 @@ hubCleanup(function()
 		pcall(function()
 			antiAfkConnection:Disconnect()
 		end)
+	end
+end)
+
+function STATE.phoneController()
+	if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.TryGet) ~= "function" then
+		return nil
+	end
+	return ClientRegistry.TryGet("PhoneController")
+end
+
+function STATE.hookPhonePanel()
+	if STATE._phoneHooked then
+		return true
+	end
+	local ok, panel = pcall(function()
+		local moduleScript = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Phone"):WaitForChild("Panel")
+		local loadModuleScript = require :: any
+		return loadModuleScript(moduleScript)
+	end)
+	if not ok or type(panel) ~= "table" or type(panel.build) ~= "function" then
+		return false
+	end
+	local previous = panel.build
+	panel.build = function(scope, props)
+		if type(props) == "table" then
+			props.autoplay = STATE.phoneGames == true
+			STATE._phoneProps = props
+		end
+		return previous(scope, props)
+	end
+	STATE._phoneHooked = true
+	return true
+end
+
+function STATE.phoneLimits()
+	if type(STATE._phoneLimits) == "table" then
+		return STATE._phoneLimits
+	end
+	local limits = {}
+	local ok, config = pcall(function()
+		local moduleScript = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Phone"):WaitForChild("Config")
+		local loadModuleScript = require :: any
+		return loadModuleScript(moduleScript)
+	end)
+	local order = { "Merge", "Flappy", "Stack" }
+	if ok and type(config) == "table" and type(config.Games) == "table" then
+		if type(config.Order) == "table" and #config.Order > 0 then
+			order = config.Order
+		end
+		for _, key in ipairs(order) do
+			local game = config.Games[key]
+			if type(key) == "string" and type(game) == "table" then
+				limits[#limits + 1] = {
+					key = key,
+					per = type(game.MaxPerSecond) == "number" and game.MaxPerSecond or 1,
+					slack = type(game.Slack) == "number" and game.Slack or 0,
+					max = type(game.MaxScore) == "number" and game.MaxScore or 100000,
+					title = type(game.Title) == "string" and game.Title or key,
+				}
+			end
+		end
+	end
+	STATE._phoneLimits = limits
+	return limits
+end
+
+function STATE.phoneScore(gameKey)
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local panel = playerGui and playerGui:FindFirstChild("PhonePanel")
+	if not panel then
+		return nil
+	end
+	local best = nil
+	for _, child in ipairs(panel:GetDescendants()) do
+		if child.Name == "Score" and child:IsA("TextLabel") then
+			local frame = child.Parent
+			local onThisGame = gameKey == nil
+			while frame and frame ~= panel do
+				if frame.Name == gameKey then
+					onThisGame = frame:IsA("GuiObject") and frame.Visible == true
+					break
+				end
+				frame = frame.Parent
+			end
+			local amount = onThisGame and tonumber(child.Text)
+			if amount and (best == nil or amount > best) then
+				best = amount
+			end
+		end
+	end
+	return best
+end
+
+function STATE.submitPhoneScore(game)
+	if type(game) ~= "table" then
+		return
+	end
+	local shown = STATE.phoneScore(game.key)
+	if type(shown) ~= "number" or shown < 1 then
+		return
+	end
+	local elapsed = os.clock() - (STATE._phoneRoundAt or os.clock())
+	if elapsed < 4 then
+		return
+	end
+	local cap = math.floor(elapsed * game.per + game.slack)
+	local score = math.floor(math.min(shown, game.max, math.max(0, cap)))
+	if score < 1 or (score == STATE._phoneSent and game.key == STATE._phoneSentKey) then
+		return
+	end
+	local ok, result = pcall(function()
+		return Net:InvokeServer("PhoneGameSubmit", game.key, score)
+	end)
+	if not ok then
+		error(result)
+	end
+	STATE._phoneSent = score
+	STATE._phoneSentKey = game.key
+	if type(result) == "table" and type(result.best) == "number" then
+		STATE.phoneBest = result.best
+	end
+	STATE.phoneGame = game.title or game.key
+end
+
+function STATE.rebuildPhone()
+	if not STATE.hookPhonePanel() then
+		return false
+	end
+	local phone = STATE.phoneController()
+	if not phone then
+		return false
+	end
+	if phone:IsOpen() then
+		phone:Close()
+	end
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local gui = playerGui and playerGui:FindFirstChild("PhonePanel")
+	local cleared = gui == nil
+	if gui and type(getupvalues) == "function" and type(setupvalue) == "function" then
+		local ups = getupvalues(phone.Open)
+		if type(ups) == "table" then
+			for index, value in ipairs(ups) do
+				if value == gui then
+					setupvalue(phone.Open, index, nil)
+					cleared = true
+					break
+				end
+			end
+		end
+	end
+	if gui and cleared then
+		gui:Destroy()
+	elseif gui then
+		return false
+	end
+	STATE._phoneProps = nil
+	return true
+end
+
+function STATE.openPhoneGame(game)
+	local phone = STATE.phoneController()
+	local props = STATE._phoneProps
+	if not phone or type(game) ~= "table" or type(props) ~= "table" or type(props.page) ~= "table" or type(props.page.set) ~= "function" then
+		return false
+	end
+	props.autoplay = true
+	if not phone:IsOpen() then
+		phone:Open()
+	end
+	props.page:set(game.key)
+	STATE._phoneIndex = game.index
+	STATE._phoneRoundAt = os.clock()
+	STATE._phoneNext = os.clock() + 180
+	STATE._phoneSubmitAt = os.clock() + 8
+	STATE._phoneSent = nil
+	STATE.phoneGame = game.title or game.key
+	return true
+end
+
+function STATE.stepPhoneGames()
+	local phone = STATE.phoneController()
+	if STATE.phoneGames ~= true then
+		if STATE._phoneRunning then
+			STATE._phoneRunning = false
+			STATE._phonePaused = false
+			if phone and phone:IsOpen() then
+				phone:Close()
+			end
+			if STATE._phoneBuiltFor == true then
+				STATE.rebuildPhone()
+				STATE._phoneBuiltFor = false
+			end
+		end
+		return
+	end
+	if not phone then
+		error("Phone is missing")
+	end
+	local limits = STATE.phoneLimits()
+	if #limits == 0 then
+		error("Phone games are missing")
+	end
+	local index = STATE._phoneIndex or 1
+	if index < 1 or index > #limits then
+		index = 1
+	end
+	local game = limits[index]
+	game.index = index
+	if STATE.liftSteal == true or STATE.placeBusy == true then
+		if STATE._phonePaused ~= true then
+			pcall(STATE.submitPhoneScore, game)
+			if phone:IsOpen() then
+				phone:Close()
+			end
+			STATE._phonePaused = true
+		end
+		return
+	end
+	if STATE._phoneBuiltFor ~= true then
+		if not STATE.rebuildPhone() then
+			error("Phone could not be opened")
+		end
+		STATE._phoneBuiltFor = true
+		phone:Open()
+	end
+	STATE._phoneRunning = true
+	local resumed = STATE._phonePaused == true
+	STATE._phonePaused = false
+	if resumed or os.clock() >= (STATE._phoneNext or 0) or type(STATE._phoneProps) ~= "table" then
+		if not resumed and type(STATE._phoneProps) == "table" and os.clock() >= (STATE._phoneNext or 0) and (STATE._phoneNext or 0) > 0 then
+			pcall(STATE.submitPhoneScore, game)
+			index = index % #limits + 1
+			game = limits[index]
+			game.index = index
+		end
+		if not STATE.openPhoneGame(game) then
+			error("Phone game did not start")
+		end
+		return
+	end
+	if not phone:IsOpen() then
+		STATE.openPhoneGame(game)
+		return
+	end
+	if os.clock() >= (STATE._phoneSubmitAt or 0) then
+		STATE._phoneSubmitAt = os.clock() + 20
+		STATE.submitPhoneScore(game)
+	end
+end
+
+task.spawn(function()
+	while running() do
+		if STATE.phoneGames == true or STATE._phoneRunning then
+			STATE.watchFeature("Phone Games", STATE.stepPhoneGames)
+		end
+		task.wait(1)
 	end
 end)
 
