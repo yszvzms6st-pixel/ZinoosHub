@@ -4646,22 +4646,22 @@ local function installHub()
 	local function openPopup(anchor, options, current, callback, multiple)
 		closePopup()
 		local rowHeight = 28
-		local selected = {}
+		local picked = {}
 		if multiple and type(current) == "table" then
 			for _, name in ipairs(current) do
-				selected[name] = true
+				picked[name] = true
 			end
 		end
 		local selectedIndex = 1
 		local foundSelected = false
 		local function paintChoice(choice, option)
-			local on = (multiple and selected[option] == true) or (not multiple and option == current)
+			local on = (multiple and picked[option] == true) or (not multiple and option == current)
 			choice.BackgroundColor3 = on and selected or side
 			choice.BackgroundTransparency = on and 0 or 1
 			choice.Text = (on and "  ✓ " or "    ") .. option
 		end
 		for index, option in ipairs(options) do
-			if multiple and selected[option] and not foundSelected then
+			if multiple and picked[option] and not foundSelected then
 				selectedIndex = index
 				foundSelected = true
 			elseif not multiple and option == current then
@@ -4681,7 +4681,7 @@ local function installHub()
 			paintChoice(choice, option)
 			onActivate(choice, function()
 				if multiple then
-					selected[option] = not selected[option]
+					picked[option] = not picked[option]
 					paintChoice(choice, option)
 					callback(option)
 				else
