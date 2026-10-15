@@ -159,7 +159,7 @@ local function showLiteModels()
 		return
 	end
 	for _, child in ipairs(live:GetDescendants()) do
-		if child.Name == "ZinoosEggValue" or child.Name == "ZinoosHoldValue" then
+		if child.Name == "ZinoosEggValue" or child.Name == "ZinoosHoldValue" or child.Name == "ZinoosPlotEgg" then
 			child:Destroy()
 		elseif child:IsA("Model") then
 			child:SetAttribute("ZinoosLite", nil)
@@ -3145,6 +3145,7 @@ local function stepView()
 		end
 	end
 	STATE._liteWasOn = lite
+	STATE.paintPlotEggs()
 	if not friends then
 		return
 	end
@@ -4931,7 +4932,7 @@ local function installHub()
 
 	local screenCard = card(leftColumn, "SCREEN", 3)
 	makeSwitch(screenCard, "Lite Pets", "litePets")
-	makeSwitch(screenCard, "Egg ESP", "eggEsp")
+	makeSwitch(screenCard, "Egg ESP", "eggEsp", "Steal eggs, and what your plot eggs will hatch into")
 	makeSwitch(screenCard, "Inventory ESP", "invEsp")
 	makeSwitch(screenCard, "Low End", "lowEnd")
 
@@ -5807,6 +5808,131 @@ local function shownIncome(pet)
 		cash = 1
 	end
 	return base * level * grade * cash
+end
+
+function STATE.plotEggText(pet)
+	local spec = petSpec(pet.rolledKey) or petSpec(pet.key)
+	local name = (spec and (spec.DisplayName or spec.Name)) or "Egg"
+	local rarity = spec and type(spec.Rarity) == "string" and spec.Rarity or ""
+	local mutation = pet.mutation
+	if type(mutation) ~= "string" or mutation == "" or mutation == "None" then
+		mutation = nil
+	end
+	local incomePet = {}
+	for key, value in pairs(pet) do
+		incomePet[key] = value
+	end
+	if pet.rolledKey ~= nil then
+		incomePet.key = pet.rolledKey
+	end
+	incomePet.hatchAt = nil
+	local money = shownIncome(incomePet)
+	local clock = ""
+	if type(pet.hatchAt) == "number" then
+		local remain = math.max(0, math.floor(pet.hatchAt - os.time()))
+		local hours = math.floor(remain / 3600)
+		local mins = math.floor((remain % 3600) / 60)
+		local secs = remain % 60
+		if hours > 0 then
+			clock = string.format("%d:%02d:%02d", hours, mins, secs)
+		else
+			clock = string.format("%d:%02d", mins, secs)
+		end
+	end
+	local head = name
+	if rarity ~= "" then
+		head = head .. "  " .. rarity
+	end
+	if mutation then
+		head = head .. "  " .. mutation
+	end
+	return head .. "\n$" .. shortNumber(money) .. "/s   " .. clock
+end
+
+function STATE.makePlotEggTag(model)
+	local adornee = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+	if not adornee then
+		return nil
+	end
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "ZinoosPlotEgg"
+	billboard.Adornee = adornee
+	billboard.AlwaysOnTop = true
+	billboard.LightInfluence = 0
+	billboard.MaxDistance = 240
+	billboard.Size = UDim2.fromOffset(220, 36)
+	billboard.StudsOffset = Vector3.new(0, 6, 0)
+	local label = Instance.new("TextLabel")
+	label.Name = "Value"
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamBold
+	label.Size = UDim2.fromScale(1, 1)
+	label.TextColor3 = Color3.fromRGB(166, 214, 184)
+	label.TextSize = 14
+	label.TextStrokeTransparency = 0.35
+	label.TextYAlignment = Enum.TextYAlignment.Center
+	label.Parent = billboard
+	billboard.Parent = model
+	return billboard
+end
+
+function STATE.clearPlotEggs()
+	local live = workspace:FindFirstChild("Live")
+	local owned = live and live:FindFirstChild("PlayerFriends")
+	local mine = owned and owned:FindFirstChild(LocalPlayer.Name)
+	if not mine then
+		return
+	end
+	for _, model in ipairs(mine:GetChildren()) do
+		local tag = model:FindFirstChild("ZinoosPlotEgg")
+		if tag then
+			tag:Destroy()
+		end
+	end
+end
+
+function STATE.paintPlotEggs()
+	if STATE.eggEsp ~= true then
+		STATE.clearPlotEggs()
+		return
+	end
+	local data = readData()
+	local pets = data and data.plotPets
+	local live = workspace:FindFirstChild("Live")
+	local owned = live and live:FindFirstChild("PlayerFriends")
+	local mine = owned and owned:FindFirstChild(LocalPlayer.Name)
+	if not mine or type(pets) ~= "table" then
+		return
+	end
+	for _, model in ipairs(mine:GetChildren()) do
+		if model:IsA("Model") then
+			local pet = pets[model.Name]
+			local growing = model:GetAttribute("incubating") == true and type(pet) == "table" and pet.hatchAt ~= nil
+			local tag = model:FindFirstChild("ZinoosPlotEgg")
+			if not growing then
+				if tag then
+					tag:Destroy()
+				end
+			else
+				if not tag then
+					tag = STATE.makePlotEggTag(model)
+				end
+				local label = tag and tag:FindFirstChild("Value")
+				if label then
+					local text = STATE.plotEggText(pet)
+					if label.Text ~= text then
+						label.Text = text
+					end
+				end
+				if tag then
+					local dist = STATE.lowEnd == true and 120 or 240
+					if tag.MaxDistance ~= dist then
+						tag.MaxDistance = dist
+					end
+				end
+			end
+		end
+	end
 end
 
 local function stepEquipBest()
