@@ -5430,14 +5430,25 @@ local function stepEquipBest()
 	if not data then
 		return
 	end
+	local slots = 27
+	if typeof(Plot) == "table" and typeof(Plot.Slots) == "function" then
+		local level = data.baseLevel
+		if type(level) ~= "number" then
+			level = 0
+		end
+		local ok, count = pcall(Plot.Slots, level)
+		if ok and type(count) == "number" and count > 0 then
+			slots = count
+		end
+	end
 	local worstPet = nil
 	local worst = math.huge
-	local anyPlot = false
+	local hatched = 0
 	for uid, pet in pairs(data.plotPets or {}) do
 		if type(pet) == "table" and pet.hatchAt == nil then
 			local spec = petSpec(pet.key)
 			if not (spec and spec.IsEgg) then
-				anyPlot = true
+				hatched += 1
 				local income = shownIncome(pet)
 				if income < worst then
 					worst = income
@@ -5466,17 +5477,90 @@ local function stepEquipBest()
 			end
 		end
 	end
-	if not bestPet or (anyPlot and best <= worst) then
+	local openSlot = hatched < slots
+	if not bestPet or (not openSlot and best <= worst) then
 		return
 	end
-	STATE.nextEquip = os.clock() + 1.4
 	local placeUid = bestPet.uid
-	local pickupUid = worstPet and (worstPet.uid)
+	local pickupUid = worstPet and worstPet.uid
 	if type(placeUid) ~= "string" then
 		return
 	end
+	STATE.nextEquip = os.clock() + 1.4
 	task.spawn(function()
-		Net:FireServer("EquipBestPets")
+		local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
+		local base = plot and plot:FindFirstChild("Base")
+		if not (base and base:IsA("BasePart")) then
+			return
+		end
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local offset = base.CFrame:PointToObjectSpace(hrp.Position)
+			local reach = math.sqrt(base.Size.X * base.Size.X + base.Size.Z * base.Size.Z) / 2 + 30
+			if Vector3.new(offset.X, 0, offset.Z).Magnitude > reach then
+				return
+			end
+		end
+		local function spot()
+			local taken = {}
+			local fresh = readData()
+			for _, pet in pairs(fresh and fresh.plotPets or {}) do
+				if type(pet) == "table" and type(pet.pos) == "table" then
+					local px = pet.pos.x or pet.pos.X
+					local pz = pet.pos.z or pet.pos.Z
+					if type(px) == "number" and type(pz) == "number" then
+						taken[#taken + 1] = { px, pz }
+					end
+				end
+			end
+			local halfX = math.max(8, base.Size.X * 0.42)
+			local halfZ = math.max(6, base.Size.Z * 0.4)
+			for n = 1, 30 do
+				local col = (n - 1) % 6
+				local row = math.floor((n - 1) / 6)
+				local x = -halfX + (col + 0.5) * ((halfX * 2) / 6)
+				local z = -halfZ + (row + 0.5) * ((halfZ * 2) / 5)
+				local clear = true
+				for _, pos in ipairs(taken) do
+					local dx = x - pos[1]
+					local dz = z - pos[2]
+					if dx * dx + dz * dz < 36 then
+						clear = false
+						break
+					end
+				end
+				if clear then
+					return x, z
+				end
+			end
+			return (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16), (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
+		end
+		local function onPlot(uid)
+			local fresh = readData()
+			local pets = fresh and fresh.plotPets
+			if type(pets) ~= "table" then
+				return false
+			end
+			if type(pets[uid]) == "table" then
+				return true
+			end
+			for _, pet in pairs(pets) do
+				if type(pet) == "table" and pet.uid == uid then
+					return true
+				end
+			end
+			return false
+		end
+		local x, z = spot()
+		if openSlot then
+			Net:FireServer("PlacePet", placeUid, x, z)
+			task.wait(0.5)
+			if running() and not onPlot(placeUid) then
+				STATE.nextEquip = os.clock() + 6
+			end
+			return
+		end
 		if not (type(pickupUid) == "string" and best > worst) then
 			return
 		end
@@ -5485,15 +5569,13 @@ local function stepEquipBest()
 		if not running() then
 			return
 		end
-		local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
-		local base = plot and plot:FindFirstChild("Base")
-		if not (base and base:IsA("BasePart")) then
-			return
-		end
-		local x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
-		local z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
-		if type(x) == "number" and type(z) == "number" then
-			Net:FireServer("PlacePet", placeUid, x, z)
+		x, z = spot()
+		Net:FireServer("PlacePet", placeUid, x, z)
+		task.wait(0.5)
+		if running() and not onPlot(placeUid) and not onPlot(pickupUid) then
+			local backX, backZ = spot()
+			Net:FireServer("PlacePet", pickupUid, backX, backZ)
+			STATE.nextEquip = os.clock() + 6
 		end
 	end)
 end
