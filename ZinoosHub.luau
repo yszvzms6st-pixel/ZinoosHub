@@ -3015,6 +3015,14 @@ local function hideOne(child)
 		if child.LocalTransparencyModifier ~= 1 then
 			child.LocalTransparencyModifier = 1
 		end
+		if not liteHooked[child] then
+			liteHooked[child] = true
+			STATE.connect(child:GetPropertyChangedSignal("LocalTransparencyModifier"), function()
+				if running() and STATE.litePets == true and child.Parent and child.LocalTransparencyModifier ~= 1 then
+					child.LocalTransparencyModifier = 1
+				end
+			end, child)
+		end
 		if child.CastShadow then
 			child:SetAttribute("ZinoosShadow", true)
 			child.CastShadow = false
@@ -3035,10 +3043,10 @@ local function hideVisual(model)
 				track:Stop()
 			end
 		end
-		for _, child in ipairs(model:GetDescendants()) do
-			hideOne(child)
-		end
 		model:SetAttribute("ZinoosLite", true)
+	end
+	for _, child in ipairs(model:GetDescendants()) do
+		hideOne(child)
 	end
 	if liteHooked[model] then
 		return
@@ -3048,7 +3056,6 @@ local function hideVisual(model)
 		if running() and STATE.litePets == true then
 			hideOne(child)
 		end
-		return model
 	end, model)
 end
 
