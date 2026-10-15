@@ -792,6 +792,9 @@ end
 if STATE.phoneGames == nil then
 	STATE.phoneGames = false
 end
+if STATE.phoneChoice ~= "When Pigs Fly" and STATE.phoneChoice ~= "Snack Stack" then
+	STATE.phoneChoice = "Critter Merge"
+end
 if type(STATE.webhook) ~= "string" then
 	STATE.webhook = ""
 end
@@ -3964,6 +3967,17 @@ local function loadSaved()
 	end
 	STATE.placeRarity = STATE.placeRarities[1] or STATE.placeRarity
 	STATE.placementPriority = STATE.placementChoice(saved.PlacementPriority)
+	local savedPhone = saved.PhoneGame
+	if type(savedPhone) == "table" then
+		savedPhone = savedPhone[1]
+	end
+	if savedPhone == "When Pigs Fly" or savedPhone == "Flappy" then
+		STATE.phoneChoice = "When Pigs Fly"
+	elseif savedPhone == "Snack Stack" or savedPhone == "Stack" then
+		STATE.phoneChoice = "Snack Stack"
+	elseif savedPhone == "Critter Merge" or savedPhone == "Merge" then
+		STATE.phoneChoice = "Critter Merge"
+	end
 	if type(saved.WebhookUrl) == "string" then
 		STATE.webhook = saved.WebhookUrl
 	end
@@ -4034,6 +4048,7 @@ local function saveConfig()
 		PlaceRarity = { STATE.placeRarities[1] or STATE.placeRarity or rarityOptions[1] or "Common" },
 		PlaceRarities = STATE.placeRarities,
 		PlacementPriority = STATE.placementChoice(STATE.placementPriority),
+		PhoneGame = STATE.phoneChoice or "Critter Merge",
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
 		MenuY = STATE.menuY,
@@ -5434,7 +5449,15 @@ local function installHub()
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
-	makeSwitch(training, "Phone Games", "phoneGames", "Plays all three bench phone games for the leaderboards. Bubbles pause while the phone is open.")
+	makeSwitch(training, "Phone Games", "phoneGames", "Plays the bench phone game you picked. Bubbles pause while the phone is open.")
+	makeDropdown(training, "Phone Game", function()
+		return STATE.phoneChoice or "Critter Merge"
+	end, { "Critter Merge", "When Pigs Fly", "Snack Stack" }, function(option)
+		if option == "When Pigs Fly" or option == "Snack Stack" or option == "Critter Merge" then
+			STATE.phoneChoice = option
+		end
+		saveConfig()
+	end, true)
 	makeSwitch(training, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
 	makeSwitch(training, "Auto Rebirth", "rebirth")
 
@@ -7266,12 +7289,35 @@ function STATE.openPhoneGame(game)
 	end
 	props.page:set(game.key)
 	STATE._phoneIndex = game.index
+	STATE._phoneKey = game.key
 	STATE._phoneRoundAt = os.clock()
-	STATE._phoneNext = os.clock() + 180
 	STATE._phoneSubmitAt = os.clock() + 8
 	STATE._phoneSent = nil
 	STATE.phoneGame = game.title or game.key
 	return true
+end
+
+function STATE.phoneGameKey(choice)
+	if choice == "When Pigs Fly" or choice == "Flappy" then
+		return "Flappy"
+	end
+	if choice == "Snack Stack" or choice == "Stack" then
+		return "Stack"
+	end
+	return "Merge"
+end
+
+function STATE.chosenPhoneGame(limits)
+	local want = STATE.phoneGameKey(STATE.phoneChoice)
+	for index, game in ipairs(limits) do
+		if game.key == want then
+			game.index = index
+			return game
+		end
+	end
+	local game = limits[1]
+	game.index = 1
+	return game
 end
 
 function STATE.stepPhoneGames()
@@ -7280,6 +7326,7 @@ function STATE.stepPhoneGames()
 		if STATE._phoneRunning then
 			STATE._phoneRunning = false
 			STATE._phonePaused = false
+			STATE._phoneKey = nil
 			if phone and phone:IsOpen() then
 				phone:Close()
 			end
@@ -7297,12 +7344,7 @@ function STATE.stepPhoneGames()
 	if #limits == 0 then
 		error("Phone games are missing")
 	end
-	local index = STATE._phoneIndex or 1
-	if index < 1 or index > #limits then
-		index = 1
-	end
-	local game = limits[index]
-	game.index = index
+	local game = STATE.chosenPhoneGame(limits)
 	if STATE.liftSteal == true or STATE.placeBusy == true then
 		if STATE._phonePaused ~= true then
 			pcall(STATE.submitPhoneScore, game)
@@ -7323,20 +7365,20 @@ function STATE.stepPhoneGames()
 	STATE._phoneRunning = true
 	local resumed = STATE._phonePaused == true
 	STATE._phonePaused = false
-	if resumed or os.clock() >= (STATE._phoneNext or 0) or type(STATE._phoneProps) ~= "table" then
-		if not resumed and type(STATE._phoneProps) == "table" and os.clock() >= (STATE._phoneNext or 0) and (STATE._phoneNext or 0) > 0 then
-			pcall(STATE.submitPhoneScore, game)
-			index = index % #limits + 1
-			game = limits[index]
-			game.index = index
+	local props = STATE._phoneProps
+	local needStart = resumed or type(props) ~= "table" or not phone:IsOpen() or STATE._phoneKey ~= game.key
+	if needStart then
+		if type(STATE._phoneKey) == "string" and STATE._phoneKey ~= game.key then
+			for _, item in ipairs(limits) do
+				if item.key == STATE._phoneKey then
+					pcall(STATE.submitPhoneScore, item)
+					break
+				end
+			end
 		end
 		if not STATE.openPhoneGame(game) then
 			error("Phone game did not start")
 		end
-		return
-	end
-	if not phone:IsOpen() then
-		STATE.openPhoneGame(game)
 		return
 	end
 	if os.clock() >= (STATE._phoneSubmitAt or 0) then
