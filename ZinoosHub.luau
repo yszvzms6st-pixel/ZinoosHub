@@ -5466,9 +5466,6 @@ local function installHub()
 		button.TextSize = 15
 		button.TextColor3 = ink
 		button.TextXAlignment = Enum.TextXAlignment.Left
-		local navPad = Instance.new("UIPadding")
-		navPad.PaddingLeft = UDim.new(0, 36)
-		navPad.Parent = button
 		local navLabel = Instance.new("TextLabel")
 		navLabel.Name = "Label"
 		navLabel.BackgroundTransparency = 1
@@ -5478,7 +5475,9 @@ local function installHub()
 		navLabel.TextColor3 = ink
 		role(navLabel, "ink")
 		navLabel.TextXAlignment = Enum.TextXAlignment.Left
-		navLabel.Size = UDim2.new(1, -8, 1, 0)
+		navLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		navLabel.Position = UDim2.fromOffset(36, 0)
+		navLabel.Size = UDim2.new(1, -44, 1, 0)
 		navLabel.ZIndex = 6
 		navLabel.Parent = button
 		button.BackgroundColor3 = selected
