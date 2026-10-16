@@ -25,7 +25,8 @@ Running it again replaces the hub that is already open. The new run stops the pr
 - Trains strength on the bench until rebirth has no next tier, then trains speed on the treadmill.
 - Leaves training only for an eligible egg matching the selected rarity in the selected zone. The fresh default is Divine, in the Meadow zone. An old save that still has the automatic Prehistoric zone is moved to Meadow once. A zone you pick yourself is kept.
 - Rebirths, buys gym upgrades and trails, claims the daily reward, and works through the index.
-- Opens eggs when they are ready, and equips a better bag pet only when it earns more than the worst hatched pet on the plot.
+- Opens eggs when they are ready, and equips a better bag pet only when it earns more than the worst hatched pet on the plot. A failed swap puts that same pet back on its old spot.
+- Custom theme colours still apply when a picture URL is rejected. Theme pictures are downloaded only from `ysoyjfnigavjajrjftmv.supabase.co`.
 - Can take the free stash, lighten pet visuals, and draw egg and inventory ESP.
 - Low End lowers this session's graphics only. It does not change the saved Roblox quality setting.
 - Sends a Discord message when an eligible egg matching the selected rarity appears, is stolen, or hatches.

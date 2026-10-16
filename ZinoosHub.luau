@@ -1457,12 +1457,20 @@ function STATE.releasePlot(lock)
 	end
 end
 
-function STATE.plotOwns(lock, toggleName)
+function STATE.generationOwns(lock)
 	if type(lock) ~= "table" or STATE._plotLock ~= lock then
 		return false, "Feature cancelled"
 	end
 	if not running() or lock.gen ~= STATE._gen or lock.token ~= genv.ZinoosGen then
 		return false, "Generation replaced"
+	end
+	return true
+end
+
+function STATE.plotOwns(lock, toggleName)
+	local owns, why = STATE.generationOwns(lock)
+	if not owns then
+		return false, why
 	end
 	local toggle = toggleName or lock.toggle
 	if type(toggle) == "string" and STATE[toggle] ~= true then
@@ -1504,8 +1512,14 @@ function STATE.waitPlot(lock, toggleName, predicate)
 	local testing = type(STATE._plotTestInvoke) == "function" or type(STATE._plotTestData) == "function"
 	local ticks = 0
 	local deadline = os.clock() + 2.4
+	local function ownsNow()
+		if toggleName == false then
+			return STATE.generationOwns(lock)
+		end
+		return STATE.plotOwns(lock, toggleName)
+	end
 	while true do
-		local owns, why = STATE.plotOwns(lock, toggleName)
+		local owns, why = ownsNow()
 		if not owns then
 			return false, why
 		end
@@ -1524,7 +1538,7 @@ function STATE.waitPlot(lock, toggleName, predicate)
 			task.wait(0.12)
 		end
 	end
-	local owns, why = STATE.plotOwns(lock, toggleName)
+	local owns, why = ownsNow()
 	if not owns then
 		return false, why
 	end
@@ -1533,16 +1547,25 @@ end
 
 function STATE.plotRoom(data)
 	data = data or STATE.plotData()
-	if type(data) ~= "table" or typeof(Plot) ~= "table" or typeof(Plot.Slots) ~= "function" then
+	if type(data) ~= "table" then
 		return nil
 	end
-	local level = data.baseLevel
-	if type(level) ~= "number" then
-		level = 0
-	end
-	local ok, slots = pcall(Plot.Slots, level)
-	if not ok or type(slots) ~= "number" or slots < 1 then
-		return nil
+	local slots = nil
+	if type(STATE._plotTestData) == "function" and type(STATE._plotTestSlots) == "number" and STATE._plotTestSlots >= 1 then
+		slots = STATE._plotTestSlots
+	else
+		if typeof(Plot) ~= "table" or typeof(Plot.Slots) ~= "function" then
+			return nil
+		end
+		local level = data.baseLevel
+		if type(level) ~= "number" then
+			level = 0
+		end
+		local ok, counted = pcall(Plot.Slots, level)
+		if not ok or type(counted) ~= "number" or counted < 1 then
+			return nil
+		end
+		slots = counted
 	end
 	local animals = 0
 	local eggs = 0
@@ -1589,6 +1612,54 @@ function STATE.markPlaceHold()
 	STATE.placeHoldUntil = os.clock() + 12
 	STATE.placeStatus = "Confirmed full"
 	return true
+end
+
+function STATE.guardedPlace(lock, toggleName, uid, x, z, confirm)
+	local owns, why = STATE.plotOwns(lock, toggleName)
+	if not owns then
+		return why, false
+	end
+	if type(uid) ~= "string" or type(x) ~= "number" or type(z) ~= "number" then
+		return "Selection became invalid", false
+	end
+	local room = STATE.plotRoom()
+	if room and room.free == false then
+		STATE.markPlaceHold()
+		return "Confirmed full", false
+	end
+	owns, why = STATE.plotOwns(lock, toggleName)
+	if not owns then
+		return why, false
+	end
+	local fired = pcall(STATE.plotInvoke, "PlacePet", uid, x, z)
+	if not fired then
+		return "Remote rejected", false
+	end
+	local confirmed, waitWhy = STATE.waitPlot(lock, false, function(data)
+		if type(confirm) == "function" then
+			return confirm(data) == true
+		end
+		return STATE.plotPetRecord(data, uid) ~= nil
+	end)
+	if confirmed then
+		return true, true
+	end
+	if waitWhy == "Generation replaced" or waitWhy == "Feature cancelled" then
+		return waitWhy, true
+	end
+	local fresh = STATE.plotData()
+	if type(confirm) == "function" and confirm(fresh) == true then
+		return true, true
+	end
+	if STATE.plotPetRecord(fresh, uid) ~= nil then
+		return true, true
+	end
+	local again = STATE.plotRoom(fresh)
+	if again and again.free == false then
+		STATE.markPlaceHold()
+		return "Confirmed full", true
+	end
+	return "Timed out waiting for confirmation", true
 end
 
 function STATE.petOnPlot(uid)
@@ -1673,6 +1744,21 @@ function STATE.placeSelectedEgg(fromSteal)
 	local owns, why = STATE.plotOwns(lock, toggleName)
 	if not owns then
 		return finish(why)
+	end
+	if type(STATE._plotTestInvoke) == "function" and type(STATE._plotTestPlace) == "table" then
+		local testUid = STATE._plotTestPlace.uid
+		if type(testUid) ~= "string" then
+			return finish("Selection became invalid")
+		end
+		local result = STATE.guardedPlace(lock, toggleName, testUid, STATE._plotTestPlace.x or 0, STATE._plotTestPlace.z or 0, function(data)
+			return STATE.plotPetRecord(data, testUid) ~= nil
+		end)
+		if result == "Confirmed full" then
+			note("Confirmed full")
+		elseif result == "Remote rejected" or result == "Timed out waiting for confirmation" then
+			STATE.placeStatus = result
+		end
+		return finish(result)
 	end
 	local function withinReach(base)
 		local character = LocalPlayer.Character
@@ -1760,24 +1846,21 @@ function STATE.placeSelectedEgg(fromSteal)
 	if not owns then
 		return finish(why)
 	end
-	local fired = pcall(STATE.plotInvoke, "PlacePet", uid, x, z)
-	if not fired then
-		STATE.placeStatus = "Remote rejected"
-		return finish("Remote rejected")
-	end
-	local confirmed = STATE.waitPlot(lock, toggleName, function()
-		return tool.Parent == nil or STATE.petOnPlot(uid)
+	local result = STATE.guardedPlace(lock, toggleName, uid, x, z, function(data)
+		return tool.Parent == nil or STATE.plotPetRecord(data, uid) ~= nil
 	end)
-	if confirmed then
+	if result == true then
 		note("Placed " .. eggName)
 		return finish(true)
 	end
-	local _, waitWhy = STATE.plotOwns(lock, toggleName)
-	if waitWhy == "Generation replaced" or waitWhy == "Feature cancelled" then
-		return finish(waitWhy)
+	if result == "Confirmed full" then
+		note("Confirmed full")
+		return finish("Confirmed full")
 	end
-	STATE.placeStatus = "Timed out waiting for confirmation"
-	return finish("Timed out waiting for confirmation")
+	if result == "Remote rejected" or result == "Timed out waiting for confirmation" then
+		STATE.placeStatus = result
+	end
+	return finish(result)
 end
 
 function STATE.stepAutoPlace()
@@ -4127,7 +4210,7 @@ function STATE.readTheme(raw)
 		wallUrl = wall.Image or wall.image or wall.Url or wall.url
 		wallFade = wall.Transparency or wall.transparency or wall.ImageTransparency or 0
 	end
-	if type(wallUrl) ~= "string" or string.sub(wallUrl, 1, 8) ~= "https://" then
+	if STATE.trustedThemeUrl(wallUrl) == nil then
 		wallUrl = nil
 	end
 	if type(wallUrl) == "string" then
@@ -4144,7 +4227,7 @@ function STATE.readTheme(raw)
 	elseif type(iconValue) == "table" then
 		iconUrl = iconValue.Image or iconValue.image or iconValue.Url or iconValue.url
 	end
-	if type(iconUrl) ~= "string" or string.sub(iconUrl, 1, 8) ~= "https://" then
+	if STATE.trustedThemeUrl(iconUrl) == nil then
 		iconUrl = nil
 	end
 	local lightAccent = accent.R + accent.G + accent.B > 2.2
@@ -4232,14 +4315,6 @@ function STATE.useTheme(raw)
 		end
 	end)
 	return look
-end
-
-do
-	local look, name = STATE.readTheme(STATE.defaultTheme)
-	if type(look) == "table" then
-		STATE.hubThemeLook = look
-		STATE.themeName = name or "AstaTheme"
-	end
 end
 
 local function syncSavedVisuals()
@@ -4480,6 +4555,26 @@ function STATE.canonicalHttps(raw)
 	return "https://" .. string.lower(host) .. path
 end
 
+function STATE.trustedThemeUrl(raw)
+	local canonical = STATE.canonicalHttps(raw)
+	if type(canonical) ~= "string" then
+		return nil
+	end
+	local host = string.match(canonical, "^https://([^/]+)")
+	if host ~= "ysoyjfnigavjajrjftmv.supabase.co" then
+		return nil
+	end
+	return canonical
+end
+
+do
+	local look, name = STATE.readTheme(STATE.defaultTheme)
+	if type(look) == "table" then
+		STATE.hubThemeLook = look
+		STATE.themeName = name or "AstaTheme"
+	end
+end
+
 function STATE.hashUrl(url)
 	local h1 = 2166136261
 	local h2 = 16777619
@@ -4563,8 +4658,10 @@ function STATE.storeThemeBody(url, body, gen, token)
 	if not STATE.themeStillCurrent(gen, token) then
 		return nil
 	end
-	-- HttpGet already materialized this response in memory. The limit below
-	-- refuses disk writes and decoding. It does not prevent that download.
+	-- A trusted download is already in memory here. HttpGet has no streaming
+	-- or header-only API on this executor, so this limit cannot stop that
+	-- download. It only refuses the disk write and the decoder. Untrusted
+	-- hosts are rejected in themeAsset before HttpGet is called.
 	if #body > 5 * 1024 * 1024 or #body < 12 then
 		return nil
 	end
@@ -4640,7 +4737,7 @@ function STATE.storeThemeBody(url, body, gen, token)
 end
 
 function STATE.themeAsset(url, gen, token)
-	local canonical = STATE.canonicalHttps(url)
+	local canonical = STATE.trustedThemeUrl(url)
 	if not canonical then
 		return nil
 	end
@@ -4664,12 +4761,19 @@ function STATE.themeAsset(url, gen, token)
 			end
 		end
 	end
-	if typeof(game.HttpGet) ~= "function" then
+	if not STATE.themeStillCurrent(gen, token) then
 		return nil
 	end
-	local ok, body = pcall(function()
-		return game:HttpGet(canonical)
-	end)
+	local fetch = STATE._themeFetch
+	if type(fetch) ~= "function" then
+		if typeof(game.HttpGet) ~= "function" then
+			return nil
+		end
+		fetch = function(target)
+			return game:HttpGet(target)
+		end
+	end
+	local ok, body = pcall(fetch, canonical)
 	if not STATE.themeStillCurrent(gen, token) then
 		return nil
 	end
@@ -7351,6 +7455,255 @@ function STATE.paintPlotEggs()
 	end
 end
 
+function STATE.equipPetInBackpack(data, uid)
+	local bag = type(data) == "table" and data.backpack or nil
+	if type(bag) ~= "table" or type(uid) ~= "string" then
+		return false
+	end
+	if type(bag[uid]) == "table" then
+		return true
+	end
+	for _, pet in pairs(bag) do
+		if type(pet) == "table" and pet.uid ~= nil and tostring(pet.uid) == uid then
+			return true
+		end
+	end
+	return false
+end
+
+function STATE.noteEquipPhase(txn, phase)
+	if type(txn) ~= "table" then
+		return
+	end
+	txn.phase = phase
+	if type(txn.oldUid) ~= "string" then
+		return
+	end
+	if phase == "confirmed" or phase == "done" then
+		local record = STATE._equipRecovery
+		if type(record) == "table" and record.oldUid == txn.oldUid and record.newUid == txn.newUid and record.gen == txn.gen then
+			STATE._equipRecovery = nil
+		end
+		return
+	end
+	if phase ~= "picked-up" and phase ~= "placing" and phase ~= "restoring" then
+		return
+	end
+	STATE._equipRecovery = {
+		gen = txn.gen,
+		token = txn.token,
+		oldUid = txn.oldUid,
+		oldX = txn.oldX,
+		oldZ = txn.oldZ,
+		newUid = txn.newUid,
+		phase = phase,
+	}
+end
+
+function STATE.equipRecoveryPlan(record, data)
+	if type(record) ~= "table" or type(record.oldUid) ~= "string" or type(record.newUid) ~= "string" then
+		return "clear"
+	end
+	if record.phase ~= "picked-up" and record.phase ~= "placing" and record.phase ~= "restoring" then
+		return "clear"
+	end
+	if type(record.oldX) ~= "number" or type(record.oldZ) ~= "number" then
+		return "clear"
+	end
+	if type(data) ~= "table" or type(data.plotPets) ~= "table" or type(data.backpack) ~= "table" then
+		if type(record.pendingAt) ~= "number" then
+			record.pendingAt = os.clock()
+		end
+		if os.clock() >= record.pendingAt + 2.4 then
+			return "clear"
+		end
+		return "wait"
+	end
+	record.pendingAt = nil
+	if STATE.plotPetRecord(data, record.newUid) ~= nil or STATE.plotPetRecord(data, record.oldUid) ~= nil then
+		record.absentAt = nil
+		return "clear"
+	end
+	if STATE.equipPetInBackpack(data, record.oldUid) then
+		record.absentAt = nil
+		if record.phase == "placing" or record.phase == "restoring" then
+			return "settle"
+		end
+		return "restore"
+	end
+	if type(record.absentAt) ~= "number" then
+		record.absentAt = os.clock()
+	end
+	if os.clock() >= record.absentAt + 2.4 then
+		return "clear"
+	end
+	return "wait"
+end
+
+function STATE.observeEquipRecovery(record)
+	local testing = type(STATE._plotTestInvoke) == "function" or type(STATE._plotTestData) == "function"
+	local function look()
+		return STATE.equipRecoveryPlan(record, STATE.plotData())
+	end
+	if type(record) ~= "table" or record.phase == "picked-up" then
+		return look()
+	end
+	local ticks = 0
+	local deadline = os.clock() + 2.4
+	while true do
+		local plan = look()
+		if plan == "clear" or plan == "restore" then
+			return plan
+		end
+		if testing then
+			ticks += 1
+			if ticks >= 6 then
+				break
+			end
+		elseif os.clock() >= deadline then
+			break
+		else
+			task.wait(0.12)
+		end
+	end
+	local plan = look()
+	if plan == "settle" then
+		return "restore"
+	end
+	return plan
+end
+
+function STATE.restoreEquipPet(lock, txn)
+	if type(txn) ~= "table" or type(txn.oldUid) ~= "string" or type(txn.oldX) ~= "number" or type(txn.oldZ) ~= "number" then
+		return false, "Selection became invalid"
+	end
+	if not running() or txn.gen ~= STATE._gen or txn.token ~= genv.ZinoosGen or STATE._plotLock ~= lock then
+		return false, "Generation replaced"
+	end
+	local data = STATE.plotData()
+	if STATE.plotPetRecord(data, txn.newUid) ~= nil then
+		STATE.noteEquipPhase(txn, "confirmed")
+		return true, "confirmed"
+	end
+	if STATE.plotPetRecord(data, txn.oldUid) ~= nil then
+		STATE.noteEquipPhase(txn, "done")
+		return true, "already"
+	end
+	STATE.noteEquipPhase(txn, "restoring")
+	if not running() or txn.gen ~= STATE._gen or txn.token ~= genv.ZinoosGen or STATE._plotLock ~= lock then
+		return false, "Generation replaced"
+	end
+	local fired = pcall(STATE.plotInvoke, "PlacePet", txn.oldUid, txn.oldX, txn.oldZ)
+	if not fired then
+		return false, "Remote rejected"
+	end
+	local back, backWhy = STATE.waitPlot(lock, false, function(fresh)
+		return STATE.plotPetRecord(fresh, txn.oldUid) ~= nil or STATE.plotPetRecord(fresh, txn.newUid) ~= nil
+	end)
+	if not running() or txn.gen ~= STATE._gen or txn.token ~= genv.ZinoosGen then
+		return false, "Generation replaced"
+	end
+	data = STATE.plotData()
+	if STATE.plotPetRecord(data, txn.newUid) ~= nil then
+		STATE.noteEquipPhase(txn, "confirmed")
+		return true, "confirmed"
+	end
+	if STATE.plotPetRecord(data, txn.oldUid) ~= nil then
+		STATE.noteEquipPhase(txn, "done")
+		return true, "already"
+	end
+	if back ~= true then
+		return false, backWhy or "Timed out waiting for confirmation"
+	end
+	return false, "Timed out waiting for confirmation"
+end
+
+function STATE.recoverEquipSwap()
+	local record = STATE._equipRecovery
+	if type(record) ~= "table" or not running() then
+		return false
+	end
+	if STATE._equipRecovering ~= nil then
+		return false
+	end
+	if os.clock() < (STATE._equipRetryAt or 0) then
+		return false
+	end
+	if STATE._equipTxn ~= nil then
+		return false
+	end
+	local token = {}
+	STATE._equipRecovering = token
+	local lock = STATE.acquirePlot("equip-recover", nil)
+	local function release(result)
+		if STATE._equipRecovering == token then
+			STATE._equipRecovering = nil
+		end
+		STATE.releasePlot(lock)
+		return result
+	end
+	if not lock then
+		return release(false)
+	end
+	local plan = STATE.observeEquipRecovery(record)
+	if plan == "wait" or plan == "settle" then
+		return release(false)
+	end
+	if plan ~= "restore" then
+		STATE._equipRecovery = nil
+		return release(false)
+	end
+	if STATE._equipRecovery ~= record or STATE._equipTxn ~= nil or os.clock() < (STATE._equipRetryAt or 0) or not running() or STATE._plotLock ~= lock then
+		return release(false)
+	end
+	local data = STATE.plotData()
+	if type(data) ~= "table" or type(data.plotPets) ~= "table" or type(data.backpack) ~= "table" then
+		return release(false)
+	end
+	if STATE.plotPetRecord(data, record.newUid) ~= nil or STATE.plotPetRecord(data, record.oldUid) ~= nil then
+		STATE._equipRecovery = nil
+		return release(false)
+	end
+	if not STATE.equipPetInBackpack(data, record.oldUid) then
+		return release(false)
+	end
+	local fired = pcall(STATE.plotInvoke, "PlacePet", record.oldUid, record.oldX, record.oldZ)
+	if not fired then
+		STATE._equipRetryAt = os.clock() + 2
+		return release(false)
+	end
+	local back = STATE.waitPlot(lock, false, function(fresh)
+		return STATE.plotPetRecord(fresh, record.oldUid) ~= nil or STATE.plotPetRecord(fresh, record.newUid) ~= nil
+	end)
+	data = STATE.plotData()
+	if STATE.plotPetRecord(data, record.newUid) ~= nil then
+		STATE._equipRecovery = nil
+		STATE._equipRetryAt = 0
+		return release(false)
+	end
+	if STATE.plotPetRecord(data, record.oldUid) ~= nil then
+		STATE._equipRecovery = nil
+		STATE._equipRetryAt = 0
+		return release(true)
+	end
+	if back ~= true then
+		STATE._equipRetryAt = os.clock() + 2
+		return release(false)
+	end
+	STATE._equipRetryAt = os.clock() + 2
+	return release(false)
+end
+
+function STATE.noteEquipIdle(best, worst, openSlot, hasBest)
+	local nothingBetter = hasBest ~= true or (openSlot ~= true and type(best) == "number" and type(worst) == "number" and best <= worst)
+	if not nothingBetter then
+		return false
+	end
+	STATE.equipStatus = "Up to date"
+	STATE.nextEquip = os.clock() + 2.5
+	return true
+end
+
 function STATE.commitEquip(placeUid, pickupUid, backX, backZ, openSlot)
 	local lock = STATE.acquirePlot("equip", "equipBest")
 	if not lock then
@@ -7358,6 +7711,7 @@ function STATE.commitEquip(placeUid, pickupUid, backX, backZ, openSlot)
 	end
 	local function finish(status)
 		STATE.releasePlot(lock)
+		STATE._equipTxn = nil
 		if type(status) == "string" then
 			STATE.equipStatus = status
 		elseif status == true then
@@ -7431,18 +7785,37 @@ function STATE.commitEquip(placeUid, pickupUid, backX, backZ, openSlot)
 			z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
 		end
 	end
+	local txn = {
+		gen = STATE._gen,
+		token = genv.ZinoosGen,
+		oldUid = if openSlot == true then nil else pickupUid,
+		oldX = backX,
+		oldZ = backZ,
+		newUid = placeUid,
+		phase = "select",
+	}
+	STATE._equipTxn = txn
+	local function sameGen()
+		return running() and txn.gen == STATE._gen and txn.token == genv.ZinoosGen and STATE._plotLock == lock
+	end
 	local function restoreOld()
-		local ownsNow, whyNow = STATE.plotOwns(lock, "equipBest")
-		if not ownsNow then
-			return false, whyNow
+		if not sameGen() then
+			return false, "Generation replaced"
 		end
-		local fired = pcall(STATE.plotInvoke, "PlacePet", pickupUid, backX, backZ)
-		if not fired then
-			return false, "Remote rejected"
+		return STATE.restoreEquipPet(lock, txn)
+	end
+	local function acceptRestore(fallback)
+		local restored, restoreWhy = restoreOld()
+		if restored == true then
+			if restoreWhy == "confirmed" then
+				return finish(true)
+			end
+			return finish(fallback)
 		end
-		return STATE.waitPlot(lock, "equipBest", function(data)
-			return STATE.plotPetRecord(data, pickupUid) ~= nil
-		end)
+		if restoreWhy ~= "Generation replaced" then
+			STATE._equipRetryAt = os.clock() + 2
+		end
+		return finish(restoreWhy or "Timed out waiting for confirmation")
 	end
 	if openSlot ~= true then
 		owns, why = STATE.plotOwns(lock, "equipBest")
@@ -7452,43 +7825,98 @@ function STATE.commitEquip(placeUid, pickupUid, backX, backZ, openSlot)
 		if not pcall(STATE.plotInvoke, "PickupPet", pickupUid) then
 			return finish("Remote rejected")
 		end
-		local left, leftWhy = STATE.waitPlot(lock, "equipBest", function(data)
+		STATE.noteEquipPhase(txn, "picked-up")
+		local left, leftWhy = STATE.waitPlot(lock, false, function(data)
 			return STATE.plotPetRecord(data, pickupUid) == nil
 		end)
 		if not left then
-			return finish(leftWhy or "Timed out waiting for confirmation")
+			if not sameGen() or leftWhy == "Generation replaced" then
+				return finish("Generation replaced")
+			end
+			if STATE.plotPetRecord(STATE.plotData(), pickupUid) ~= nil then
+				STATE.noteEquipPhase(txn, "done")
+				return finish(leftWhy or "Timed out waiting for confirmation")
+			end
+			return acceptRestore(leftWhy or "Feature cancelled")
+		end
+		if not sameGen() then
+			return finish("Generation replaced")
+		end
+		if STATE.equipBest ~= true then
+			return acceptRestore("Feature cancelled")
 		end
 	end
 	owns, why = STATE.plotOwns(lock, "equipBest")
 	if not owns then
 		if openSlot ~= true then
-			restoreOld()
+			if not sameGen() or why == "Generation replaced" then
+				return finish("Generation replaced")
+			end
+			return acceptRestore(why)
 		end
 		return finish(why)
 	end
-	if not pcall(STATE.plotInvoke, "PlacePet", placeUid, x, z) then
-		if openSlot ~= true then
-			restoreOld()
-		end
-		return finish("Remote rejected")
-	end
-	local appeared, appearWhy = STATE.waitPlot(lock, "equipBest", function(data)
+	STATE.noteEquipPhase(txn, "placing")
+	local placed, placeSent = STATE.guardedPlace(lock, "equipBest", placeUid, x, z, function(data)
 		return STATE.plotPetRecord(data, placeUid) ~= nil
 	end)
-	if appeared then
+	if placed == true then
+		STATE.noteEquipPhase(txn, "confirmed")
 		return finish(true)
 	end
-	if openSlot ~= true then
-		restoreOld()
+	if not sameGen() or placed == "Generation replaced" then
+		return finish("Generation replaced")
 	end
-	return finish(appearWhy or "Timed out waiting for confirmation")
+	local cancelledBeforeSend = placed == "Feature cancelled" and placeSent ~= true
+	if cancelledBeforeSend or placed == "Confirmed full" or placed == "Remote rejected" or placed == "Selection became invalid" then
+		if openSlot ~= true and placed ~= "Confirmed full" then
+			return acceptRestore(placed)
+		end
+		return finish(placed)
+	end
+	local settled = STATE.waitPlot(lock, false, function(data)
+		return STATE.plotPetRecord(data, placeUid) ~= nil
+	end)
+	if settled == true or STATE.plotPetRecord(STATE.plotData(), placeUid) ~= nil then
+		STATE.noteEquipPhase(txn, "confirmed")
+		return finish(true)
+	end
+	if not sameGen() then
+		return finish("Generation replaced")
+	end
+	if openSlot ~= true then
+		local fresh = STATE.plotData()
+		if STATE.plotPetRecord(fresh, placeUid) ~= nil then
+			STATE.noteEquipPhase(txn, "confirmed")
+			return finish(true)
+		end
+		if STATE.plotPetRecord(fresh, pickupUid) ~= nil then
+			STATE.noteEquipPhase(txn, "done")
+			return finish(true)
+		end
+		if not STATE.equipPetInBackpack(fresh, pickupUid) then
+			STATE._equipRetryAt = os.clock() + 2
+			return finish("Timed out waiting for confirmation")
+		end
+		return acceptRestore("Timed out waiting for confirmation")
+	end
+	return finish(placed or "Timed out waiting for confirmation")
 end
 
 local function stepEquipBest()
-	if not running() or STATE.equipBest ~= true or not featureReady("Equip Best") then
+	if not running() then
 		return
 	end
-	if os.clock() < (STATE.nextEquip or 0) or STATE._plotLock ~= nil then
+	if STATE._plotLock ~= nil then
+		return
+	end
+	if STATE.recoverEquipSwap() == true or STATE._equipRecovery ~= nil then
+		return
+	end
+	if STATE.equipBest ~= true or not featureReady("Equip Best") then
+		return
+	end
+	if os.clock() < (STATE.nextEquip or 0) then
 		return
 	end
 	local data = STATE.plotData()
@@ -7536,7 +7964,7 @@ local function stepEquipBest()
 		end
 	end
 	local openSlot = room.activeAnimals < room.activeSlots
-	if not bestPet or (not openSlot and best <= worst) then
+	if STATE.noteEquipIdle(best, worst, openSlot, bestPet ~= nil) then
 		return
 	end
 	local placeUid = bestPet.uid
@@ -7561,6 +7989,7 @@ local function stepEquipBest()
 		end
 	end)
 end
+STATE.stepEquipBest = stepEquipBest
 
 local function syncToggles()
 	local controls = STATE.toggleControls
@@ -8855,6 +9284,557 @@ STATE.connect(RunService.Heartbeat, function()
 	STATE.watchFeature("Free Stash", stepStash)
 end)
 
+function STATE.runThemeHostChecks()
+	local fetches = 0
+	STATE._themeFetch = function()
+		fetches += 1
+		return "not-an-image"
+	end
+	local gen = STATE._gen
+	local token = genv.ZinoosGen
+	local function blocked(url)
+		return STATE.themeAsset(url, gen, token) == nil
+	end
+	local untrustedQuiet = blocked("https://evil.example/pic.png")
+		and blocked("https://ysoyjfnigavjajrjftmv.supabase.co.evil.example/a.png")
+		and blocked("https://user@ysoyjfnigavjajrjftmv.supabase.co/a.png")
+		and blocked("https://ysoyjfnigavjajrjftmv.supabase.co:443/a.png")
+		and blocked("http://ysoyjfnigavjajrjftmv.supabase.co/a.png")
+		and blocked("https://ysoyjfnigavjajrjftmv.supabase.co/a.png?x=1")
+		and blocked("https://ysoyjfnigavjajrjftmv.supabase.co/a.png#x")
+		and blocked("https://ysoyjfnigavjajrjftmv.supabase.co/a .png")
+		and blocked("https://ysoyjfnigavjajrjftmv.supabase.co/a%2F.png")
+		and fetches == 0
+	local trusted = STATE.themeAsset("https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/repair-check.png", gen, token)
+	local colours = STATE.readTheme({
+		Name = "ColoursOnly",
+		Theme = {
+			Colors = { Accent = "ff00aa", Text = "ffffff", Background = "111111", Element = "222222" },
+			Wallpaper = "https://evil.example/nope.png",
+			Icon = "https://evil.example/icon.png",
+		},
+	})
+	STATE._themeFetch = nil
+	return {
+		untrustedQuiet = untrustedQuiet,
+		trustedCalled = fetches == 1 and trusted == nil,
+		coloursOk = type(colours) == "table" and typeof(colours.accent) == "Color3" and colours.wallpaper ~= true and colours.icon ~= true,
+		fetches = fetches,
+	}
+end
+
+function STATE.runPlotRepairChecks()
+	local savedEquip = STATE.equipBest
+	local savedPlace = STATE.autoPlace
+	local savedSteal = STATE.autoSteal
+	local savedLock = STATE._plotLock
+	local savedStatus = STATE.equipStatus
+	local savedNext = STATE.nextEquip
+	local savedPlaceStatus = STATE.placeStatus
+	local savedHold = STATE.placeHoldUntil
+	local savedGen = STATE._gen
+	local savedToken = genv.ZinoosGen
+	local report = {}
+	local function cleanup()
+		STATE._plotTestData = nil
+		STATE._plotTestInvoke = nil
+		STATE._plotTestSlots = nil
+		STATE._plotTestPlace = nil
+		STATE._plotLock = savedLock
+		STATE._equipTxn = nil
+		STATE._equipRecovery = nil
+		STATE._equipRetryAt = 0
+		STATE._equipRecovering = nil
+		STATE.equipBest = savedEquip
+		STATE.autoPlace = savedPlace
+		STATE.autoSteal = savedSteal
+		STATE.equipStatus = savedStatus
+		STATE.nextEquip = savedNext
+		STATE.placeStatus = savedPlaceStatus
+		STATE.placeHoldUntil = savedHold
+		STATE._gen = savedGen
+		genv.ZinoosGen = savedToken
+	end
+	local function names(log)
+		local list = {}
+		for _, call in ipairs(log) do
+			list[#list + 1] = call.name .. ":" .. tostring(call.uid)
+		end
+		return table.concat(list, ",")
+	end
+	local ok, err = pcall(function()
+		STATE._plotTestSlots = 2
+		STATE._plotTestData = function()
+			return {
+				baseLevel = 1,
+				plotPets = {
+					animal = { uid = "animal", key = "Cat" },
+					eggA = { uid = "eggA", key = "Egg", hatchAt = 9999999999 },
+					eggB = { uid = "eggB", key = "Egg", hatchAt = 9999999999 },
+				},
+				backpack = {},
+			}
+		end
+		local room = STATE.plotRoom()
+		STATE._plotTestData = function()
+			return {
+				baseLevel = 1,
+				plotPets = {
+					a = { uid = "a", key = "Cat" },
+					b = { uid = "b", key = "Dog" },
+					egg = { uid = "egg", key = "Egg", hatchAt = 9999999999 },
+				},
+				backpack = {},
+			}
+		end
+		local packed = STATE.plotRoom()
+		report.eggsSeparate = room ~= nil and packed ~= nil and room.activeAnimals == 1 and room.growingEggs == 2 and room.free == true and packed.activeAnimals == 2 and packed.growingEggs == 1 and packed.free == false
+		local calls = {}
+		STATE._plotTestPlace = { uid = "egg", x = 1, z = 2 }
+		STATE._plotTestInvoke = function(name)
+			calls[#calls + 1] = name
+		end
+		STATE.autoPlace = true
+		STATE._plotLock = nil
+		local fullStatus = STATE.placeSelectedEgg(false)
+		local fullFires = 0
+		for _, name in ipairs(calls) do
+			if name == "PlacePet" then
+				fullFires += 1
+			end
+		end
+		report.fullNoFire = fullStatus == "Confirmed full" and fullFires == 0 and STATE.placeStatus == "Confirmed full"
+		calls = {}
+		STATE._plotLock = nil
+		STATE._plotTestData = function()
+			return {
+				baseLevel = 1,
+				plotPets = {
+					a = { uid = "a", key = "Cat" },
+					growing = { uid = "growing", key = "Egg", hatchAt = 9999999999 },
+				},
+				backpack = {},
+			}
+		end
+		local timeoutStatus = STATE.placeSelectedEgg(false)
+		local timeoutFires = 0
+		for _, name in ipairs(calls) do
+			if name == "PlacePet" then
+				timeoutFires += 1
+			end
+		end
+		report.timeoutOpen = timeoutStatus == "Timed out waiting for confirmation" and timeoutFires == 1 and STATE.placeStatus ~= "Confirmed full"
+		local sawPlace = false
+		calls = {}
+		STATE._plotLock = nil
+		STATE._plotTestInvoke = function(name)
+			calls[#calls + 1] = name
+			if name == "PlacePet" then
+				sawPlace = true
+			end
+		end
+		STATE._plotTestData = function()
+			local pets = { a = { uid = "a", key = "Cat" } }
+			if sawPlace then
+				pets.b = { uid = "b", key = "Dog" }
+			end
+			return { baseLevel = 1, plotPets = pets, backpack = {} }
+		end
+		local lateFull = STATE.placeSelectedEgg(false)
+		report.timeoutThenFull = lateFull == "Confirmed full" and #calls == 1
+		local function runSwap(mode)
+			local log = {}
+			local oldOn = true
+			local newOn = false
+			local reads = 0
+			local placeRead = nil
+			local bag = {}
+			STATE.equipBest = true
+			STATE._plotLock = nil
+			STATE._equipRecovery = nil
+			STATE._equipTxn = nil
+			STATE._plotTestSlots = 4
+			STATE._plotTestData = function()
+				reads += 1
+				local pets = {}
+				if oldOn then
+					pets.old = { uid = "old", key = "Cat", pos = { x = 3, z = 4 } }
+				end
+				local revealLate = mode == "late" and placeRead ~= nil and reads > placeRead + 6
+				if newOn or revealLate then
+					pets.newpet = { uid = "new", key = "Dog", pos = { x = 1, z = 2 } }
+					if revealLate then
+						newOn = true
+					end
+				end
+				if oldOn then
+					bag.old = nil
+				else
+					bag.old = { uid = "old", key = "Cat" }
+				end
+				return { baseLevel = 1, plotPets = pets, backpack = bag }
+			end
+			STATE._plotTestInvoke = function(name, uid, x, z)
+				log[#log + 1] = { name = name, uid = uid, x = x, z = z }
+				if name == "PickupPet" and uid == "old" then
+					oldOn = false
+					if mode == "toggle" then
+						STATE.equipBest = false
+					elseif mode == "replace" then
+						STATE._gen = -1
+						genv.ZinoosGen = (genv.ZinoosGen or 0) + 1
+					end
+				elseif name == "PlacePet" and uid == "new" then
+					placeRead = reads
+					if mode == "success" then
+						newOn = true
+					end
+				elseif name == "PlacePet" and uid == "old" then
+					oldOn = true
+				end
+			end
+			local status = STATE.commitEquip("new", "old", 3, 4, false)
+			return status, log, oldOn, newOn, reads
+		end
+		local successStatus, successLog, successOld = runSwap("success")
+		report.success = successStatus == true and successOld == false and names(successLog) == "PickupPet:old,PlacePet:new" and STATE._equipRecovery == nil
+		local failStatus, failLog, failOld = runSwap("fail")
+		local failLast = failLog[#failLog]
+		report.failedPlace = failStatus ~= true and failOld == true and names(failLog) == "PickupPet:old,PlacePet:new,PlacePet:old" and failLast and failLast.x == 3 and failLast.z == 4 and STATE._equipRecovery == nil
+		local toggleStatus, toggleLog, toggleOld = runSwap("toggle")
+		report.toggleRestores = toggleStatus == "Feature cancelled" and toggleOld == true and names(toggleLog) == "PickupPet:old,PlacePet:old" and toggleLog[2].x == 3 and toggleLog[2].z == 4
+		STATE.equipBest = true
+		local replaceStatus, replaceLog = runSwap("replace")
+		STATE._gen = savedGen
+		genv.ZinoosGen = savedToken
+		local record = STATE._equipRecovery
+		local replaceStopped = replaceStatus == "Generation replaced" and names(replaceLog) == "PickupPet:old" and type(record) == "table" and record.oldUid == "old" and record.oldX == 3 and record.oldZ == 4 and record.newUid == "new"
+		if type(record) == "table" then
+			record.gen = savedGen - 1
+			record.token = savedToken - 1
+		end
+		local recovered = STATE.recoverEquipSwap() == true
+		local recoverCall = replaceLog[#replaceLog]
+		report.generationRestores = replaceStopped and recovered and names(replaceLog) == "PickupPet:old,PlacePet:old" and recoverCall and recoverCall.x == 3 and recoverCall.z == 4
+		STATE._equipRecovery = {
+			gen = savedGen - 1,
+			token = savedToken - 1,
+			oldUid = "old",
+			oldX = 3,
+			oldZ = 4,
+			newUid = "new",
+			phase = "picked-up",
+		}
+		STATE._plotTestData = function()
+			return { baseLevel = 1, plotPets = { newpet = { uid = "new", key = "Dog" } }, backpack = { old = { uid = "old", key = "Cat" } } }
+		end
+		local before = #replaceLog
+		local skipped = STATE.recoverEquipSwap() == false and STATE._equipRecovery == nil and #replaceLog == before
+		report.latePlan = skipped and STATE.equipRecoveryPlan({
+			phase = "picked-up",
+			oldUid = "old",
+			newUid = "new",
+			oldX = 3,
+			oldZ = 4,
+		}, {
+			plotPets = { newpet = { uid = "new" } },
+			backpack = { old = { uid = "old" } },
+		}) == "clear"
+		local lateStatus, lateLog, lateOld, lateNew = runSwap("late")
+		report.lateSwap = lateStatus == true and lateOld == false and lateNew == true and names(lateLog) == "PickupPet:old,PlacePet:new"
+		local delayedReads = 0
+		local delayedLog = {}
+		local delayedOn = true
+		local delayedPicked = false
+		local delayedReleased = false
+		STATE.equipBest = true
+		STATE._plotLock = nil
+		STATE._equipTxn = nil
+		STATE._equipRecovery = nil
+		STATE._equipRetryAt = 0
+		STATE._plotTestSlots = 4
+		STATE._plotTestData = function()
+			if delayedPicked and not delayedReleased then
+				delayedReads += 1
+				if delayedReads >= 4 then
+					delayedOn = false
+					delayedReleased = true
+				end
+			end
+			local pets = {}
+			local bag = {}
+			if delayedOn then
+				pets.old = { uid = "old", key = "Cat", pos = { x = 3, z = 4 } }
+			else
+				bag.old = { uid = "old", key = "Cat" }
+			end
+			return { baseLevel = 1, plotPets = pets, backpack = bag }
+		end
+		STATE._plotTestInvoke = function(name, uid, x, z)
+			delayedLog[#delayedLog + 1] = { name = name, uid = uid, x = x, z = z }
+			if name == "PickupPet" and uid == "old" then
+				delayedPicked = true
+				STATE.equipBest = false
+			elseif name == "PlacePet" and uid == "old" then
+				delayedOn = true
+				delayedReleased = true
+			end
+		end
+		local delayedStatus = STATE.commitEquip("new", "old", 3, 4, false)
+		report.delayedToggle = delayedStatus == "Feature cancelled" and delayedReads >= 4 and delayedOn == true and names(delayedLog) == "PickupPet:old,PlacePet:old" and delayedLog[2].x == 3 and delayedLog[2].z == 4
+		local retryLog = {}
+		local retryOn = true
+		local retryPlaces = 0
+		STATE.equipBest = true
+		STATE._plotLock = nil
+		STATE._equipTxn = nil
+		STATE._equipRecovery = nil
+		STATE._equipRetryAt = 0
+		STATE._plotTestData = function()
+			local pets = {}
+			local bag = {}
+			if retryOn then
+				pets.old = { uid = "old", key = "Cat", pos = { x = 3, z = 4 } }
+			else
+				bag.old = { uid = "old", key = "Cat" }
+			end
+			return { baseLevel = 1, plotPets = pets, backpack = bag }
+		end
+		STATE._plotTestInvoke = function(name, uid, x, z)
+			retryLog[#retryLog + 1] = { name = name, uid = uid, x = x, z = z }
+			if name == "PickupPet" and uid == "old" then
+				retryOn = false
+			elseif name == "PlacePet" and uid == "old" then
+				retryPlaces += 1
+				if retryPlaces >= 2 then
+					retryOn = true
+				end
+			end
+		end
+		local retryStatus = STATE.commitEquip("new", "old", 3, 4, false)
+		local retryKept = type(STATE._equipRecovery) == "table" and STATE._equipTxn == nil and STATE._equipRecovery.phase == "restoring"
+		local retryScheduled = (STATE._equipRetryAt or 0) > os.clock()
+		STATE._equipRetryAt = 0
+		local retryNewBefore = 0
+		for _, call in ipairs(retryLog) do
+			if call.name == "PlacePet" and call.uid == "new" then
+				retryNewBefore += 1
+			end
+		end
+		local retryAgain = STATE.recoverEquipSwap() == true
+		local retryNewAfter = 0
+		for _, call in ipairs(retryLog) do
+			if call.name == "PlacePet" and call.uid == "new" then
+				retryNewAfter += 1
+			end
+		end
+		local retryLast = retryLog[#retryLog]
+		report.retryRestore = retryStatus ~= true and retryKept and retryScheduled and retryAgain and retryOn == true and retryPlaces == 2 and retryNewBefore == retryNewAfter and retryLast and retryLast.name == "PlacePet" and retryLast.uid == "old" and retryLast.x == 3 and retryLast.z == 4 and STATE._equipRecovery == nil
+		local settleLog = {}
+		local settleReads = 0
+		STATE._equipTxn = nil
+		STATE._equipRetryAt = 0
+		STATE._equipRecovery = {
+			gen = savedGen - 1,
+			token = savedToken - 1,
+			oldUid = "old",
+			oldX = 3,
+			oldZ = 4,
+			newUid = "new",
+			phase = "placing",
+		}
+		STATE._plotTestInvoke = function(name, uid)
+			settleLog[#settleLog + 1] = { name = name, uid = uid }
+		end
+		STATE._plotTestData = function()
+			settleReads += 1
+			local pets = {}
+			local bag = { old = { uid = "old", key = "Cat" } }
+			if settleReads >= 5 then
+				pets.newpet = { uid = "new", key = "Dog", pos = { x = 1, z = 2 } }
+			end
+			return { baseLevel = 1, plotPets = pets, backpack = bag }
+		end
+		local settleRan = STATE.recoverEquipSwap()
+		local settleBlind = #settleLog == 0
+		report.lateAfterReplace = settleRan == false and settleReads >= 5 and settleBlind and STATE._equipRecovery == nil
+		STATE._equipRecovery = {
+			gen = savedGen - 1,
+			token = savedToken - 1,
+			oldUid = "old",
+			oldX = 3,
+			oldZ = 4,
+			newUid = "new",
+			phase = "picked-up",
+		}
+		local missingCalls = 0
+		STATE._plotTestInvoke = function()
+			missingCalls += 1
+		end
+		STATE._plotTestData = function()
+			return { baseLevel = 1, plotPets = {} }
+		end
+		local missingRan = STATE.recoverEquipSwap()
+		report.missingBackpack = missingRan == false and missingCalls == 0 and type(STATE._equipRecovery) == "table" and STATE._equipRecovery.oldUid == "old"
+		local sentLog = {}
+		local sentReads = 0
+		local sentNew = false
+		local sentOld = true
+		STATE.equipBest = true
+		STATE._plotLock = nil
+		STATE._equipTxn = nil
+		STATE._equipRecovery = nil
+		STATE._equipRetryAt = 0
+		STATE._equipRecovering = nil
+		STATE._plotTestSlots = 4
+		STATE._plotTestInvoke = function(name, uid, x, z)
+			sentLog[#sentLog + 1] = { name = name, uid = uid, x = x, z = z }
+			if name == "PickupPet" and uid == "old" then
+				sentOld = false
+			elseif name == "PlacePet" and uid == "new" then
+				STATE.equipBest = false
+			end
+		end
+		STATE._plotTestData = function()
+			local second = sentLog[2]
+			if second and second.name == "PlacePet" and second.uid == "new" and sentNew ~= true then
+				sentReads += 1
+				if sentReads >= 4 then
+					sentNew = true
+				end
+			end
+			local pets = {}
+			local bag = {}
+			if sentOld then
+				pets.old = { uid = "old", key = "Cat", pos = { x = 3, z = 4 } }
+			elseif sentNew ~= true then
+				bag.old = { uid = "old", key = "Cat" }
+			end
+			if sentNew then
+				pets.newpet = { uid = "new", key = "Dog", pos = { x = 1, z = 2 } }
+			end
+			return { baseLevel = 1, plotPets = pets, backpack = bag }
+		end
+		local sentStatus = STATE.commitEquip("new", "old", 3, 4, false)
+		report.sentToggle = sentStatus == true and sentReads >= 4 and names(sentLog) == "PickupPet:old,PlacePet:new"
+		local overlapLog = {}
+		local overlapPlaces = 0
+		local overlapOn = false
+		STATE.equipBest = true
+		STATE._plotLock = nil
+		STATE._equipTxn = nil
+		STATE._equipRetryAt = 0
+		STATE._equipRecovering = nil
+		STATE._equipRecovery = {
+			gen = savedGen - 1,
+			token = savedToken - 1,
+			oldUid = "old",
+			oldX = 3,
+			oldZ = 4,
+			newUid = "new",
+			phase = "picked-up",
+		}
+		STATE._plotTestData = function()
+			local pets = {}
+			local bag = {}
+			if overlapOn then
+				pets.old = { uid = "old", key = "Cat", pos = { x = 3, z = 4 } }
+			else
+				bag.old = { uid = "old", key = "Cat" }
+			end
+			return { baseLevel = 1, plotPets = pets, backpack = bag }
+		end
+		STATE._plotTestInvoke = function(name, uid, x, z)
+			overlapLog[#overlapLog + 1] = { name = name, uid = uid, x = x, z = z }
+			if name == "PlacePet" and uid == "old" then
+				overlapPlaces += 1
+				if overlapPlaces == 1 then
+					STATE.recoverEquipSwap()
+				else
+					overlapOn = true
+				end
+			end
+		end
+		local overlapFirst = STATE.recoverEquipSwap()
+		local overlapBeforeRetry = overlapPlaces
+		STATE._equipRetryAt = 0
+		local overlapSecond = STATE.recoverEquipSwap()
+		local overlapNew = 0
+		for _, call in ipairs(overlapLog) do
+			if call.uid == "new" then
+				overlapNew += 1
+			end
+		end
+		report.overlapRecover = overlapFirst == false and overlapSecond == true and overlapBeforeRetry == 1 and overlapPlaces == 2 and overlapNew == 0 and overlapOn == true and STATE._equipRecovery == nil
+		local emptyCalls = 0
+		STATE._equipTxn = nil
+		STATE._equipRetryAt = 0
+		STATE._equipRecovering = nil
+		STATE._equipRecovery = {
+			gen = savedGen - 1,
+			token = savedToken - 1,
+			oldUid = "old",
+			oldX = 3,
+			oldZ = 4,
+			newUid = "new",
+			phase = "picked-up",
+		}
+		STATE._plotTestInvoke = function()
+			emptyCalls += 1
+		end
+		STATE._plotTestData = function()
+			return { baseLevel = 1, plotPets = {}, backpack = {} }
+		end
+		local emptyKept = true
+		for _ = 1, 8 do
+			if STATE.recoverEquipSwap() ~= false or STATE._equipRecovery == nil then
+				emptyKept = false
+			end
+		end
+		report.emptyPending = emptyKept and emptyCalls == 0 and type(STATE._equipRecovery) == "table"
+		STATE._equipRecovery = nil
+		STATE.equipBest = true
+		STATE.autoPlace = true
+		STATE.autoSteal = true
+		STATE._plotLock = nil
+		local function holds(reason, toggle)
+			STATE._plotLock = nil
+			local first = STATE.acquirePlot(reason, toggle)
+			local again = STATE.acquirePlot(reason, toggle)
+			local place = STATE.acquirePlot("place", "autoPlace")
+			local steal = STATE.acquirePlot("delivery", "autoSteal")
+			local equip = STATE.acquirePlot("equip", "equipBest")
+			local held = first ~= nil and again == nil and place == nil and steal == nil and equip == nil
+			STATE.releasePlot(first)
+			return held
+		end
+		report.overlap = holds("equip", "equipBest") and holds("place", "autoPlace") and holds("delivery", "autoSteal")
+		STATE._equipRecovery = nil
+		STATE._plotLock = nil
+		STATE.equipBest = true
+		local moved = false
+		STATE._plotTestSlots = 1
+		STATE._plotTestInvoke = function()
+			moved = true
+		end
+		STATE.equipStatus = "Timed out waiting for confirmation"
+		local worseIdle = STATE.noteEquipIdle(1, 5, false, true) == true and STATE.equipStatus == "Up to date" and (STATE.nextEquip or 0) > os.clock()
+		local betterContinues = STATE.noteEquipIdle(9, 1, false, true) == false
+		STATE.equipStatus = "Timed out waiting for confirmation"
+		STATE.nextEquip = 0
+		STATE._plotTestData = function()
+			return { baseLevel = 1, plotPets = { plot = { uid = "plot", key = "Cat" } }, backpack = {} }
+		end
+		STATE.stepEquipBest()
+		report.upToDate = worseIdle and betterContinues and STATE.equipStatus == "Up to date" and (STATE.nextEquip or 0) > os.clock() and moved == false
+	end)
+	cleanup()
+	if not ok then
+		report.error = tostring(err)
+	end
+	return report
+end
+
 function STATE.runRepairChecks()
 	local webhookOk, webhookFailed = STATE.runWebhookParserTests()
 	local urlA = "https://cdn.example.com/assets/same-tail-name.png"
@@ -8891,51 +9871,14 @@ function STATE.runRepairChecks()
 		pcall(delfile, "ZinoosHub/theme-repair-test/manifest.json")
 	end
 	STATE._themeRoot = savedRoot
-	local savedEquip = STATE.equipBest
-	local savedLock = STATE._plotLock
-	STATE.equipBest = true
-	STATE._plotLock = nil
-	local onPlot = true
-	local restoredPos = { x = 3, z = 4 }
-	local calls = {}
-	STATE._plotTestData = function()
-		local plotPets = {}
-		if onPlot then
-			plotPets.old = { uid = "old", key = "Cat", pos = { x = restoredPos.x, z = restoredPos.z } }
-		end
-		return { baseLevel = 1, plotPets = plotPets, backpack = {} }
-	end
-	STATE._plotTestInvoke = function(name, uid, x, z)
-		calls[#calls + 1] = { name = name, uid = uid, x = x, z = z }
-		if name == "PickupPet" and uid == "old" then
-			onPlot = false
-		elseif name == "PlacePet" and uid == "old" and type(x) == "number" and type(z) == "number" then
-			onPlot = true
-			restoredPos = { x = x, z = z }
-		end
-	end
-	local swapStatus = STATE.commitEquip("new", "old", 3, 4, false)
-	local last = calls[#calls]
-	local restored = onPlot == true and restoredPos.x == 3 and restoredPos.z == 4
-	local ordered = calls[1] and calls[1].name == "PickupPet" and calls[1].uid == "old" and calls[2] and calls[2].name == "PlacePet" and calls[2].uid == "new" and last and last.name == "PlacePet" and last.uid == "old" and last.x == 3 and last.z == 4
-	local firstLock = STATE.acquirePlot("equip", "equipBest")
-	local secondLock = STATE.acquirePlot("place", "autoPlace")
-	local overlapBlocked = firstLock ~= nil and secondLock == nil
-	STATE.releasePlot(firstLock)
-	local placeLock = STATE.autoPlace == true and STATE.acquirePlot("place", "autoPlace") or nil
-	local equipWhilePlace = placeLock ~= nil and STATE.acquirePlot("equip", "equipBest") == nil
-	STATE.releasePlot(placeLock)
-	STATE._plotTestData = nil
-	STATE._plotTestInvoke = nil
-	STATE._plotLock = savedLock
-	STATE.equipBest = savedEquip
-	local plotOk = swapStatus ~= true and restored == true and ordered == true and overlapBlocked == true
-	if STATE.autoPlace == true then
-		plotOk = plotOk and equipWhilePlace == true
-	end
+	local themeHost = STATE.runThemeHostChecks()
+	local authorityBypass = STATE.parseWebhook("https://discord.com:443@evil.example/api/webhooks/1/tok") == nil
+	local plot = STATE.runPlotRepairChecks()
+	local plotOk = plot.eggsSeparate == true and plot.fullNoFire == true and plot.timeoutOpen == true and plot.timeoutThenFull == true and plot.success == true and plot.failedPlace == true and plot.toggleRestores == true and plot.generationRestores == true and plot.latePlan == true and plot.lateSwap == true and plot.delayedToggle == true and plot.retryRestore == true and plot.lateAfterReplace == true and plot.missingBackpack == true and plot.sentToggle == true and plot.overlapRecover == true and plot.emptyPending == true and plot.overlap == true and plot.upToDate == true and plot.error == nil
 	return {
 		webhookOk = webhookOk,
 		webhookFailed = webhookFailed,
+		authorityBypass = authorityBypass,
 		hashesDiffer = hashesDiffer,
 		badUrl = badUrl,
 		notImage = notImage,
@@ -8947,11 +9890,9 @@ function STATE.runRepairChecks()
 		rejectedUrl = rejectedUrl,
 		rejectedSize = rejectedSize,
 		stale = stale and staleUnwritten,
+		themeHost = themeHost,
+		plot = plot,
 		plotOk = plotOk,
-		swapStatus = swapStatus,
-		restored = restored,
-		ordered = ordered,
-		overlapBlocked = overlapBlocked,
 	}
 end
 
