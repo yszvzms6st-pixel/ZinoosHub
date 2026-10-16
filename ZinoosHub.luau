@@ -5449,7 +5449,7 @@ local function installHub()
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
-	makeSwitch(training, "Phone Games", "phoneGames", "Plays the bench phone game you picked and tries not to lose. Bubbles pause while the phone is open.")
+	makeSwitch(training, "Phone Games", "phoneGames", "Plays the bench phone game you picked for a high score. Bubbles pause while the phone is open.")
 	makeDropdown(training, "Phone Game", function()
 		return STATE.phoneChoice or "Critter Merge"
 	end, { "Critter Merge", "When Pigs Fly", "Snack Stack" }, function(option)
@@ -7323,79 +7323,6 @@ function STATE.notePhoneRound(phase)
 	end
 end
 
-function STATE.finishPhoneRound()
-	local step = STATE._phoneStep
-	if typeof(step) ~= "function" or type(getupvalues) ~= "function" or type(setupvalue) ~= "function" then
-		return false
-	end
-	local ups = getupvalues(step)
-	if type(ups) ~= "table" then
-		return false
-	end
-	if STATE._phoneKind == "Flappy" and type(ups[5]) == "table" and type(ups[5].set) == "function" and typeof(ups[4]) == "function" then
-		if ups[4](ups[5]) ~= "play" then
-			return false
-		end
-		ups[5]:set("dead")
-		if type(ups[32]) == "number" then
-			setupvalue(step, 32, 0.9)
-		end
-		return true
-	end
-	if STATE._phoneKind == "Stack" and type(ups[7]) == "table" and type(ups[7].set) == "function" and typeof(ups[6]) == "function" then
-		if ups[6](ups[7]) ~= "play" then
-			return false
-		end
-		ups[7]:set("dead")
-		if type(ups[17]) == "number" then
-			setupvalue(step, 17, 1.1)
-		end
-		return true
-	end
-	if STATE._phoneKind == "Merge" and typeof(ups[15]) == "function" then
-		ups[15]()
-		return true
-	end
-	return false
-end
-
-function STATE.bankPhoneScore(game)
-	if type(game) ~= "table" or STATE._phoneBanked == true or STATE._phonePaused == true then
-		return
-	end
-	if type(STATE._phoneWaitScore) == "number" and os.clock() < (STATE._phoneWaitUntil or 0) then
-		return
-	end
-	STATE._phoneWaitScore = nil
-	local elapsed = os.clock() - (STATE._phoneRoundAt or 0)
-	if elapsed < 20 then
-		return
-	end
-	local shown = STATE.phoneScore(game.key)
-	if type(shown) ~= "number" or shown < 1 then
-		return
-	end
-	local cap = math.floor(elapsed * game.per + game.slack)
-	if shown > cap then
-		return
-	end
-	local saved = type(STATE._phoneBests) == "table" and STATE._phoneBests[game.key] or 0
-	if type(saved) ~= "number" then
-		saved = 0
-	end
-	if shown <= saved then
-		return
-	end
-	if not STATE.finishPhoneRound() then
-		return
-	end
-	STATE._phoneBanked = true
-	STATE._phoneWaitScore = shown
-	STATE._phoneWaitKey = game.key
-	STATE._phoneWaitUntil = os.clock() + 20
-	STATE.phoneBest = shown
-end
-
 function STATE.rebuildPhone()
 	if not STATE.hookPhonePanel() then
 		return false
@@ -7552,9 +7479,8 @@ function STATE.stepPhoneGames()
 		return
 	end
 	if os.clock() >= (STATE._phoneSubmitAt or 0) then
-		STATE._phoneSubmitAt = os.clock() + 5
+		STATE._phoneSubmitAt = os.clock() + 15
 		STATE.pullPhoneBests()
-		STATE.bankPhoneScore(game)
 	end
 end
 
@@ -7655,12 +7581,18 @@ function STATE.steerFlappy(step)
 			gap = type(pipe.gap) == "number" and pipe.gap or gap
 		end
 	end
-	local nextY = y + math.min(vy + 250 / 55, 120) / 55
-	local floorLine = gapY + math.max(4, gap / 2 - 4.2)
-	if y > 78 or (y > gapY + 5 and vy > -35) or nextY > floorLine then
+	local nextY = y
+	local nextVy = vy
+	for _ = 1, 5 do
+		nextVy = math.min(nextVy + 250 / 55, 120)
+		nextY += nextVy / 55
+	end
+	local ceiling = gapY - math.max(4, gap / 2 - 4.8)
+	local floorLine = gapY + math.max(4, gap / 2 - 4.8)
+	if y > 76 or nextY > floorLine or (y > gapY + 2 and vy > -25) then
 		setupvalue(step, 11, -72)
-	elseif y < 8 or (y < gapY - 6 and vy < 0) then
-		setupvalue(step, 11, 35)
+	elseif y < 7 or (nextY < ceiling and vy < 0) then
+		setupvalue(step, 11, 40)
 	end
 end
 
@@ -7697,7 +7629,7 @@ function STATE.steerStack(step)
 		return
 	end
 	local now = os.clock()
-	if now - (STATE._stackNext or 0) >= 0.34 then
+	if now - (STATE._stackNext or 0) >= 0.3 then
 		mover.x = top.x
 		if typeof(ups[12]) == "function" then
 			ups[12]()
@@ -7712,19 +7644,43 @@ function STATE.steerStack(step)
 	end
 end
 
+function STATE.mergeSettled(bodies)
+	if type(bodies) ~= "table" then
+		return true
+	end
+	for _, body in ipairs(bodies) do
+		if type(body) == "table" then
+			local vx = type(body.vx) == "number" and body.vx or 0
+			local vy = type(body.vy) == "number" and body.vy or 0
+			if math.abs(vx) > 22 or math.abs(vy) > 22 then
+				return false
+			end
+		end
+	end
+	return true
+end
+
 function STATE.mergeAim(bodies, tier, radius)
 	local aim = nil
 	local room = -1
+	local movingMatch = false
 	local tops = { 100, 100, 100, 100, 100, 100, 100, 100 }
 	if type(bodies) == "table" then
 		for _, body in ipairs(bodies) do
 			if type(body) == "table" and body.tier == tier and type(body.x) == "number" and type(body.y) == "number" and type(body.r) == "number" then
+				local vx = type(body.vx) == "number" and body.vx or 0
+				local vy = type(body.vy) == "number" and body.vy or 0
 				local space = body.y - body.r
-				if space > 24 and space > room then
+				if math.abs(vx) > 22 or math.abs(vy) > 22 then
+					movingMatch = true
+				elseif space > 20 and space > room then
 					room = space
 					aim = body.x
 				end
 			end
+		end
+		if aim == nil and movingMatch then
+			return nil
 		end
 		if aim == nil then
 			for _, body in ipairs(bodies) do
@@ -7743,16 +7699,8 @@ function STATE.mergeAim(bodies, tier, radius)
 					bestColumn = column
 				end
 			end
-			if bestTop >= 22 then
+			if bestTop >= 26 then
 				aim = (bestColumn - 0.5) * 12.5
-			else
-				local highest = math.huge
-				for _, body in ipairs(bodies) do
-					if type(body) == "table" and body.tier == tier and type(body.y) == "number" and body.y < highest and type(body.x) == "number" then
-						highest = body.y
-						aim = body.x
-					end
-				end
 			end
 		end
 	end
@@ -7788,6 +7736,14 @@ function STATE.steerMerge(step)
 	end
 	if type(ups[2]) == "number" and ups[2] > 0 then
 		return
+	end
+	if phase == "play" and not STATE.mergeSettled(ups[12]) then
+		STATE._mergeUnsettled = STATE._mergeUnsettled or os.clock()
+		if os.clock() - STATE._mergeUnsettled < 0.4 then
+			return
+		end
+	else
+		STATE._mergeUnsettled = nil
 	end
 	local tier = type(ups[19]) == "number" and ups[19] or 1
 	local radius = 6
