@@ -4916,15 +4916,22 @@ local function installHub()
 		return camera and camera.ViewportSize or Vector2.new(1280, 720)
 	end
 	local holder
+	local launcher
 	local fullMode = false
 	local applyHubLayout
 	local function fitScale()
 		local view = viewSize()
-		local compact = view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
+		local phone = UserInputService.TouchEnabled and math.min(view.X, view.Y) < 820
+		local compact = phone or view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
 		local medium = not compact and (view.X < 1400 or view.Y < 820)
 		local margin = (compact or fullMode) and 0 or 16
 		local baseW, baseH
-		if compact or fullMode then
+		if phone and not fullMode then
+			baseW = math.max(280, math.floor(view.X * 0.84))
+			baseH = math.max(320, math.floor(view.Y * 0.76))
+			baseW = math.min(baseW, math.max(280, view.X - 20))
+			baseH = math.min(baseH, math.max(280, view.Y - 20))
+		elseif compact or fullMode then
 			baseW = math.max(320, view.X - margin * 2)
 			baseH = math.max(480, view.Y - margin * 2)
 		elseif medium then
@@ -4936,12 +4943,15 @@ local function installHub()
 		end
 		holder.Size = UDim2.fromOffset(baseW, baseH)
 		uiScale.Scale = 1
+		if launcher then
+			launcher.Size = phone and UDim2.fromOffset(232, 120) or UDim2.fromOffset(300, 136)
+		end
 		if applyHubLayout then
 			applyHubLayout(view, compact, baseW)
 		end
 	end
 
-	local launcher = Instance.new("CanvasGroup")
+	launcher = Instance.new("CanvasGroup")
 	launcher.Name = "Zinoos hub"
 	launcher.BackgroundColor3 = side
 	role(launcher, "side")
