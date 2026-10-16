@@ -7656,6 +7656,9 @@ function STATE.steerStack(step)
 	local now = os.clock()
 	if now - (STATE._stackNext or 0) >= 0.34 then
 		mover.x = top.x
+		if typeof(ups[12]) == "function" then
+			ups[12]()
+		end
 		STATE._stackNext = now
 	else
 		local away = top.x + 8
