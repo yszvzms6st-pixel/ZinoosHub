@@ -7211,6 +7211,34 @@ function STATE.phoneScore(gameKey)
 	return best
 end
 
+function STATE.notePhonePeak(key, score)
+	if type(key) ~= "string" or type(score) ~= "number" or score < 1 then
+		return
+	end
+	score = math.floor(score)
+	if STATE._phonePeakKey ~= key then
+		STATE._phonePeakKey = key
+		STATE._phonePeak = score
+		STATE._phoneRunAt = os.clock()
+		return
+	end
+	local previous = STATE._phonePeak or 0
+	if score + 3 < previous then
+		STATE._phoneHeldPeak = math.max(STATE._phoneHeldPeak or 0, previous)
+		STATE._phoneHeldKey = key
+		STATE._phoneHeldAt = STATE._phoneRunAt
+		STATE._phonePeak = score
+		STATE._phoneRunAt = os.clock()
+		return
+	end
+	if previous < 1 then
+		STATE._phoneRunAt = os.clock()
+	end
+	if score > previous then
+		STATE._phonePeak = score
+	end
+end
+
 function STATE.savePhoneScore(game)
 	if type(game) ~= "table" then
 		return false
@@ -7237,6 +7265,15 @@ function STATE.savePhoneScore(game)
 			end
 		end
 	end
+	if shown > 0 then
+		STATE.notePhonePeak(game.key, shown)
+	end
+	if STATE._phonePeakKey == game.key and type(STATE._phonePeak) == "number" and STATE._phonePeak > shown then
+		shown = STATE._phonePeak
+	end
+	if STATE._phoneHeldKey == game.key and type(STATE._phoneHeldPeak) == "number" and STATE._phoneHeldPeak > shown then
+		shown = STATE._phoneHeldPeak
+	end
 	if shown < 1 then
 		return false
 	end
@@ -7247,12 +7284,7 @@ function STATE.savePhoneScore(game)
 	if shown <= saved then
 		return false
 	end
-	local elapsed = os.clock() - (STATE._phoneRoundAt or os.clock())
-	if elapsed < 0 then
-		elapsed = 0
-	end
-	local cap = math.floor(elapsed * game.per + game.slack)
-	local score = math.floor(math.min(shown, game.max, math.max(0, cap)))
+	local score = math.floor(math.min(shown, game.max))
 	if score <= saved then
 		return false
 	end
@@ -7279,8 +7311,53 @@ function STATE.savePhoneScore(game)
 			bests:set(copy)
 		end)
 	end
-	STATE._phoneBanked = true
+	if STATE._phoneHeldKey == game.key and result.best >= (STATE._phoneHeldPeak or 0) then
+		STATE._phoneHeldPeak = nil
+		STATE._phoneHeldKey = nil
+		STATE._phoneHeldAt = nil
+	end
+	if result.best >= score then
+		STATE._phoneBanked = true
+	end
 	return result.best >= score
+end
+
+function STATE.saveCurrentPhone()
+	local key = STATE._phoneKey
+	if type(key) ~= "string" then
+		return false
+	end
+	local limits = STATE.phoneLimits()
+	for _, item in ipairs(limits) do
+		if item.key == key then
+			return STATE.savePhoneScore(item)
+		end
+	end
+	return false
+end
+
+function STATE.hookPhoneLeave()
+	local props = STATE._phoneProps
+	local page = type(props) == "table" and props.page or nil
+	if type(page) ~= "table" or type(page.set) ~= "function" or page.set == STATE._phonePageHook then
+		return
+	end
+	local previous = page.set
+	local function hook(self, nextPage)
+		if nextPage == nil and self ~= page then
+			nextPage = self
+			self = page
+		end
+		if type(nextPage) == "string" and type(STATE._phoneKey) == "string" and nextPage ~= STATE._phoneKey then
+			pcall(STATE.saveCurrentPhone)
+		end
+		if type(nextPage) == "string" then
+			STATE._phonePage = nextPage
+		end
+		return previous(self, nextPage)
+	end
+	STATE._phonePageHook = hook
+	page.set = hook
 end
 
 function STATE.pullPhoneBests()
@@ -7311,9 +7388,12 @@ end
 function STATE.notePhoneRound(phase)
 	if phase == "play" then
 		if STATE._phoneWasPlay ~= true and STATE._phoneSawRound == true then
-			STATE._phoneRoundAt = os.clock()
-			STATE._phoneBanked = false
-			STATE._phoneHoldAt = nil
+			local peak = STATE._phonePeakKey == STATE._phoneKey and STATE._phonePeak or 0
+			if peak < 5 then
+				STATE._phoneRoundAt = os.clock()
+				STATE._phoneBanked = false
+				STATE._phoneHoldAt = nil
+			end
 		end
 		STATE._phoneWasPlay = true
 		STATE._phoneSawRound = true
@@ -7369,6 +7449,7 @@ function STATE.openPhoneGame(game)
 		phone:Open()
 	end
 	props.page:set(game.key)
+	STATE._phonePage = game.key
 	STATE._phoneIndex = game.index
 	STATE._phoneKey = game.key
 	STATE._phoneStep = nil
@@ -7419,7 +7500,7 @@ function STATE.stepPhoneGames()
 					break
 				end
 			end
-			if game and STATE._phoneBanked ~= true then
+			if game then
 				pcall(STATE.savePhoneScore, game)
 			end
 			STATE._phoneRunning = false
@@ -7463,15 +7544,30 @@ function STATE.stepPhoneGames()
 	local resumed = STATE._phonePaused == true
 	STATE._phonePaused = false
 	local props = STATE._phoneProps
+	STATE.hookPhoneLeave()
+	if STATE._phoneNeedSave == true then
+		STATE._phoneNeedSave = false
+		STATE._phoneSavedRound = STATE._phoneRoundAt
+		pcall(STATE.saveCurrentPhone)
+	end
+	local liveScore = STATE.phoneScore(game.key)
+	if type(liveScore) == "number" then
+		STATE.notePhonePeak(game.key, liveScore)
+	end
 	local needStart = resumed or type(props) ~= "table" or not phone:IsOpen() or STATE._phoneKey ~= game.key
+	if not needStart and type(STATE._phonePage) == "string" and STATE._phonePage ~= game.key then
+		needStart = true
+	end
 	if needStart then
 		if type(STATE._phoneKey) == "string" and STATE._phoneKey ~= game.key then
 			for _, item in ipairs(limits) do
-				if item.key == STATE._phoneKey and STATE._phoneBanked ~= true then
+				if item.key == STATE._phoneKey then
 					pcall(STATE.savePhoneScore, item)
 					break
 				end
 			end
+		elseif type(STATE._phonePage) == "string" and STATE._phonePage ~= game.key then
+			pcall(STATE.saveCurrentPhone)
 		end
 		if not STATE.openPhoneGame(game) then
 			error("Phone game did not start")
@@ -7552,13 +7648,25 @@ function STATE.steerFlappy(step)
 	ups[6].autoplay = false
 	local phase = ups[4](ups[5])
 	STATE.notePhoneRound(phase)
+	if typeof(ups[4]) == "function" and type(ups[15]) == "table" then
+		local ok, value = pcall(ups[4], ups[15])
+		if ok then
+			STATE.notePhonePeak("Flappy", value)
+		end
+	end
 	if phase == "menu" then
 		STATE._phoneHoldAt = nil
 		ups[8]()
 		return
 	end
 	if phase == "over" or phase == "dead" then
+		if STATE._phoneSavedRound ~= STATE._phoneRoundAt then
+			STATE._phoneNeedSave = true
+		end
 		STATE._phoneHoldAt = STATE._phoneHoldAt or os.clock()
+		if STATE._phoneNeedSave == true then
+			return
+		end
 		if phase == "over" and os.clock() - STATE._phoneHoldAt >= 2.5 then
 			STATE._phoneHoldAt = nil
 			ups[8]()
@@ -7606,6 +7714,12 @@ function STATE.steerStack(step)
 	end
 	local phase = ups[6](ups[7])
 	STATE.notePhoneRound(phase)
+	if typeof(ups[6]) == "function" and type(ups[18]) == "table" then
+		local ok, value = pcall(ups[6], ups[18])
+		if ok then
+			STATE.notePhonePeak("Stack", value)
+		end
+	end
 	if phase == "menu" then
 		if typeof(ups[10]) == "function" then
 			ups[10]()
@@ -7613,7 +7727,13 @@ function STATE.steerStack(step)
 		return
 	end
 	if phase == "over" or phase == "dead" then
+		if STATE._phoneSavedRound ~= STATE._phoneRoundAt then
+			STATE._phoneNeedSave = true
+		end
 		STATE._phoneHoldAt = STATE._phoneHoldAt or os.clock()
+		if STATE._phoneNeedSave == true then
+			return
+		end
 		if phase == "over" and os.clock() - STATE._phoneHoldAt >= 2.5 and typeof(ups[10]) == "function" then
 			STATE._phoneHoldAt = nil
 			ups[10]()
@@ -7720,7 +7840,13 @@ function STATE.steerMerge(step)
 	local phase = ups[3](ups[4])
 	STATE.notePhoneRound(phase)
 	if phase == "over" then
+		if STATE._phoneSavedRound ~= STATE._phoneRoundAt then
+			STATE._phoneNeedSave = true
+		end
 		STATE._phoneHoldAt = STATE._phoneHoldAt or os.clock()
+		if STATE._phoneNeedSave == true then
+			return
+		end
 		if os.clock() - STATE._phoneHoldAt >= 2.5 and typeof(ups[7]) == "function" then
 			STATE._phoneHoldAt = nil
 			ups[7]()
