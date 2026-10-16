@@ -29,7 +29,7 @@ Running it again replaces the hub that is already open. The new run stops the pr
 - Can take the free stash, lighten pet visuals, and draw egg and inventory ESP.
 - Low End lowers this session's graphics only. It does not change the saved Roblox quality setting.
 - Sends a Discord message when an eligible egg matching the selected rarity appears, is stolen, or hatches.
-- Anti AFK keeps the session in the game while you are idle. It tries VirtualUser first, then VirtualInputManager, and pulses again every eight minutes. It does not move the character, leave the bench, or press anything on screen. If neither input method exists, the switch stays on and the tracker says Anti AFK is unavailable.
+- Anti AFK keeps the session in the game while you are idle. It tries VirtualUser first, then VirtualInputManager, and pulses again every eight minutes. It does not move the character, leave the bench, or press anything on screen. If neither input method exists, the switch stays on and the tracker says Anti AFK is unavailable. The eight-minute gap matches the idle pulse in the script.
 
 A fresh save turns these on: Auto Train, Anti AFK, Auto Rebirth, Auto Upgrade, Auto Trails, Auto Steal, Auto Open, Equip Best, Auto Daily, Auto Index, Free Stash, Lite Pets, Egg ESP, Inventory ESP, Low End, and Webhook Alerts. An existing configuration file is loaded once at startup and kept. Saved toggles, the webhook URL, menu position, and rarity stay as they were. A missing zone, or an old automatic Prehistoric zone, becomes Meadow until you choose a zone. Auto Sell stays off.
 
@@ -37,9 +37,15 @@ Press **Right Control** to open or close the menu. Drag the top bar or the sideb
 
 ## Saved configuration
 
-The hub writes `Rayfield/Configurations/ZinoosHub/ZinoosHub.rfld` in the executor workspace.
+The hub writes one file per account:
 
-That file stores the Discord webhook URL as plain text. Anyone who can read the executor workspace can read the URL. Do not share that file.
+`Rayfield/Configurations/ZinoosHub/ZinoosHub_<UserId>.rfld`
+
+`<UserId>` is your Roblox user id. If that id is missing, it falls back to:
+
+`Rayfield/Configurations/ZinoosHub/ZinoosHub.rfld`
+
+Both paths are in the executor workspace. The file stores the Discord webhook URL as plain text. Anyone who can read the executor workspace can read the URL. Do not share that file. The webhook box in the menu is hidden until you press Show webhook. Hiding the box does not encrypt the file.
 
 ## Unload and reload
 

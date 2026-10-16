@@ -675,6 +675,9 @@ local function bindFeatures()
 		{ name = "Net.FireServer", test = function()
 			return hasFire
 		end },
+		{ name = "Plot.Slots", test = function()
+			return typeof(Plot) == "table" and typeof(Plot.Slots) == "function"
+		end },
 		{ name = "Pets.IncomeFor", test = function()
 			return typeof(Pets) == "table" and typeof(Pets.IncomeFor) == "function"
 		end },
@@ -1417,8 +1420,119 @@ function STATE.placementChoice(value)
 	return "Highest Rarity First"
 end
 
-function STATE.plotRoom()
-	local data = readData()
+function STATE.plotData()
+	if type(STATE._plotTestData) == "function" then
+		return STATE._plotTestData()
+	end
+	return readData()
+end
+
+function STATE.plotInvoke(name, ...)
+	if type(STATE._plotTestInvoke) == "function" then
+		return STATE._plotTestInvoke(name, ...)
+	end
+	return Net:FireServer(name, ...)
+end
+
+function STATE.acquirePlot(reason, toggleName)
+	if STATE._plotLock ~= nil or not running() then
+		return nil
+	end
+	if type(toggleName) == "string" and STATE[toggleName] ~= true then
+		return nil
+	end
+	local lock = {
+		reason = reason,
+		toggle = toggleName,
+		gen = STATE._gen,
+		token = genv.ZinoosGen,
+	}
+	STATE._plotLock = lock
+	return lock
+end
+
+function STATE.releasePlot(lock)
+	if lock ~= nil and STATE._plotLock == lock then
+		STATE._plotLock = nil
+	end
+end
+
+function STATE.plotOwns(lock, toggleName)
+	if type(lock) ~= "table" or STATE._plotLock ~= lock then
+		return false, "Feature cancelled"
+	end
+	if not running() or lock.gen ~= STATE._gen or lock.token ~= genv.ZinoosGen then
+		return false, "Generation replaced"
+	end
+	local toggle = toggleName or lock.toggle
+	if type(toggle) == "string" and STATE[toggle] ~= true then
+		return false, "Feature cancelled"
+	end
+	return true
+end
+
+function STATE.plotPetRecord(data, uid)
+	local pets = type(data) == "table" and data.plotPets or nil
+	if type(pets) ~= "table" or type(uid) ~= "string" then
+		return nil
+	end
+	if type(pets[uid]) == "table" then
+		return pets[uid]
+	end
+	for _, pet in pairs(pets) do
+		if type(pet) == "table" and pet.uid ~= nil and tostring(pet.uid) == uid then
+			return pet
+		end
+	end
+	return nil
+end
+
+function STATE.petCoords(pet)
+	local pos = type(pet) == "table" and pet.pos or nil
+	if type(pos) ~= "table" then
+		return nil, nil
+	end
+	local x = pos.x or pos.X
+	local z = pos.z or pos.Z
+	if type(x) ~= "number" or type(z) ~= "number" then
+		return nil, nil
+	end
+	return x, z
+end
+
+function STATE.waitPlot(lock, toggleName, predicate)
+	local testing = type(STATE._plotTestInvoke) == "function" or type(STATE._plotTestData) == "function"
+	local ticks = 0
+	local deadline = os.clock() + 2.4
+	while true do
+		local owns, why = STATE.plotOwns(lock, toggleName)
+		if not owns then
+			return false, why
+		end
+		local data = STATE.plotData()
+		if predicate(data) == true then
+			return true
+		end
+		if testing then
+			ticks += 1
+			if ticks >= 6 then
+				break
+			end
+		elseif os.clock() >= deadline then
+			break
+		else
+			task.wait(0.12)
+		end
+	end
+	local owns, why = STATE.plotOwns(lock, toggleName)
+	if not owns then
+		return false, why
+	end
+	return false, "Timed out waiting for confirmation"
+end
+
+function STATE.plotRoom(data)
+	data = data or STATE.plotData()
 	if type(data) ~= "table" or typeof(Plot) ~= "table" or typeof(Plot.Slots) ~= "function" then
 		return nil
 	end
@@ -1427,21 +1541,30 @@ function STATE.plotRoom()
 		level = 0
 	end
 	local ok, slots = pcall(Plot.Slots, level)
-	if not ok or type(slots) ~= "number" then
+	if not ok or type(slots) ~= "number" or slots < 1 then
 		return nil
 	end
-	local occupied = 0
+	local animals = 0
+	local eggs = 0
 	if type(data.plotPets) == "table" then
 		for _, pet in pairs(data.plotPets) do
 			if type(pet) == "table" then
-				occupied += 1
+				local spec = petSpec(pet.key)
+				if pet.hatchAt ~= nil or (spec and spec.IsEgg) then
+					eggs += 1
+				else
+					animals += 1
+				end
 			end
 		end
 	end
 	return {
+		activeAnimals = animals,
+		growingEggs = eggs,
+		activeSlots = slots,
+		free = animals < slots,
 		slots = slots,
-		occupied = occupied,
-		free = occupied < slots,
+		occupied = animals,
 	}
 end
 
@@ -1450,18 +1573,22 @@ function STATE.placeHoldActive()
 	if room and room.free == true then
 		STATE.placeHoldUntil = 0
 		STATE.placeHoldCount = nil
-	elseif room and type(STATE.placeHoldCount) == "number" and room.occupied < STATE.placeHoldCount then
+	elseif room and type(STATE.placeHoldCount) == "number" and room.activeAnimals < STATE.placeHoldCount then
 		STATE.placeHoldUntil = 0
 		STATE.placeHoldCount = nil
 	end
-	return os.clock() < (STATE.placeHoldUntil or 0)
+	return os.clock() < (STATE.placeHoldUntil or 0) and STATE.placeStatus == "Confirmed full"
 end
 
 function STATE.markPlaceHold()
 	local room = STATE.plotRoom()
-	STATE.placeHoldCount = room and room.occupied or nil
+	if not room or room.free ~= false then
+		return false
+	end
+	STATE.placeHoldCount = room.activeAnimals
 	STATE.placeHoldUntil = os.clock() + 12
-	STATE.placeStatus = "Plot full"
+	STATE.placeStatus = "Confirmed full"
+	return true
 end
 
 function STATE.petOnPlot(uid)
@@ -1519,16 +1646,33 @@ end
 
 function STATE.placeSelectedEgg(fromSteal)
 	if not running() then
-		return false
+		return "Feature cancelled"
 	end
 	if not fromSteal and STATE.autoPlace ~= true then
 		return nil
 	end
+	local toggleName = fromSteal and "autoSteal" or "autoPlace"
+	local lock = STATE.acquirePlot(fromSteal and "delivery" or "place", toggleName)
+	if not lock then
+		return "Feature cancelled"
+	end
+	local leftTraining = false
+	local function finish(result)
+		if leftTraining then
+			STATE.placeBusy = false
+		end
+		STATE.releasePlot(lock)
+		return result
+	end
 	local function note(text)
-		if fromSteal and STATE.autoPlace ~= true and text ~= "Plot full" then
+		if fromSteal and STATE.autoPlace ~= true and text ~= "Confirmed full" then
 			return
 		end
 		STATE.placeStatus = text
+	end
+	local owns, why = STATE.plotOwns(lock, toggleName)
+	if not owns then
+		return finish(why)
 	end
 	local function withinReach(base)
 		local character = LocalPlayer.Character
@@ -1541,28 +1685,27 @@ function STATE.placeSelectedEgg(fromSteal)
 		return offset.Magnitude <= reach
 	end
 	if STATE.placeHoldActive() then
-		note("Plot full")
-		return "full"
+		note("Confirmed full")
+		return finish("Confirmed full")
 	end
 	local chosen = STATE.collectPlaceEggs()[1]
 	if not chosen or typeof(chosen.tool) ~= "Instance" then
 		if not fromSteal then
 			note("No selected eggs")
 		end
-		return nil
+		return finish(nil)
 	end
 	local tool = chosen.tool
 	local uid = chosen.uid
 	local eggName = type(chosen.name) == "string" and chosen.name or "egg"
 	if type(uid) ~= "string" or not STATE.eggWorthPlacing(tool) then
-		return nil
+		return finish("Selection became invalid")
 	end
 	local character = LocalPlayer.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
-		return false
+		return finish("Away from plot")
 	end
-	local leftTraining = false
 	if not fromSteal and (LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true) then
 		STATE.placeBusy = true
 		leftTraining = true
@@ -1574,19 +1717,13 @@ function STATE.placeSelectedEgg(fromSteal)
 			task.wait(0.1)
 		end
 	end
-	local function finish(result)
-		if leftTraining then
-			STATE.placeBusy = false
-		end
-		return result
-	end
 	if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.Get) ~= "function" then
-		return finish(false)
+		return finish("Away from plot")
 	end
 	local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
 	local base = plot and plot:FindFirstChild("Base")
 	if not (base and base:IsA("BasePart")) then
-		return finish(false)
+		return finish("Away from plot")
 	end
 	if fromSteal then
 		local homeUntil = os.clock() + 3
@@ -1595,51 +1732,52 @@ function STATE.placeSelectedEgg(fromSteal)
 		end
 	end
 	if not withinReach(base) then
-		return finish("away")
+		return finish("Away from plot")
+	end
+	owns, why = STATE.plotOwns(lock, toggleName)
+	if not owns then
+		return finish(why)
+	end
+	if tool.Parent == nil or not STATE.eggWorthPlacing(tool) then
+		return finish("Selection became invalid")
 	end
 	note("Placing " .. eggName)
-	local fired = false
-	for attempt = 1, 3 do
-		if not running() or (not fromSteal and STATE.autoPlace ~= true) then
-			return finish(false)
-		end
-		if fired and (tool.Parent == nil or STATE.petOnPlot(uid)) then
-			note("Placed " .. eggName)
-			return finish(true)
-		end
-		if tool.Parent ~= nil and not STATE.eggWorthPlacing(tool) then
-			return finish(nil)
-		end
-		if tool.Parent ~= character then
-			local backpack = LocalPlayer:FindFirstChild("Backpack")
-			if tool.Parent ~= backpack then
-				break
-			end
-			humanoid:EquipTool(tool)
-			task.wait(0.15)
-		end
-		local spread = attempt == 1 and 0.25 or (attempt == 2 and 0.45 or 0.7)
-		local x = (math.random() - 0.5) * base.Size.X * spread
-		local z = (math.random() - 0.5) * base.Size.Z * spread
-		if type(x) ~= "number" or type(z) ~= "number" then
-			break
-		end
-		Net:FireServer("PlacePet", uid, x, z)
-		fired = true
-		task.wait(0.8)
-		if tool.Parent == nil or STATE.petOnPlot(uid) then
-			note("Placed " .. eggName)
-			return finish(true)
-		end
-		if attempt < 3 then
-			task.wait(0.3)
-		end
+	local spread = 0.25
+	local x = (math.random() - 0.5) * base.Size.X * spread
+	local z = (math.random() - 0.5) * base.Size.Z * spread
+	if type(x) ~= "number" or type(z) ~= "number" then
+		return finish("Selection became invalid")
 	end
-	if fired then
-		STATE.markPlaceHold()
-		return finish("full")
+	if tool.Parent ~= character then
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		if tool.Parent ~= backpack then
+			return finish("Selection became invalid")
+		end
+		humanoid:EquipTool(tool)
+		task.wait(0.15)
 	end
-	return finish("away")
+	owns, why = STATE.plotOwns(lock, toggleName)
+	if not owns then
+		return finish(why)
+	end
+	local fired = pcall(STATE.plotInvoke, "PlacePet", uid, x, z)
+	if not fired then
+		STATE.placeStatus = "Remote rejected"
+		return finish("Remote rejected")
+	end
+	local confirmed = STATE.waitPlot(lock, toggleName, function()
+		return tool.Parent == nil or STATE.petOnPlot(uid)
+	end)
+	if confirmed then
+		note("Placed " .. eggName)
+		return finish(true)
+	end
+	local _, waitWhy = STATE.plotOwns(lock, toggleName)
+	if waitWhy == "Generation replaced" or waitWhy == "Feature cancelled" then
+		return finish(waitWhy)
+	end
+	STATE.placeStatus = "Timed out waiting for confirmation"
+	return finish("Timed out waiting for confirmation")
 end
 
 function STATE.stepAutoPlace()
@@ -1659,23 +1797,29 @@ function STATE.stepAutoPlace()
 		return
 	end
 	if STATE.placeHoldActive() then
-		STATE.placeStatus = "Plot full"
+		STATE.placeStatus = "Confirmed full"
 		STATE.nextAutoPlace = STATE.placeHoldUntil
+		return
+	end
+	if STATE._plotLock ~= nil then
 		return
 	end
 	STATE.placeStatus = "Scanning inventory"
 	local placed = STATE.placeSelectedEgg(false)
-	if placed == "full" then
-		STATE.placeStatus = "Plot full"
+	if placed == "Confirmed full" then
+		STATE.placeStatus = "Confirmed full"
 		STATE.nextAutoPlace = os.clock() + 3
-	elseif placed == "away" then
-		STATE.placeStatus = "Scanning inventory"
+	elseif placed == "Away from plot" then
+		STATE.placeStatus = "Away from plot"
 		STATE.nextAutoPlace = os.clock() + 2
 	elseif placed == true then
 		STATE.nextAutoPlace = os.clock() + 0.6
 	elseif placed == nil then
 		STATE.placeStatus = "No selected eggs"
 		STATE.nextAutoPlace = os.clock() + 1.2
+	elseif type(placed) == "string" then
+		STATE.placeStatus = placed
+		STATE.nextAutoPlace = os.clock() + 4
 	else
 		STATE.nextAutoPlace = os.clock() + 4
 	end
@@ -2921,29 +3065,69 @@ local webhookHosts = {
 	["ptb.discord.com"] = true,
 }
 
-local function webhookUrl()
-	local raw = type(STATE.webhook) == "string" and STATE.webhook or ""
-	local url = string.match(raw, "^%s*(https://%S+)%s*$")
-	if not url then
+function STATE.parseWebhook(raw)
+	if type(raw) ~= "string" or raw == "" then
 		return nil
 	end
-	local host, path = string.match(url, "^https://([^/%s]+)(/.*)$")
-	if not host or not path then
+	if string.find(raw, "%s") or string.find(raw, "@", 1, true) or string.find(raw, "?", 1, true) or string.find(raw, "#", 1, true) or string.find(raw, "%%") then
+		return nil
+	end
+	local host, id, token = string.match(raw, "^https://([^/]+)/api/webhooks/([^/]+)/([^/]+)$")
+	if type(host) ~= "string" or type(id) ~= "string" or type(token) ~= "string" then
 		return nil
 	end
 	host = string.lower(host)
-	local portAt = string.find(host, ":", 1, true)
-	if portAt then
-		host = string.sub(host, 1, portAt - 1)
-	end
-	if string.sub(host, 1, 4) == "www." then
-		host = string.sub(host, 5)
-	end
-	local webhookPrefix = "/api/webhooks/"
-	if not webhookHosts[host] or string.sub(path, 1, #webhookPrefix) ~= webhookPrefix then
+	if string.find(host, ":", 1, true) or string.find(host, "@", 1, true) or not webhookHosts[host] then
 		return nil
 	end
-	return url
+	if not string.match(id, "^%d+$") or id == "" then
+		return nil
+	end
+	if not string.match(token, "^[%w_%-]+$") or token == "" then
+		return nil
+	end
+	return "https://" .. host .. "/api/webhooks/" .. id .. "/" .. token
+end
+
+STATE.webhookParserTests = {
+	{ url = "https://discord.com/api/webhooks/123456789012345678/abcDEF_123-token", accept = "https://discord.com/api/webhooks/123456789012345678/abcDEF_123-token" },
+	{ url = "https://discordapp.com/api/webhooks/42/tok", accept = "https://discordapp.com/api/webhooks/42/tok" },
+	{ url = "https://canary.discord.com/api/webhooks/7/Ab", accept = "https://canary.discord.com/api/webhooks/7/Ab" },
+	{ url = "https://ptb.discord.com/api/webhooks/9/Zz", accept = "https://ptb.discord.com/api/webhooks/9/Zz" },
+	{ url = "https://user:pass@discord.com/api/webhooks/1/tok", accept = false },
+	{ url = "https://discord.com:443@evil.example/api/webhooks/1/tok", accept = false },
+	{ url = "https://discord.com/api/webhooks/1/tok?wait=true", accept = false },
+	{ url = "https://discord.com/api/webhooks/1/tok#frag", accept = false },
+	{ url = "https://discord.com/api/webhooks/1/tok%2Fextra", accept = false },
+	{ url = "https://discord.com:443/api/webhooks/1/tok", accept = false },
+	{ url = "https://discord.com:/api/webhooks/1/tok", accept = false },
+	{ url = "https://discord.com:abc/api/webhooks/1/tok", accept = false },
+	{ url = "https://discord.com/api/webhooks/1/tok with space", accept = false },
+	{ url = "https://discord.com.evil.example/api/webhooks/1/tok", accept = false },
+	{ url = "https://evildiscord.com/api/webhooks/1/tok", accept = false },
+	{ url = "https://not.discord.com/api/webhooks/1/tok", accept = false },
+	{ url = "http://discord.com/api/webhooks/1/tok", accept = false },
+	{ url = "https://discord.com/api/webhooks//tok", accept = false },
+	{ url = "https://discord.com/api/webhooks/1/", accept = false },
+	{ url = "https://discord.com/api/webhooks/1/tok/extra", accept = false },
+	{ url = "https://www.discord.com/api/webhooks/1/tok", accept = false },
+}
+
+function STATE.runWebhookParserTests()
+	local failed = {}
+	for index, case in ipairs(STATE.webhookParserTests) do
+		local got = STATE.parseWebhook(case.url)
+		local want = case.accept
+		local ok = (want == false and got == nil) or got == want
+		if not ok then
+			failed[#failed + 1] = index
+		end
+	end
+	return #failed == 0, failed
+end
+
+local function webhookUrl()
+	return STATE.parseWebhook(type(STATE.webhook) == "string" and STATE.webhook or "")
 end
 
 local function webhookRequest()
@@ -3050,26 +3234,130 @@ queueRare = function(kind, name, money, mark)
 	return true
 end
 
-local liteHooked = setmetatable({}, { __mode = "k" })
+function STATE.liteId(inst)
+	if typeof(inst) ~= "Instance" then
+		return nil
+	end
+	local ok, id = pcall(function()
+		return inst:GetDebugId()
+	end)
+	if ok and type(id) == "string" and id ~= "" then
+		return id
+	end
+	local marked = inst:GetAttribute("ZinoosWatch")
+	if type(marked) == "string" and marked ~= "" then
+		return marked
+	end
+	STATE._liteSeq = (STATE._liteSeq or 0) + 1
+	local fresh = "z" .. tostring(STATE._gen or 0) .. "-" .. tostring(STATE._liteSeq)
+	inst:SetAttribute("ZinoosWatch", fresh)
+	return fresh
+end
 
-local function hideOne(child)
+function STATE.ensureLiteGen()
+	if STATE._liteGen == STATE._gen and type(STATE._liteOwned) == "table" and type(STATE._liteRoots) == "table" then
+		return
+	end
+	STATE._liteOwned = {}
+	STATE._liteRoots = {}
+	STATE._liteGen = STATE._gen
+end
+
+function STATE.releaseLiteId(id)
+	local owned = STATE._liteOwned
+	if type(id) ~= "string" or type(owned) ~= "table" then
+		return
+	end
+	local connection = owned[id]
+	owned[id] = nil
+	if connection then
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+end
+
+function STATE.releaseLiteWatch()
+	local owned = STATE._liteOwned
+	if type(owned) == "table" then
+		for id, connection in pairs(owned) do
+			owned[id] = nil
+			if connection then
+				pcall(function()
+					connection:Disconnect()
+				end)
+			end
+		end
+	end
+	local roots = STATE._liteRoots
+	if type(roots) == "table" then
+		for id, pair in pairs(roots) do
+			roots[id] = nil
+			if type(pair) == "table" then
+				for _, connection in ipairs(pair) do
+					pcall(function()
+						connection:Disconnect()
+					end)
+				end
+			end
+		end
+	end
+	STATE._liteOwned = {}
+	STATE._liteRoots = {}
+	STATE._liteGen = STATE._gen
+end
+
+function STATE.hideLitePart(child)
+	if typeof(child) ~= "Instance" then
+		return
+	end
 	if child:IsA("BasePart") then
 		if child.LocalTransparencyModifier ~= 1 then
 			child.LocalTransparencyModifier = 1
 		end
-		if not liteHooked[child] then
-			liteHooked[child] = true
-			STATE.connect(child:GetPropertyChangedSignal("LocalTransparencyModifier"), function()
+		STATE.ensureLiteGen()
+		local id = STATE.liteId(child)
+		if type(id) == "string" and STATE._liteOwned[id] == nil then
+			local connection = STATE.connect(child:GetPropertyChangedSignal("LocalTransparencyModifier"), function()
 				if running() and STATE.litePets == true and child.Parent and child.LocalTransparencyModifier ~= 1 then
 					child.LocalTransparencyModifier = 1
 				end
-			end, child)
+			end)
+			if connection then
+				if STATE._liteOwned[id] == nil then
+					STATE._liteOwned[id] = connection
+				else
+					pcall(function()
+						connection:Disconnect()
+					end)
+				end
+			end
 		end
 		if child.CastShadow then
 			child:SetAttribute("ZinoosShadow", true)
 			child.CastShadow = false
 		end
-	elseif child:IsA("ParticleEmitter") or child:IsA("Trail") or child:IsA("Beam") or child:IsA("Light") or child:IsA("Highlight") then
+	elseif child:IsA("ParticleEmitter") then
+		if child.Enabled then
+			child:SetAttribute("ZinoosHid", true)
+			child.Enabled = false
+		end
+	elseif child:IsA("Trail") then
+		if child.Enabled then
+			child:SetAttribute("ZinoosHid", true)
+			child.Enabled = false
+		end
+	elseif child:IsA("Beam") then
+		if child.Enabled then
+			child:SetAttribute("ZinoosHid", true)
+			child.Enabled = false
+		end
+	elseif child:IsA("Light") then
+		if child.Enabled then
+			child:SetAttribute("ZinoosHid", true)
+			child.Enabled = false
+		end
+	elseif child:IsA("Highlight") then
 		if child.Enabled then
 			child:SetAttribute("ZinoosHid", true)
 			child.Enabled = false
@@ -3077,7 +3365,10 @@ local function hideOne(child)
 	end
 end
 
-local function hideVisual(model)
+function STATE.hideLiteModel(model)
+	if typeof(model) ~= "Instance" or not model:IsA("Model") then
+		return
+	end
 	if model:GetAttribute("ZinoosLite") ~= true then
 		local animator = model:FindFirstChildWhichIsA("Animator", true)
 		if animator then
@@ -3088,17 +3379,57 @@ local function hideVisual(model)
 		model:SetAttribute("ZinoosLite", true)
 	end
 	for _, child in ipairs(model:GetDescendants()) do
-		hideOne(child)
+		STATE.hideLitePart(child)
 	end
-	if liteHooked[model] then
+	STATE.ensureLiteGen()
+	local id = STATE.liteId(model)
+	if type(id) ~= "string" or STATE._liteOwned[id] ~= nil then
 		return
 	end
-	liteHooked[model] = true
-	STATE.connect(model.DescendantAdded, function(child)
+	local connection = STATE.connect(model.DescendantAdded, function(child)
 		if running() and STATE.litePets == true then
-			hideOne(child)
+			STATE.hideLitePart(child)
 		end
-	end, model)
+	end)
+	if connection then
+		if STATE._liteOwned[id] == nil then
+			STATE._liteOwned[id] = connection
+		else
+			pcall(function()
+				connection:Disconnect()
+			end)
+		end
+	end
+end
+
+function STATE.watchLiteRoot(root)
+	if typeof(root) ~= "Instance" or STATE.litePets ~= true then
+		return
+	end
+	STATE.ensureLiteGen()
+	local id = STATE.liteId(root)
+	if type(id) ~= "string" or STATE._liteRoots[id] ~= nil then
+		return
+	end
+	local added = STATE.connect(root.DescendantAdded, function(inst)
+		if running() and STATE.litePets == true and inst:IsA("Model") then
+			STATE.hideLiteModel(inst)
+		end
+	end)
+	local removing = STATE.connect(root.DescendantRemoving, function(inst)
+		STATE.releaseLiteId(STATE.liteId(inst))
+	end)
+	if STATE._liteRoots[id] == nil then
+		STATE._liteRoots[id] = { added, removing }
+	end
+end
+
+local function hideOne(child)
+	STATE.hideLitePart(child)
+end
+
+local function hideVisual(model)
+	STATE.hideLiteModel(model)
 end
 
 local function showVisual(model)
@@ -3168,6 +3499,8 @@ local function stepView()
 		end
 	end
 	if lite then
+		STATE.watchLiteRoot(owned)
+		STATE.watchLiteRoot(friends)
 		eachPlaced(hideVisual)
 		if friends then
 			for _, model in ipairs(friends:GetChildren()) do
@@ -3177,6 +3510,7 @@ local function stepView()
 			end
 		end
 	elseif STATE._liteWasOn == true then
+		STATE.releaseLiteWatch()
 		eachPlaced(showVisual)
 		if friends then
 			for _, model in ipairs(friends:GetChildren()) do
@@ -3683,9 +4017,13 @@ function STATE.themeColor(value, fallback)
 	if type(value) ~= "string" then
 		return fallback
 	end
-	local hex = string.lower(string.match(value, "^%s*#?([%x]+)%s*$") or "")
-	if string.sub(hex, 1, 2) == "0x" then
-		hex = string.sub(hex, 3)
+	local trimmed = string.lower(string.match(value, "^%s*(.-)%s*$") or "")
+	local hex = string.match(trimmed, "^#([%x]+)$") or string.match(trimmed, "^([%x]+)$")
+	if not hex then
+		hex = string.match(trimmed, "^0x([%x]+)$")
+	end
+	if type(hex) ~= "string" then
+		return fallback
 	end
 	if #hex == 3 then
 		hex = string.sub(hex, 1, 1) .. string.sub(hex, 1, 1) .. string.sub(hex, 2, 2) .. string.sub(hex, 2, 2) .. string.sub(hex, 3, 3) .. string.sub(hex, 3, 3)
@@ -3762,6 +4100,12 @@ function STATE.readTheme(raw)
 	side = side or panel
 	card = card or panel
 	local muted = STATE.themeColor(pick(colors, "DimText", "dimText", "Muted", "SubText") or pick(body, "DimText", "dimText"), ink)
+	if muted and card then
+		local gap = math.abs(muted.R - card.R) + math.abs(muted.G - card.G) + math.abs(muted.B - card.B)
+		if gap < 0.45 then
+			muted = ink
+		end
+	end
 	local hover = STATE.themeColor(pick(colors, "Hover", "hover") or pick(body, "Hover", "hover"), panel)
 	local outline = STATE.themeColor(pick(colors, "Outline", "outline", "Stroke") or pick(body, "Outline", "outline"), accent)
 	local risky = STATE.themeColor(pick(colors, "Risky", "risky") or pick(body, "Risky", "risky"), Color3.new(1, 1, 1))
@@ -3785,6 +4129,9 @@ function STATE.readTheme(raw)
 	end
 	if type(wallUrl) ~= "string" or string.sub(wallUrl, 1, 8) ~= "https://" then
 		wallUrl = nil
+	end
+	if type(wallUrl) == "string" then
+		opacity = math.max(opacity, 0.84)
 	end
 	if type(wallFade) ~= "number" then
 		wallFade = 0
@@ -4112,56 +4459,250 @@ end
 
 local pulseAntiAfk
 
-function STATE.themeAsset(url, fileName)
-	if type(url) ~= "string" or type(fileName) ~= "string" then
+function STATE.canonicalHttps(raw)
+	if type(raw) ~= "string" or raw == "" then
+		return nil
+	end
+	if string.find(raw, "%s") or string.find(raw, "@", 1, true) or string.find(raw, "?", 1, true) or string.find(raw, "#", 1, true) or string.find(raw, "%%") then
+		return nil
+	end
+	local host, path = string.match(raw, "^https://([^/%?#]+)(/[^%?#]*)$")
+	if not host then
+		host = string.match(raw, "^https://([^/%?#]+)$")
+		path = "/"
+	end
+	if type(host) ~= "string" or string.find(host, ":", 1, true) or not string.match(host, "^[%w%-%.]+$") then
+		return nil
+	end
+	if type(path) ~= "string" or string.find(path, "?", 1, true) or string.find(path, "#", 1, true) then
+		return nil
+	end
+	return "https://" .. string.lower(host) .. path
+end
+
+function STATE.hashUrl(url)
+	local h1 = 2166136261
+	local h2 = 16777619
+	for index = 1, #url do
+		local byte = string.byte(url, index)
+		h1 = bit32.bxor(h1, byte)
+		h1 = bit32.band(h1 * 16777619, 4294967295)
+		h2 = bit32.bxor(h2, bit32.lrotate(byte, index % 8))
+		h2 = bit32.band(h2 * 2246822519, 4294967295)
+	end
+	return string.format("%08x%08x", h1, h2)
+end
+
+function STATE.imageFormat(body)
+	if type(body) ~= "string" or #body < 12 then
+		return nil
+	end
+	if string.byte(body, 1) == 137 and string.sub(body, 2, 4) == "PNG" and string.byte(body, 5) == 13 then
+		return "png"
+	end
+	if string.byte(body, 1) == 255 and string.byte(body, 2) == 216 and string.byte(body, 3) == 255 then
+		return "jpeg"
+	end
+	if string.sub(body, 1, 4) == "RIFF" and string.sub(body, 9, 12) == "WEBP" then
+		return "webp"
+	end
+	return nil
+end
+
+function STATE.themeDir()
+	return STATE._themeRoot or "ZinoosHub/theme"
+end
+
+function STATE.ensureThemeFolders()
+	if typeof(makefolder) ~= "function" then
+		return
+	end
+	pcall(makefolder, "ZinoosHub")
+	pcall(makefolder, STATE.themeDir())
+end
+
+function STATE.readThemeManifest()
+	if typeof(readfile) ~= "function" then
+		return {}
+	end
+	local path = STATE.themeDir() .. "/manifest.json"
+	local ok, text = pcall(readfile, path)
+	if not ok or type(text) ~= "string" or text == "" then
+		return {}
+	end
+	local decodedOk, decoded = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(text)
+	end)
+	if decodedOk and type(decoded) == "table" then
+		return decoded
+	end
+	return {}
+end
+
+function STATE.writeThemeManifest(manifest)
+	if typeof(writefile) ~= "function" or type(manifest) ~= "table" then
+		return
+	end
+	local ok, encoded = pcall(function()
+		return game:GetService("HttpService"):JSONEncode(manifest)
+	end)
+	if ok then
+		pcall(writefile, STATE.themeDir() .. "/manifest.json", encoded)
+	end
+end
+
+function STATE.themeStillCurrent(gen, token)
+	return running() and STATE._gen == gen and genv.ZinoosGen == token and STATE._unloaded ~= true
+end
+
+function STATE.storeThemeBody(url, body, gen, token)
+	local canonical = STATE.canonicalHttps(url)
+	if not canonical or type(body) ~= "string" then
+		return nil
+	end
+	if not STATE.themeStillCurrent(gen, token) then
+		return nil
+	end
+	-- HttpGet already materialized this response in memory. The limit below
+	-- refuses disk writes and decoding. It does not prevent that download.
+	if #body > 5 * 1024 * 1024 or #body < 12 then
+		return nil
+	end
+	local format = STATE.imageFormat(body)
+	if not format then
 		return nil
 	end
 	if typeof(writefile) ~= "function" or typeof(getcustomasset) ~= "function" then
 		return nil
 	end
-	local ok, body = pcall(function()
-		return game:HttpGet(url)
-	end)
-	if not ok or type(body) ~= "string" or #body < 64 then
+	STATE.ensureThemeFolders()
+	if not STATE.themeStillCurrent(gen, token) then
 		return nil
 	end
-	local path = "ZinoosHub/theme/" .. fileName
+	local key = STATE.hashUrl(canonical)
+	local path = STATE.themeDir() .. "/" .. key .. "." .. format
+	local manifest = STATE.readThemeManifest()
+	local existing = manifest[key]
+	if type(existing) == "table" and existing.path == path and typeof(isfile) == "function" and isfile(path) then
+		local cachedOk, cached = pcall(readfile, path)
+		if cachedOk and STATE.imageFormat(cached) == format then
+			if not STATE.themeStillCurrent(gen, token) then
+				return nil
+			end
+			local assetOk, asset = pcall(getcustomasset, path)
+			if assetOk and type(asset) == "string" and asset ~= "" then
+				return asset
+			end
+		end
+	end
+	if not STATE.themeStillCurrent(gen, token) then
+		return nil
+	end
 	if not pcall(writefile, path, body) then
 		return nil
 	end
+	manifest[key] = { path = path, at = os.time(), format = format }
+	local oldestKey = nil
+	local oldestAt = math.huge
+	local count = 0
+	for itemKey, item in pairs(manifest) do
+		if itemKey ~= "order" and type(item) == "table" then
+			count += 1
+			local at = type(item.at) == "number" and item.at or 0
+			if at < oldestAt then
+				oldestAt = at
+				oldestKey = itemKey
+			end
+		end
+	end
+	if count > 16 and type(oldestKey) == "string" and oldestKey ~= key then
+		local old = manifest[oldestKey]
+		manifest[oldestKey] = nil
+		if type(old) == "table" and type(old.path) == "string" and typeof(delfile) == "function" then
+			pcall(delfile, old.path)
+		end
+	end
+	if not STATE.themeStillCurrent(gen, token) then
+		if typeof(delfile) == "function" then
+			pcall(delfile, path)
+		end
+		return nil
+	end
+	STATE.writeThemeManifest(manifest)
 	local assetOk, asset = pcall(getcustomasset, path)
+	if not STATE.themeStillCurrent(gen, token) then
+		return nil
+	end
 	if assetOk and type(asset) == "string" and asset ~= "" then
 		return asset
 	end
 	return nil
 end
 
-function STATE.loadThemeImages()
-	local theme = STATE.hubThemeDef()
-	local function tag(url)
-		local clean = string.gsub(url, "[^%w]", "")
-		if #clean > 36 then
-			clean = string.sub(clean, -36)
-		end
-		return clean
+function STATE.themeAsset(url, gen, token)
+	local canonical = STATE.canonicalHttps(url)
+	if not canonical then
+		return nil
 	end
+	gen = gen or STATE._gen
+	token = token or genv.ZinoosGen
+	if not STATE.themeStillCurrent(gen, token) then
+		return nil
+	end
+	local key = STATE.hashUrl(canonical)
+	local manifest = STATE.readThemeManifest()
+	local existing = manifest[key]
+	if type(existing) == "table" and type(existing.path) == "string" and typeof(isfile) == "function" and isfile(existing.path) and typeof(readfile) == "function" then
+		local cachedOk, cached = pcall(readfile, existing.path)
+		if cachedOk and STATE.imageFormat(cached) == existing.format then
+			if not STATE.themeStillCurrent(gen, token) then
+				return nil
+			end
+			local assetOk, asset = pcall(getcustomasset, existing.path)
+			if assetOk and type(asset) == "string" and asset ~= "" and STATE.themeStillCurrent(gen, token) then
+				return asset
+			end
+		end
+	end
+	if typeof(game.HttpGet) ~= "function" then
+		return nil
+	end
+	local ok, body = pcall(function()
+		return game:HttpGet(canonical)
+	end)
+	if not STATE.themeStillCurrent(gen, token) then
+		return nil
+	end
+	if not ok or type(body) ~= "string" then
+		return nil
+	end
+	return STATE.storeThemeBody(canonical, body, gen, token)
+end
+
+function STATE.loadThemeImages()
+	local gen = STATE._gen
+	local token = genv.ZinoosGen
+	local theme = STATE.hubThemeDef()
 	if theme.icon and type(theme.iconUrl) == "string" then
-		local icon = STATE.themeAsset(theme.iconUrl, "icon-" .. tag(theme.iconUrl) .. ".jpg")
-		if type(icon) == "string" then
+		local icon = STATE.themeAsset(theme.iconUrl, gen, token)
+		if STATE.themeStillCurrent(gen, token) and type(icon) == "string" then
 			STATE.themeIcon = icon
 		end
-	else
+	elseif STATE.themeStillCurrent(gen, token) then
 		STATE.themeIcon = nil
 	end
+	if not STATE.themeStillCurrent(gen, token) then
+		return
+	end
 	if theme.wallpaper and type(theme.wallUrl) == "string" then
-		local photo = STATE.themeAsset(theme.wallUrl, "wall-" .. tag(theme.wallUrl) .. ".jpg")
-		if type(photo) == "string" then
+		local photo = STATE.themeAsset(theme.wallUrl, gen, token)
+		if STATE.themeStillCurrent(gen, token) and type(photo) == "string" then
 			STATE.themeWall = photo
 		end
-	else
+	elseif STATE.themeStillCurrent(gen, token) then
 		STATE.themeWall = nil
 	end
-	if STATE.applyLook then
+	if STATE.themeStillCurrent(gen, token) and STATE.applyLook then
 		STATE.applyLook()
 	end
 end
@@ -4248,14 +4789,28 @@ local function installHub()
 	end
 	local holder
 	local fullMode = false
+	local applyHubLayout
 	local function fitScale()
 		local view = viewSize()
-		local margin = 24
-		local baseW = fullMode and math.max(760, view.X - margin * 2) or 972
-		local baseH = fullMode and math.max(520, view.Y - margin * 2) or 668
+		local compact = view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
+		local medium = not compact and (view.X < 1400 or view.Y < 820)
+		local margin = (compact or fullMode) and 0 or 16
+		local baseW, baseH
+		if compact or fullMode then
+			baseW = math.max(320, view.X - margin * 2)
+			baseH = math.max(480, view.Y - margin * 2)
+		elseif medium then
+			baseW = math.min(972, math.max(640, view.X - 32))
+			baseH = math.min(668, math.max(480, view.Y - 32))
+		else
+			baseW = 972
+			baseH = 668
+		end
 		holder.Size = UDim2.fromOffset(baseW, baseH)
-		local scale = math.min((view.X - margin * 2) / baseW, (view.Y - margin * 2) / baseH, 1)
-		uiScale.Scale = math.clamp(scale, 0.35, 1)
+		uiScale.Scale = 1
+		if applyHubLayout then
+			applyHubLayout(view, compact, baseW)
+		end
 	end
 
 	local launcher = Instance.new("CanvasGroup")
@@ -4425,6 +4980,14 @@ local function installHub()
 	wallpaperImage.ImageTransparency = 1
 	wallpaperImage.ZIndex = 1
 	wallpaperImage.Parent = wallpaper
+	local wallpaperScrim = Instance.new("Frame")
+	wallpaperScrim.Name = "Scrim"
+	wallpaperScrim.BackgroundColor3 = Color3.new(0, 0, 0)
+	wallpaperScrim.BackgroundTransparency = 0.38
+	wallpaperScrim.BorderSizePixel = 0
+	wallpaperScrim.Size = UDim2.fromScale(1, 1)
+	wallpaperScrim.ZIndex = 2
+	wallpaperScrim.Parent = wallpaper
 
 	local sideWrap = Instance.new("CanvasGroup")
 	sideWrap.Name = "SideWrap"
@@ -4713,6 +5276,12 @@ local function installHub()
 		if holder.Visible then
 			playCards(pages[name])
 		end
+		if name == "Discord" then
+			STATE.webhookReveal = false
+			if STATE.applyWebhookMask then
+				STATE.applyWebhookMask()
+			end
+		end
 	end
 
 	local function onActivate(control, callback, selectable)
@@ -4764,12 +5333,26 @@ local function installHub()
 		local button = Instance.new("TextButton")
 		button.Name = name
 		button.AutoButtonColor = false
-		button.Text = "      " .. name
+		button.Text = ""
 		button.Font = Enum.Font.GothamMedium
 		button.TextSize = 15
 		button.TextColor3 = ink
-		role(button, "ink")
 		button.TextXAlignment = Enum.TextXAlignment.Left
+		local navPad = Instance.new("UIPadding")
+		navPad.PaddingLeft = UDim.new(0, 36)
+		navPad.Parent = button
+		local navLabel = Instance.new("TextLabel")
+		navLabel.Name = "Label"
+		navLabel.BackgroundTransparency = 1
+		navLabel.Font = Enum.Font.GothamMedium
+		navLabel.Text = name
+		navLabel.TextSize = 15
+		navLabel.TextColor3 = ink
+		role(navLabel, "ink")
+		navLabel.TextXAlignment = Enum.TextXAlignment.Left
+		navLabel.Size = UDim2.new(1, -8, 1, 0)
+		navLabel.ZIndex = 6
+		navLabel.Parent = button
 		button.BackgroundColor3 = selected
 		button.BackgroundTransparency = 1
 		button.BorderSizePixel = 0
@@ -5779,7 +6362,7 @@ local function installHub()
 		elseif #eggs == 0 or eligible == 0 then
 			lines[#lines + 1] = "No matching eggs"
 		end
-		if STATE.placeStatus == "Plot full" or (STATE.autoPlace == true and type(STATE.placeStatus) == "string" and STATE.placeStatus ~= "") then
+		if STATE.placeStatus == "Confirmed full" or (STATE.autoPlace == true and type(STATE.placeStatus) == "string" and STATE.placeStatus ~= "") then
 			lines[#lines + 1] = STATE.placeStatus
 		end
 		if STATE.antiAfk == true then
@@ -5852,9 +6435,21 @@ local function installHub()
 	urlBox.TextSize = 13
 	urlBox.TextXAlignment = Enum.TextXAlignment.Left
 	urlBox.LayoutOrder = 3
-	urlBox.Size = UDim2.new(1, 0, 0, 32)
+	urlBox.Size = UDim2.new(1, 0, 0, 36)
 	urlBox.ZIndex = 6
 	urlBox.Parent = discordCard
+	local webhookMask = Instance.new("TextLabel")
+	webhookMask.Name = "Mask"
+	webhookMask.BackgroundTransparency = 1
+	webhookMask.Font = Enum.Font.Gotham
+	webhookMask.Text = "••••••••••••"
+	webhookMask.TextColor3 = ink
+	webhookMask.TextSize = 13
+	webhookMask.TextXAlignment = Enum.TextXAlignment.Left
+	webhookMask.Size = UDim2.fromScale(1, 1)
+	webhookMask.ZIndex = 7
+	webhookMask.Visible = false
+	webhookMask.Parent = urlBox
 	local urlCorner = Instance.new("UICorner")
 	urlCorner.CornerRadius = UDim.new(0, 8)
 	urlCorner.Parent = urlBox
@@ -5867,12 +6462,37 @@ local function installHub()
 	urlPad.PaddingLeft = UDim.new(0, 8)
 	urlPad.PaddingRight = UDim.new(0, 8)
 	urlPad.Parent = urlBox
-	urlBox.FocusLost:Connect(function()
-		STATE.webhook = urlBox.Text
-		STATE.webhookControl.value = urlBox.Text
-		STATE.webhookControl.currentValue = urlBox.Text
-		saveConfig()
+	STATE.webhookReveal = false
+	STATE._webhookBox = urlBox
+	function STATE.applyWebhookMask()
+		local box = STATE._webhookBox
+		if not box or not box.Parent then
+			return
+		end
+		local mask = box:FindFirstChild("Mask")
+		local hidden = STATE.webhookReveal ~= true and box:IsFocused() ~= true
+		local hasValue = type(box.Text) == "string" and box.Text ~= ""
+		box.TextTransparency = (hidden and hasValue) and 1 or 0
+		if mask and mask:IsA("TextLabel") then
+			mask.Visible = hidden and hasValue
+			mask.TextColor3 = box.TextColor3
+		end
+	end
+	urlBox.Focused:Connect(function()
+		STATE.applyWebhookMask()
 	end)
+	urlBox.FocusLost:Connect(function()
+		local text = urlBox.Text
+		if type(text) ~= "string" then
+			text = ""
+		end
+		STATE.webhook = text
+		STATE.webhookControl.value = text
+		STATE.webhookControl.currentValue = text
+		saveConfig()
+		STATE.applyWebhookMask()
+	end)
+	STATE.applyWebhookMask()
 	remember(urlBox, discordCard, "discord webhook")
 
 	local function actionButton(parentFrame, text, order, filled, callback)
@@ -5915,14 +6535,22 @@ local function installHub()
 		return button
 	end
 
+	local revealButton
+	revealButton = actionButton(discordCard, "Show webhook", 4, false, function()
+		STATE.webhookReveal = STATE.webhookReveal ~= true
+		if revealButton then
+			revealButton.Text = STATE.webhookReveal == true and "Hide webhook" or "Show webhook"
+		end
+		STATE.applyWebhookMask()
+	end)
 	local hookStatus = label(discordCard, "", 13, muted, Enum.Font.Gotham, 32)
-	hookStatus.LayoutOrder = 4
+	hookStatus.LayoutOrder = 5
 	hookStatus.TextWrapped = true
 	local function showHookResult(text, ok)
 		hookStatus.Text = text
 		hookStatus.TextColor3 = ok and accent or Color3.fromRGB(255, 120, 150)
 	end
-	actionButton(discordCard, "Test Webhook", 5, false, function()
+	actionButton(discordCard, "Test Webhook", 6, false, function()
 		local url = webhookUrl()
 		if not url then
 			showHookResult("That webhook link is not a Discord webhook.", false)
@@ -5943,7 +6571,7 @@ local function installHub()
 			end
 		end)
 	end)
-	actionButton(discordCard, "Unload", 6, true, function()
+	actionButton(discordCard, "Unload", 7, true, function()
 		task.defer(unloadHub)
 	end)
 
@@ -6116,7 +6744,10 @@ local function installHub()
 			local on = buttonName == currentPage
 			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
 			button.BackgroundTransparency = on and themeNow.selectedFade or 1
-			button.TextColor3 = themeNow.ink
+			local navLabel = button:FindFirstChild("Label")
+			if navLabel and navLabel:IsA("TextLabel") then
+				navLabel.TextColor3 = themeNow.ink
+			end
 		end
 		if STATE.refreshTracker then
 			pcall(STATE.refreshTracker)
@@ -6195,6 +6826,39 @@ local function installHub()
 			saveConfig()
 		end
 	end
+	applyHubLayout = function(_, compact, baseW)
+		local narrow = compact or baseW < 860
+		sideWrap.Size = compact and UDim2.new(0, 72, 1, 0) or UDim2.new(0.25, 0, 1, 0)
+		content.Position = compact and UDim2.fromOffset(72, 0) or UDim2.new(0.25, 0, 0, 0)
+		content.Size = compact and UDim2.new(1, -72, 1, 0) or UDim2.new(0.75, 0, 1, 0)
+		brand.Visible = not compact
+		brandSub.Visible = not compact
+		profile.Visible = not compact
+		columnLayout.FillDirection = narrow and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
+		local columnSize = narrow and UDim2.new(1, 0, 0, 0) or UDim2.new(0.5, -6, 0, 0)
+		leftColumn.Size = columnSize
+		rightColumn.Size = columnSize
+		for index, name in ipairs({ "Home", "Main", "Discord" }) do
+			local button = navButtons[name]
+			if button then
+				local label = button:FindFirstChild("Label")
+				if label then
+					label.Visible = not compact
+				end
+				button.Size = compact and UDim2.fromOffset(48, 44) or UDim2.new(1, -24, 0, 36)
+				button.Position = UDim2.fromOffset(12, compact and (70 + (index - 1) * 52) or (78 + (index - 1) * 42))
+			end
+		end
+		for _, page in pairs(pages) do
+			local pad = page:FindFirstChildOfClass("UIPadding")
+			if pad then
+				pad.PaddingLeft = UDim.new(0, compact and 12 or 28)
+				pad.PaddingRight = UDim.new(0, compact and 12 or 28)
+			end
+		end
+		search.Size = UDim2.fromOffset(compact and 140 or 200, compact and 40 or 34)
+	end
+	fitScale()
 	local function refit()
 		fitScale()
 		task.defer(rememberLayout)
@@ -6282,6 +6946,10 @@ local function installHub()
 		openToken += 1
 		local token = openToken
 		if open then
+			STATE.webhookReveal = false
+			if STATE.applyWebhookMask then
+				STATE.applyWebhookMask()
+			end
 			playMotion(launcher, { GroupTransparency = 1 }, tweenInfo.hover)
 			holder.Visible = true
 			shadow.Visible = true
@@ -6683,36 +7351,162 @@ function STATE.paintPlotEggs()
 	end
 end
 
+function STATE.commitEquip(placeUid, pickupUid, backX, backZ, openSlot)
+	local lock = STATE.acquirePlot("equip", "equipBest")
+	if not lock then
+		return "Feature cancelled"
+	end
+	local function finish(status)
+		STATE.releasePlot(lock)
+		if type(status) == "string" then
+			STATE.equipStatus = status
+		elseif status == true then
+			STATE.equipStatus = nil
+		end
+		return status
+	end
+	local testing = type(STATE._plotTestInvoke) == "function"
+	local owns, why = STATE.plotOwns(lock, "equipBest")
+	if not owns then
+		return finish(why)
+	end
+	if type(placeUid) ~= "string" then
+		return finish("Selection became invalid")
+	end
+	if openSlot ~= true and (type(pickupUid) ~= "string" or type(backX) ~= "number" or type(backZ) ~= "number") then
+		return finish("Selection became invalid")
+	end
+	local x, z = 1, 2
+	if not testing then
+		if typeof(ClientRegistry) ~= "table" or typeof(ClientRegistry.Get) ~= "function" then
+			return finish("Away from plot")
+		end
+		local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
+		local base = plot and plot:FindFirstChild("Base")
+		if not (base and base:IsA("BasePart")) then
+			return finish("Away from plot")
+		end
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		if not hrp then
+			return finish("Away from plot")
+		end
+		local offset = base.CFrame:PointToObjectSpace(hrp.Position)
+		local reach = math.sqrt(base.Size.X * base.Size.X + base.Size.Z * base.Size.Z) / 2 + 30
+		if Vector3.new(offset.X, 0, offset.Z).Magnitude > reach then
+			return finish("Away from plot")
+		end
+		local taken = {}
+		local fresh = STATE.plotData()
+		for _, pet in pairs(fresh and fresh.plotPets or {}) do
+			local px, pz = STATE.petCoords(pet)
+			if type(px) == "number" and type(pz) == "number" then
+				taken[#taken + 1] = { px, pz }
+			end
+		end
+		local halfX = math.max(8, base.Size.X * 0.42)
+		local halfZ = math.max(6, base.Size.Z * 0.4)
+		x, z = nil, nil
+		for n = 1, 30 do
+			local col = (n - 1) % 6
+			local row = math.floor((n - 1) / 6)
+			local tryX = -halfX + (col + 0.5) * ((halfX * 2) / 6)
+			local tryZ = -halfZ + (row + 0.5) * ((halfZ * 2) / 5)
+			local clear = true
+			for _, pos in ipairs(taken) do
+				local dx = tryX - pos[1]
+				local dz = tryZ - pos[2]
+				if dx * dx + dz * dz < 36 then
+					clear = false
+					break
+				end
+			end
+			if clear then
+				x, z = tryX, tryZ
+				break
+			end
+		end
+		if type(x) ~= "number" or type(z) ~= "number" then
+			x = (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16)
+			z = (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
+		end
+	end
+	local function restoreOld()
+		local ownsNow, whyNow = STATE.plotOwns(lock, "equipBest")
+		if not ownsNow then
+			return false, whyNow
+		end
+		local fired = pcall(STATE.plotInvoke, "PlacePet", pickupUid, backX, backZ)
+		if not fired then
+			return false, "Remote rejected"
+		end
+		return STATE.waitPlot(lock, "equipBest", function(data)
+			return STATE.plotPetRecord(data, pickupUid) ~= nil
+		end)
+	end
+	if openSlot ~= true then
+		owns, why = STATE.plotOwns(lock, "equipBest")
+		if not owns then
+			return finish(why)
+		end
+		if not pcall(STATE.plotInvoke, "PickupPet", pickupUid) then
+			return finish("Remote rejected")
+		end
+		local left, leftWhy = STATE.waitPlot(lock, "equipBest", function(data)
+			return STATE.plotPetRecord(data, pickupUid) == nil
+		end)
+		if not left then
+			return finish(leftWhy or "Timed out waiting for confirmation")
+		end
+	end
+	owns, why = STATE.plotOwns(lock, "equipBest")
+	if not owns then
+		if openSlot ~= true then
+			restoreOld()
+		end
+		return finish(why)
+	end
+	if not pcall(STATE.plotInvoke, "PlacePet", placeUid, x, z) then
+		if openSlot ~= true then
+			restoreOld()
+		end
+		return finish("Remote rejected")
+	end
+	local appeared, appearWhy = STATE.waitPlot(lock, "equipBest", function(data)
+		return STATE.plotPetRecord(data, placeUid) ~= nil
+	end)
+	if appeared then
+		return finish(true)
+	end
+	if openSlot ~= true then
+		restoreOld()
+	end
+	return finish(appearWhy or "Timed out waiting for confirmation")
+end
+
 local function stepEquipBest()
-	if STATE.equipBest ~= true or not featureReady("Equip Best") then
+	if not running() or STATE.equipBest ~= true or not featureReady("Equip Best") then
 		return
 	end
-	if os.clock() < (STATE.nextEquip or 0) then
+	if os.clock() < (STATE.nextEquip or 0) or STATE._plotLock ~= nil then
 		return
 	end
-	local data = readData()
+	local data = STATE.plotData()
 	if not data then
 		return
 	end
-	local slots = 27
-	if typeof(Plot) == "table" and typeof(Plot.Slots) == "function" then
-		local level = data.baseLevel
-		if type(level) ~= "number" then
-			level = 0
-		end
-		local ok, count = pcall(Plot.Slots, level)
-		if ok and type(count) == "number" and count > 0 then
-			slots = count
-		end
+	local room = STATE.plotRoom(data)
+	if not room then
+		STATE.equipStatus = "Selection became invalid"
+		STATE.nextEquip = os.clock() + 4
+		return
 	end
 	local worstPet = nil
 	local worst = math.huge
-	local hatched = 0
 	for uid, pet in pairs(data.plotPets or {}) do
 		if type(pet) == "table" and pet.hatchAt == nil then
 			local spec = petSpec(pet.key)
 			if not (spec and spec.IsEgg) then
-				hatched += 1
 				local income = shownIncome(pet)
 				if income < worst then
 					worst = income
@@ -6741,105 +7535,29 @@ local function stepEquipBest()
 			end
 		end
 	end
-	local openSlot = hatched < slots
+	local openSlot = room.activeAnimals < room.activeSlots
 	if not bestPet or (not openSlot and best <= worst) then
 		return
 	end
 	local placeUid = bestPet.uid
 	local pickupUid = worstPet and worstPet.uid
 	if type(placeUid) ~= "string" then
+		STATE.equipStatus = "Selection became invalid"
 		return
+	end
+	local backX, backZ = nil, nil
+	if not openSlot then
+		backX, backZ = STATE.petCoords(worstPet)
+		if type(pickupUid) ~= "string" or type(backX) ~= "number" or type(backZ) ~= "number" then
+			STATE.equipStatus = "Selection became invalid"
+			return
+		end
 	end
 	STATE.nextEquip = os.clock() + 1.4
 	task.spawn(function()
-		local plot = ClientRegistry.Get("PlotController"):GetPlot(LocalPlayer)
-		local base = plot and plot:FindFirstChild("Base")
-		if not (base and base:IsA("BasePart")) then
-			return
-		end
-		local character = LocalPlayer.Character
-		local hrp = character and character:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			local offset = base.CFrame:PointToObjectSpace(hrp.Position)
-			local reach = math.sqrt(base.Size.X * base.Size.X + base.Size.Z * base.Size.Z) / 2 + 30
-			if Vector3.new(offset.X, 0, offset.Z).Magnitude > reach then
-				return
-			end
-		end
-		local function spot()
-			local taken = {}
-			local fresh = readData()
-			for _, pet in pairs(fresh and fresh.plotPets or {}) do
-				if type(pet) == "table" and type(pet.pos) == "table" then
-					local px = pet.pos.x or pet.pos.X
-					local pz = pet.pos.z or pet.pos.Z
-					if type(px) == "number" and type(pz) == "number" then
-						taken[#taken + 1] = { px, pz }
-					end
-				end
-			end
-			local halfX = math.max(8, base.Size.X * 0.42)
-			local halfZ = math.max(6, base.Size.Z * 0.4)
-			for n = 1, 30 do
-				local col = (n - 1) % 6
-				local row = math.floor((n - 1) / 6)
-				local x = -halfX + (col + 0.5) * ((halfX * 2) / 6)
-				local z = -halfZ + (row + 0.5) * ((halfZ * 2) / 5)
-				local clear = true
-				for _, pos in ipairs(taken) do
-					local dx = x - pos[1]
-					local dz = z - pos[2]
-					if dx * dx + dz * dz < 36 then
-						clear = false
-						break
-					end
-				end
-				if clear then
-					return x, z
-				end
-			end
-			return (math.random() - 0.5) * math.min(base.Size.X * 0.35, 16), (math.random() - 0.5) * math.min(base.Size.Z * 0.35, 16)
-		end
-		local function onPlot(uid)
-			local fresh = readData()
-			local pets = fresh and fresh.plotPets
-			if type(pets) ~= "table" then
-				return false
-			end
-			if type(pets[uid]) == "table" then
-				return true
-			end
-			for _, pet in pairs(pets) do
-				if type(pet) == "table" and pet.uid == uid then
-					return true
-				end
-			end
-			return false
-		end
-		local x, z = spot()
-		if openSlot then
-			Net:FireServer("PlacePet", placeUid, x, z)
-			task.wait(0.5)
-			if running() and not onPlot(placeUid) then
-				STATE.nextEquip = os.clock() + 6
-			end
-			return
-		end
-		if not (type(pickupUid) == "string" and best > worst) then
-			return
-		end
-		Net:FireServer("PickupPet", pickupUid)
-		task.wait(0.35)
-		if not running() then
-			return
-		end
-		x, z = spot()
-		Net:FireServer("PlacePet", placeUid, x, z)
-		task.wait(0.5)
-		if running() and not onPlot(placeUid) and not onPlot(pickupUid) then
-			local backX, backZ = spot()
-			Net:FireServer("PlacePet", pickupUid, backX, backZ)
-			STATE.nextEquip = os.clock() + 6
+		local status = STATE.commitEquip(placeUid, pickupUid, backX, backZ, openSlot)
+		if status ~= true and running() then
+			STATE.nextEquip = math.max(STATE.nextEquip or 0, os.clock() + 4)
 		end
 	end)
 end
@@ -7105,7 +7823,7 @@ local antiAfkThread = task.spawn(function()
 		pulseAntiAfk()
 	end
 	while running() do
-		task.wait(4 * 60)
+		task.wait(8 * 60)
 		if not running() then
 			return
 		end
@@ -7119,6 +7837,40 @@ hubCleanup(function()
 			antiAfkConnection:Disconnect()
 		end)
 	end
+	STATE._plotLock = nil
+	if STATE.releaseLiteWatch then
+		STATE.releaseLiteWatch()
+	end
+	local builtPhone = STATE._phoneBuiltFor == true
+	if STATE.restorePhoneHooks then
+		STATE.restorePhoneHooks()
+	end
+	if builtPhone and STATE.phoneController then
+		local phone = STATE.phoneController()
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local panelGui = playerGui and playerGui:FindFirstChild("PhonePanel")
+		if phone and type(phone.Close) == "function" and phone:IsOpen() then
+			pcall(function()
+				phone:Close()
+			end)
+		end
+		if panelGui and phone and type(getupvalues) == "function" and type(setupvalue) == "function" and type(phone.Open) == "function" then
+			local ups = getupvalues(phone.Open)
+			if type(ups) == "table" then
+				for index, value in ipairs(ups) do
+					if value == panelGui then
+						setupvalue(phone.Open, index, nil)
+						break
+					end
+				end
+			end
+		end
+		if panelGui then
+			panelGui:Destroy()
+		end
+	end
+	STATE._phoneBuiltFor = false
+	STATE._phoneProps = nil
 end)
 
 function STATE.phoneController()
@@ -7128,10 +7880,81 @@ function STATE.phoneController()
 	return ClientRegistry.TryGet("PhoneController")
 end
 
-function STATE.hookPhonePanel()
-	if STATE._phoneHooked then
-		return true
+function STATE.phoneFnSource(fn)
+	local src = ""
+	if type(fn) ~= "function" then
+		return src
 	end
+	pcall(function()
+		src = debug.info(fn, "s") or ""
+	end)
+	return src
+end
+
+function STATE.unwrapPhoneFn(fn)
+	local guard = 0
+	while type(fn) == "function" and guard < 6 do
+		if not string.find(STATE.phoneFnSource(fn), "ZinoosHub", 1, true) then
+			return fn
+		end
+		if type(getupvalues) ~= "function" then
+			return fn
+		end
+		local ups = getupvalues(fn)
+		local inner = nil
+		if type(ups) == "table" then
+			for _, value in ipairs(ups) do
+				if type(value) == "function" then
+					inner = value
+					break
+				end
+			end
+		end
+		if type(inner) ~= "function" or inner == fn then
+			return fn
+		end
+		fn = inner
+		guard += 1
+	end
+	return fn
+end
+
+function STATE.rememberPhoneHook(target, key, original, wrapper, gen)
+	if type(STATE._phoneHooks) ~= "table" then
+		STATE._phoneHooks = {}
+	end
+	if type(STATE._phoneHookFns) ~= "table" then
+		STATE._phoneHookFns = {}
+	end
+	STATE._phoneHookFns[wrapper] = true
+	STATE._phoneHooks[#STATE._phoneHooks + 1] = {
+		target = target,
+		key = key,
+		original = original,
+		wrapper = wrapper,
+		gen = gen,
+	}
+end
+
+function STATE.restorePhoneHooks()
+	local hooks = STATE._phoneHooks
+	if type(hooks) ~= "table" then
+		STATE._phoneHooked = false
+		STATE._phonePageHook = nil
+		return
+	end
+	for index = #hooks, 1, -1 do
+		local record = hooks[index]
+		hooks[index] = nil
+		if type(record) == "table" and type(record.target) == "table" and type(record.key) == "string" and type(record.wrapper) == "function" and record.target[record.key] == record.wrapper and type(record.original) == "function" then
+			record.target[record.key] = record.original
+		end
+	end
+	STATE._phoneHooked = false
+	STATE._phonePageHook = nil
+end
+
+function STATE.hookPhonePanel()
 	local ok, panel = pcall(function()
 		local moduleScript = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Phone"):WaitForChild("Panel")
 		local loadModuleScript = require :: any
@@ -7140,14 +7963,33 @@ function STATE.hookPhonePanel()
 	if not ok or type(panel) ~= "table" or type(panel.build) ~= "function" then
 		return false
 	end
-	local previous = panel.build
-	panel.build = function(scope, props)
-		if type(props) == "table" then
-			props.autoplay = STATE.phoneGames == true
+	if type(STATE._phoneHookFns) == "table" and STATE._phoneHookFns[panel.build] == true then
+		local fresh = false
+		if type(STATE._phoneHooks) == "table" then
+			for _, record in ipairs(STATE._phoneHooks) do
+				if type(record) == "table" and record.wrapper == panel.build and record.gen == STATE._gen and record.key == "build" then
+					fresh = true
+					break
+				end
+			end
+		end
+		if fresh then
+			STATE._phoneHooked = true
+			return true
+		end
+		STATE.restorePhoneHooks()
+	end
+	local original = STATE.unwrapPhoneFn(panel.build)
+	local gen = STATE._gen
+	local function wrapper(scope, props)
+		if running() and gen == STATE._gen and STATE.phoneGames == true and type(props) == "table" then
+			props.autoplay = true
 			STATE._phoneProps = props
 		end
-		return previous(scope, props)
+		return original(scope, props)
 	end
+	panel.build = wrapper
+	STATE.rememberPhoneHook(panel, "build", original, wrapper, gen)
 	STATE._phoneHooked = true
 	return true
 end
@@ -7339,11 +8181,31 @@ end
 function STATE.hookPhoneLeave()
 	local props = STATE._phoneProps
 	local page = type(props) == "table" and props.page or nil
-	if type(page) ~= "table" or type(page.set) ~= "function" or page.set == STATE._phonePageHook then
+	if type(page) ~= "table" or type(page.set) ~= "function" then
 		return
 	end
-	local previous = page.set
+	if type(STATE._phoneHookFns) == "table" and STATE._phoneHookFns[page.set] == true then
+		local fresh = false
+		if type(STATE._phoneHooks) == "table" then
+			for _, record in ipairs(STATE._phoneHooks) do
+				if type(record) == "table" and record.wrapper == page.set and record.gen == STATE._gen and record.key == "set" then
+					fresh = true
+					break
+				end
+			end
+		end
+		if fresh then
+			STATE._phonePageHook = page.set
+			return
+		end
+		STATE.restorePhoneHooks()
+	end
+	local original = STATE.unwrapPhoneFn(page.set)
+	local gen = STATE._gen
 	local function hook(self, nextPage)
+		if not running() or gen ~= STATE._gen then
+			return original(self, nextPage)
+		end
 		if nextPage == nil and self ~= page then
 			nextPage = self
 			self = page
@@ -7354,10 +8216,11 @@ function STATE.hookPhoneLeave()
 		if type(nextPage) == "string" then
 			STATE._phonePage = nextPage
 		end
-		return previous(self, nextPage)
+		return original(self, nextPage)
 	end
-	STATE._phonePageHook = hook
 	page.set = hook
+	STATE._phonePageHook = hook
+	STATE.rememberPhoneHook(page, "set", original, hook, gen)
 end
 
 function STATE.pullPhoneBests()
@@ -7404,8 +8267,12 @@ function STATE.notePhoneRound(phase)
 end
 
 function STATE.rebuildPhone()
-	if not STATE.hookPhonePanel() then
-		return false
+	if STATE.phoneGames == true then
+		if not STATE.hookPhonePanel() then
+			return false
+		end
+	else
+		STATE.restorePhoneHooks()
 	end
 	local phone = STATE.phoneController()
 	if not phone then
@@ -7987,5 +8854,105 @@ STATE.connect(RunService.Heartbeat, function()
 	STATE.watchFeature("Auto Index", stepIndex)
 	STATE.watchFeature("Free Stash", stepStash)
 end)
+
+function STATE.runRepairChecks()
+	local webhookOk, webhookFailed = STATE.runWebhookParserTests()
+	local urlA = "https://cdn.example.com/assets/same-tail-name.png"
+	local urlB = "https://cdn.example.com/other/same-tail-name.png"
+	local hashesDiffer = STATE.hashUrl(urlA) ~= STATE.hashUrl(urlB)
+	local badUrl = STATE.canonicalHttps("http://cdn.example.com/a.png") == nil and STATE.canonicalHttps("https://user@cdn.example.com/a.png") == nil
+	local png = string.char(137) .. "PNG" .. string.char(13, 10, 26, 10) .. string.rep("A", 64)
+	local textBody = "this is not an image body at all"
+	local notImage = STATE.imageFormat(textBody) == nil and STATE.imageFormat(png) == "png"
+	local tooBig = #string.rep("A", 5 * 1024 * 1024 + 16) > 5 * 1024 * 1024
+	local savedRoot = STATE._themeRoot
+	local savedGen = STATE._gen
+	local savedToken = genv.ZinoosGen
+	STATE._themeRoot = "ZinoosHub/theme-repair-test"
+	STATE.ensureThemeFolders()
+	local foldersReady = typeof(isfolder) ~= "function" or isfolder("ZinoosHub/theme-repair-test") == true
+	local stored = STATE.storeThemeBody(urlA, png, savedGen, savedToken)
+	local other = STATE.storeThemeBody(urlB, png, savedGen, savedToken)
+	local pathA = STATE.themeDir() .. "/" .. STATE.hashUrl(STATE.canonicalHttps(urlA)) .. ".png"
+	local pathB = STATE.themeDir() .. "/" .. STATE.hashUrl(STATE.canonicalHttps(urlB)) .. ".png"
+	local wroteDistinct = typeof(isfile) == "function" and isfile(pathA) and isfile(pathB) and pathA ~= pathB
+	local rejectedText = STATE.storeThemeBody("https://cdn.example.com/note.txt", textBody .. textBody, savedGen, savedToken) == nil
+	local rejectedUrl = STATE.storeThemeBody("https://cdn.example.com/a.png?x=1", png, savedGen, savedToken) == nil
+	local oversized = string.char(137) .. "PNG" .. string.char(13, 10, 26, 10) .. string.rep("B", 5 * 1024 * 1024)
+	local rejectedSize = STATE.storeThemeBody("https://cdn.example.com/big.png", oversized, savedGen, savedToken) == nil
+	STATE._gen = -424242
+	local stale = STATE.storeThemeBody("https://cdn.example.com/stale.png", png, savedGen, savedToken) == nil
+	local stalePath = "ZinoosHub/theme-repair-test/" .. STATE.hashUrl("https://cdn.example.com/stale.png") .. ".png"
+	local staleUnwritten = typeof(isfile) ~= "function" or isfile(stalePath) ~= true
+	STATE._gen = savedGen
+	if typeof(delfile) == "function" then
+		pcall(delfile, pathA)
+		pcall(delfile, pathB)
+		pcall(delfile, "ZinoosHub/theme-repair-test/manifest.json")
+	end
+	STATE._themeRoot = savedRoot
+	local savedEquip = STATE.equipBest
+	local savedLock = STATE._plotLock
+	STATE.equipBest = true
+	STATE._plotLock = nil
+	local onPlot = true
+	local restoredPos = { x = 3, z = 4 }
+	local calls = {}
+	STATE._plotTestData = function()
+		local plotPets = {}
+		if onPlot then
+			plotPets.old = { uid = "old", key = "Cat", pos = { x = restoredPos.x, z = restoredPos.z } }
+		end
+		return { baseLevel = 1, plotPets = plotPets, backpack = {} }
+	end
+	STATE._plotTestInvoke = function(name, uid, x, z)
+		calls[#calls + 1] = { name = name, uid = uid, x = x, z = z }
+		if name == "PickupPet" and uid == "old" then
+			onPlot = false
+		elseif name == "PlacePet" and uid == "old" and type(x) == "number" and type(z) == "number" then
+			onPlot = true
+			restoredPos = { x = x, z = z }
+		end
+	end
+	local swapStatus = STATE.commitEquip("new", "old", 3, 4, false)
+	local last = calls[#calls]
+	local restored = onPlot == true and restoredPos.x == 3 and restoredPos.z == 4
+	local ordered = calls[1] and calls[1].name == "PickupPet" and calls[1].uid == "old" and calls[2] and calls[2].name == "PlacePet" and calls[2].uid == "new" and last and last.name == "PlacePet" and last.uid == "old" and last.x == 3 and last.z == 4
+	local firstLock = STATE.acquirePlot("equip", "equipBest")
+	local secondLock = STATE.acquirePlot("place", "autoPlace")
+	local overlapBlocked = firstLock ~= nil and secondLock == nil
+	STATE.releasePlot(firstLock)
+	local placeLock = STATE.autoPlace == true and STATE.acquirePlot("place", "autoPlace") or nil
+	local equipWhilePlace = placeLock ~= nil and STATE.acquirePlot("equip", "equipBest") == nil
+	STATE.releasePlot(placeLock)
+	STATE._plotTestData = nil
+	STATE._plotTestInvoke = nil
+	STATE._plotLock = savedLock
+	STATE.equipBest = savedEquip
+	local plotOk = swapStatus ~= true and restored == true and ordered == true and overlapBlocked == true
+	if STATE.autoPlace == true then
+		plotOk = plotOk and equipWhilePlace == true
+	end
+	return {
+		webhookOk = webhookOk,
+		webhookFailed = webhookFailed,
+		hashesDiffer = hashesDiffer,
+		badUrl = badUrl,
+		notImage = notImage,
+		tooBig = tooBig,
+		foldersReady = foldersReady,
+		stored = type(stored) == "string" or wroteDistinct,
+		wroteDistinct = wroteDistinct,
+		rejectedText = rejectedText,
+		rejectedUrl = rejectedUrl,
+		rejectedSize = rejectedSize,
+		stale = stale and staleUnwritten,
+		plotOk = plotOk,
+		swapStatus = swapStatus,
+		restored = restored,
+		ordered = ordered,
+		overlapBlocked = overlapBlocked,
+	}
+end
 
 startupFinished = true
