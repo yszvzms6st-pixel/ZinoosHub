@@ -1614,7 +1614,7 @@ function STATE.markPlaceHold()
 	return true
 end
 
-function STATE.guardedPlace(lock, toggleName, uid, x, z, confirm)
+function STATE.guardedPlace(lock, toggleName, uid, x, z, confirm, eggPlace)
 	local owns, why = STATE.plotOwns(lock, toggleName)
 	if not owns then
 		return why, false
@@ -1623,7 +1623,7 @@ function STATE.guardedPlace(lock, toggleName, uid, x, z, confirm)
 		return "Selection became invalid", false
 	end
 	local room = STATE.plotRoom()
-	if room and room.free == false then
+	if eggPlace ~= true and room and room.free == false then
 		STATE.markPlaceHold()
 		return "Confirmed full", false
 	end
@@ -1654,10 +1654,12 @@ function STATE.guardedPlace(lock, toggleName, uid, x, z, confirm)
 	if STATE.plotPetRecord(fresh, uid) ~= nil then
 		return true, true
 	end
-	local again = STATE.plotRoom(fresh)
-	if again and again.free == false then
-		STATE.markPlaceHold()
-		return "Confirmed full", true
+	if eggPlace ~= true then
+		local again = STATE.plotRoom(fresh)
+		if again and again.free == false then
+			STATE.markPlaceHold()
+			return "Confirmed full", true
+		end
 	end
 	return "Timed out waiting for confirmation", true
 end
@@ -1752,7 +1754,7 @@ function STATE.placeSelectedEgg(fromSteal)
 		end
 		local result = STATE.guardedPlace(lock, toggleName, testUid, STATE._plotTestPlace.x or 0, STATE._plotTestPlace.z or 0, function(data)
 			return STATE.plotPetRecord(data, testUid) ~= nil
-		end)
+		end, true)
 		if result == "Confirmed full" then
 			note("Confirmed full")
 		elseif result == "Remote rejected" or result == "Timed out waiting for confirmation" then
@@ -1769,10 +1771,6 @@ function STATE.placeSelectedEgg(fromSteal)
 		local offset = Vector3.new(base.Position.X - hrp.Position.X, 0, base.Position.Z - hrp.Position.Z)
 		local reach = Vector3.new(base.Size.X, 0, base.Size.Z).Magnitude / 2 + 30
 		return offset.Magnitude <= reach
-	end
-	if STATE.placeHoldActive() then
-		note("Confirmed full")
-		return finish("Confirmed full")
 	end
 	local chosen = STATE.collectPlaceEggs()[1]
 	if not chosen or typeof(chosen.tool) ~= "Instance" then
@@ -1828,9 +1826,40 @@ function STATE.placeSelectedEgg(fromSteal)
 		return finish("Selection became invalid")
 	end
 	note("Placing " .. eggName)
-	local spread = 0.25
-	local x = (math.random() - 0.5) * base.Size.X * spread
-	local z = (math.random() - 0.5) * base.Size.Z * spread
+	local taken = {}
+	local fresh = STATE.plotData()
+	for _, pet in pairs(fresh and fresh.plotPets or {}) do
+		local px, pz = STATE.petCoords(pet)
+		if type(px) == "number" and type(pz) == "number" then
+			taken[#taken + 1] = { px, pz }
+		end
+	end
+	local halfX = math.max(8, base.Size.X * 0.45)
+	local halfZ = math.max(6, base.Size.Z * 0.45)
+	local x, z = nil, nil
+	for n = 1, 48 do
+		local col = (n - 1) % 8
+		local row = math.floor((n - 1) / 8)
+		local tryX = -halfX + (col + 0.5) * ((halfX * 2) / 8)
+		local tryZ = -halfZ + (row + 0.5) * ((halfZ * 2) / 6)
+		local clear = true
+		for _, pos in ipairs(taken) do
+			local dx = tryX - pos[1]
+			local dz = tryZ - pos[2]
+			if dx * dx + dz * dz < 36 then
+				clear = false
+				break
+			end
+		end
+		if clear then
+			x, z = tryX, tryZ
+			break
+		end
+	end
+	if type(x) ~= "number" or type(z) ~= "number" then
+		x = (math.random() - 0.5) * math.min(base.Size.X * 0.8, halfX * 2)
+		z = (math.random() - 0.5) * math.min(base.Size.Z * 0.8, halfZ * 2)
+	end
 	if type(x) ~= "number" or type(z) ~= "number" then
 		return finish("Selection became invalid")
 	end
@@ -1848,7 +1877,7 @@ function STATE.placeSelectedEgg(fromSteal)
 	end
 	local result = STATE.guardedPlace(lock, toggleName, uid, x, z, function(data)
 		return tool.Parent == nil or STATE.plotPetRecord(data, uid) ~= nil
-	end)
+	end, true)
 	if result == true then
 		note("Placed " .. eggName)
 		return finish(true)
@@ -1877,11 +1906,6 @@ function STATE.stepAutoPlace()
 	if #eggs == 0 then
 		STATE.placeStatus = "No selected eggs"
 		STATE.nextAutoPlace = os.clock() + 1.2
-		return
-	end
-	if STATE.placeHoldActive() then
-		STATE.placeStatus = "Confirmed full"
-		STATE.nextAutoPlace = STATE.placeHoldUntil
 		return
 	end
 	if STATE._plotLock ~= nil then
@@ -9403,7 +9427,20 @@ function STATE.runPlotRepairChecks()
 				fullFires += 1
 			end
 		end
-		report.fullNoFire = fullStatus == "Confirmed full" and fullFires == 0 and STATE.placeStatus == "Confirmed full"
+		report.fullNoFire = fullStatus == "Timed out waiting for confirmation" and fullFires == 1 and STATE.placeStatus ~= "Confirmed full"
+		STATE._plotLock = nil
+		STATE.placeHoldUntil = 0
+		STATE.placeStatus = nil
+		local blocked = {}
+		STATE._plotTestInvoke = function(name)
+			blocked[#blocked + 1] = name
+		end
+		local blockLock = STATE.acquirePlot("equip", nil)
+		local blockedStatus = STATE.guardedPlace(blockLock, nil, "pet", 1, 2, nil, false)
+		STATE.releasePlot(blockLock)
+		STATE.placeHoldUntil = 0
+		STATE.placeStatus = nil
+		report.fullStillBlocksPets = blockedStatus == "Confirmed full" and #blocked == 0
 		calls = {}
 		STATE._plotLock = nil
 		STATE._plotTestData = function()
@@ -9441,7 +9478,7 @@ function STATE.runPlotRepairChecks()
 			return { baseLevel = 1, plotPets = pets, backpack = {} }
 		end
 		local lateFull = STATE.placeSelectedEgg(false)
-		report.timeoutThenFull = lateFull == "Confirmed full" and #calls == 1
+		report.timeoutThenFull = lateFull == "Timed out waiting for confirmation" and #calls == 1 and STATE.placeStatus ~= "Confirmed full"
 		local function runSwap(mode)
 			local log = {}
 			local oldOn = true
@@ -9874,7 +9911,7 @@ function STATE.runRepairChecks()
 	local themeHost = STATE.runThemeHostChecks()
 	local authorityBypass = STATE.parseWebhook("https://discord.com:443@evil.example/api/webhooks/1/tok") == nil
 	local plot = STATE.runPlotRepairChecks()
-	local plotOk = plot.eggsSeparate == true and plot.fullNoFire == true and plot.timeoutOpen == true and plot.timeoutThenFull == true and plot.success == true and plot.failedPlace == true and plot.toggleRestores == true and plot.generationRestores == true and plot.latePlan == true and plot.lateSwap == true and plot.delayedToggle == true and plot.retryRestore == true and plot.lateAfterReplace == true and plot.missingBackpack == true and plot.sentToggle == true and plot.overlapRecover == true and plot.emptyPending == true and plot.overlap == true and plot.upToDate == true and plot.error == nil
+	local plotOk = plot.eggsSeparate == true and plot.fullNoFire == true and plot.fullStillBlocksPets == true and plot.timeoutOpen == true and plot.timeoutThenFull == true and plot.success == true and plot.failedPlace == true and plot.toggleRestores == true and plot.generationRestores == true and plot.latePlan == true and plot.lateSwap == true and plot.delayedToggle == true and plot.retryRestore == true and plot.lateAfterReplace == true and plot.missingBackpack == true and plot.sentToggle == true and plot.overlapRecover == true and plot.emptyPending == true and plot.overlap == true and plot.upToDate == true and plot.error == nil
 	return {
 		webhookOk = webhookOk,
 		webhookFailed = webhookFailed,
