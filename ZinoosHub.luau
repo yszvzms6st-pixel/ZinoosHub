@@ -7212,36 +7212,75 @@ function STATE.phoneScore(gameKey)
 end
 
 function STATE.savePhoneScore(game)
-	if type(game) ~= "table" or STATE._phoneBanked == true then
-		return
+	if type(game) ~= "table" then
+		return false
 	end
-	local shown = STATE.phoneScore(game.key)
-	if type(shown) ~= "number" or shown < 1 then
-		return
+	local shown = STATE.phoneScore(game.key) or 0
+	local step = STATE._phoneStep
+	if STATE._phoneKind == game.key and typeof(step) == "function" and type(getupvalues) == "function" then
+		local ups = getupvalues(step)
+		if type(ups) == "table" then
+			local peek = nil
+			local scoreState = nil
+			if game.key == "Stack" then
+				peek = ups[6]
+				scoreState = ups[18]
+			elseif game.key == "Flappy" then
+				peek = ups[4]
+				scoreState = ups[15]
+			end
+			if typeof(peek) == "function" and type(scoreState) == "table" then
+				local ok, value = pcall(peek, scoreState)
+				if ok and type(value) == "number" and value > shown then
+					shown = value
+				end
+			end
+		end
 	end
-	if type(STATE._phoneKept) ~= "table" then
-		STATE._phoneKept = {}
+	if shown < 1 then
+		return false
 	end
-	local kept = STATE._phoneKept[game.key] or 0
-	if type(kept) ~= "number" or shown <= kept then
-		return
+	local saved = 0
+	if type(STATE._phoneBests) == "table" and type(STATE._phoneBests[game.key]) == "number" then
+		saved = STATE._phoneBests[game.key]
+	end
+	if shown <= saved then
+		return false
 	end
 	local elapsed = os.clock() - (STATE._phoneRoundAt or os.clock())
+	if elapsed < 0 then
+		elapsed = 0
+	end
 	local cap = math.floor(elapsed * game.per + game.slack)
 	local score = math.floor(math.min(shown, game.max, math.max(0, cap)))
-	if score < 1 or score <= kept then
-		return
+	if score <= saved then
+		return false
 	end
-	local props = STATE._phoneProps
-	if type(props) == "table" and type(props.onFinish) == "function" then
-		props.onFinish(game.key, score)
-	else
-		Net:InvokeServer("PhoneGameSubmit", game.key, score)
+	local ok, result = pcall(function()
+		return Net:InvokeServer("PhoneGameSubmit", game.key, score)
+	end)
+	if not ok or type(result) ~= "table" or type(result.best) ~= "number" then
+		return false
 	end
-	STATE._phoneKept[game.key] = score
-	STATE._phoneBanked = true
-	STATE.phoneBest = score
+	if type(STATE._phoneBests) ~= "table" then
+		STATE._phoneBests = {}
+	end
+	STATE._phoneBests[game.key] = result.best
+	STATE.phoneBest = result.best
 	STATE.phoneGame = game.title or game.key
+	local props = STATE._phoneProps
+	local bests = type(props) == "table" and props.bests or nil
+	if type(bests) == "table" and type(bests.set) == "function" then
+		local copy = {}
+		for key, value in pairs(STATE._phoneBests) do
+			copy[key] = value
+		end
+		pcall(function()
+			bests:set(copy)
+		end)
+	end
+	STATE._phoneBanked = true
+	return result.best >= score
 end
 
 function STATE.pullPhoneBests()
@@ -7410,6 +7449,10 @@ function STATE.openPhoneGame(game)
 	STATE._phoneRoundAt = os.clock()
 	STATE._phoneSubmitAt = os.clock() + 8
 	STATE._phoneSent = nil
+	STATE._phoneBanked = false
+	STATE._phoneWasPlay = false
+	STATE._phoneSawRound = false
+	STATE._phoneHoldAt = nil
 	STATE.phoneGame = game.title or game.key
 	return true
 end
