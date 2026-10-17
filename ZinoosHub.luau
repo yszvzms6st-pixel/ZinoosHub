@@ -7451,67 +7451,87 @@ function STATE.stepTrench()
 	if type(state) ~= "string" then
 		state = "idle"
 	end
-	local eventOn = inArena or state == "seal" or state == "open"
+	local site = workspace:GetAttribute("TrenchSitePos")
+	local siteOk = typeof(site) == "Vector3" and site.Magnitude > 0.5
+	local eventOn = inArena or state == "seal" or state == "open" or state == "fight" or (state ~= "idle" and siteOk)
 	if not eventOn or (pendingDelivery() and not inArena) then
 		STATE.trenchBusy = false
 		STATE.trenchGoal = nil
 	else
 		STATE.trenchBusy = true
-		if inArena then
-			STATE.trenchGoal = nil
-		else
-			local site = workspace:GetAttribute("TrenchSitePos")
-			if typeof(site) == "Vector3" and site.Magnitude > 0.5 then
-				STATE.trenchGoal = CFrame.new(site + Vector3.new(0, 4, 0))
-			end
-		end
 	end
 	local character = LocalPlayer.Character
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if eventOn and hrp and hrp:IsA("BasePart") and now >= (STATE.nextTrenchRep or 0) then
-		if inArena then
-			local grabbed = false
-			for name, value in pairs(LocalPlayer:GetAttributes()) do
-				local lower = string.lower(name)
-				if string.find(lower, "grab", 1, true) and (value == true or (type(value) == "number" and value > 0 and value < 7)) then
-					grabbed = true
-					break
+	local grabbedBy = LocalPlayer:GetAttribute("TrenchGrabbedBy")
+	local grabbed = inArena and type(grabbedBy) == "string" and grabbedBy ~= ""
+	if not STATE.trenchBusy or grabbed or not (hrp and hrp:IsA("BasePart")) then
+		STATE.trenchGoal = nil
+	elseif inArena then
+		local arena = workspace:FindFirstChild("TrenchArena")
+		local kraken = arena and arena:FindFirstChild("Kraken")
+		local grips = kraken and kraken:FindFirstChild("Grips")
+		local best = nil
+		local bestDist = nil
+		if grips then
+			for _, grip in grips:GetChildren() do
+				if grip:IsA("BasePart") then
+					local gripState = grip:GetAttribute("State")
+					if gripState == nil or gripState == "pinned" then
+						local flat = Vector3.new(hrp.Position.X - grip.Position.X, 0, hrp.Position.Z - grip.Position.Z).Magnitude
+						if not bestDist or flat < bestDist then
+							bestDist = flat
+							best = grip
+						end
+					end
 				end
 			end
-			if grabbed then
-				Net:FireServer("TrenchGrabTap")
-				STATE.nextTrenchRep = now + 0.15
-			else
-				local arena = workspace:FindFirstChild("TrenchArena")
-				local kraken = arena and arena:FindFirstChild("Kraken")
-				local grips = kraken and kraken:FindFirstChild("Grips")
-				local bestName = nil
-				local bestDist = nil
-				if grips then
-					for _, grip in grips:GetChildren() do
-						if grip:IsA("BasePart") then
-							local offset = hrp.Position - grip.Position
-							local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-							if flat <= 14 and math.abs(offset.Y) < 8 and (not bestDist or flat < bestDist) then
-								bestDist = flat
+		end
+		if best then
+			STATE.trenchGoal = CFrame.new(best.Position + Vector3.new(0, 3, 0))
+		else
+			STATE.trenchGoal = nil
+		end
+	elseif siteOk then
+		STATE.trenchGoal = CFrame.new(site + Vector3.new(0, 4, 0))
+	else
+		STATE.trenchGoal = nil
+	end
+	if eventOn and hrp and hrp:IsA("BasePart") and now >= (STATE.nextTrenchRep or 0) then
+		if grabbed then
+			Net:FireServer("TrenchGrabTap")
+			STATE.nextTrenchRep = now + 0.15
+		elseif inArena and typeof(STATE.trenchGoal) == "CFrame" then
+			local goalPos = STATE.trenchGoal.Position
+			local offset = hrp.Position - goalPos
+			local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
+			local arena = workspace:FindFirstChild("TrenchArena")
+			local kraken = arena and arena:FindFirstChild("Kraken")
+			local grips = kraken and kraken:FindFirstChild("Grips")
+			local bestName = nil
+			local bestDist = nil
+			if grips then
+				for _, grip in grips:GetChildren() do
+					if grip:IsA("BasePart") then
+						local gripState = grip:GetAttribute("State")
+						if gripState == nil or gripState == "pinned" then
+							local gripFlat = Vector3.new(hrp.Position.X - grip.Position.X, 0, hrp.Position.Z - grip.Position.Z).Magnitude
+							if gripFlat <= 14 and math.abs(hrp.Position.Y - grip.Position.Y) < 8 and (not bestDist or gripFlat < bestDist) then
+								bestDist = gripFlat
 								bestName = grip.Name
 							end
 						end
 					end
 				end
-				if type(bestName) == "string" then
-					Net:FireServer("TrenchLiftRep", bestName)
-					STATE.nextTrenchRep = now + 0.5
-				end
 			end
-		elseif state == "seal" or state == "open" then
-			local site = workspace:GetAttribute("TrenchSitePos")
-			if typeof(site) == "Vector3" then
-				local flat = Vector3.new(hrp.Position.X - site.X, 0, hrp.Position.Z - site.Z).Magnitude
-				if flat <= 12 then
-					Net:FireServer("TrenchLiftRep", "seal")
-					STATE.nextTrenchRep = now + 0.5
-				end
+			if type(bestName) == "string" and flat <= 14 then
+				Net:FireServer("TrenchLiftRep", bestName)
+				STATE.nextTrenchRep = now + 0.5
+			end
+		elseif not inArena and siteOk and (state == "seal" or state == "open") then
+			local flat = Vector3.new(hrp.Position.X - site.X, 0, hrp.Position.Z - site.Z).Magnitude
+			if flat <= 12 then
+				Net:FireServer("TrenchLiftRep", "seal")
+				STATE.nextTrenchRep = now + 0.5
 			end
 		end
 	end
@@ -8373,7 +8393,7 @@ local function pullHomeIfEmpty()
 	if not running() then
 		return
 	end
-	if STATE.placeBusy == true then
+	if STATE.placeBusy == true or STATE.trenchBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
 		return
 	end
 	if LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true then
