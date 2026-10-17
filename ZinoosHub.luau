@@ -821,6 +821,9 @@ end
 if STATE.powerPearls == nil then
 	STATE.powerPearls = true
 end
+if STATE.autoInk == nil then
+	STATE.autoInk = true
+end
 if STATE.webhookReports == nil then
 	STATE.webhookReports = true
 end
@@ -4415,6 +4418,7 @@ local FLAG_KEYS = {
 	AutoTrench = "autoTrench",
 	TrenchShop = "trenchShop",
 	PowerPearls = "powerPearls",
+	AutoInk = "autoInk",
 	DiscordReports = "webhookReports",
 	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
@@ -6494,7 +6498,8 @@ local function installHub()
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
 	makeSwitch(eggs, "Auto Trench", "autoTrench", "Joins the free Trench fight and lifts the tentacles")
 	makeSwitch(eggs, "Trench Shop", "trenchShop", "Spends pearls on Trench Eggs. Never buys Robux")
-	makeSwitch(eggs, "Power Pearls", "powerPearls", "Spends spare pearls on +10m Power, keeping 450 for a Trench Egg. Never buys Robux")
+	makeSwitch(eggs, "Power Pearls", "powerPearls", "Spends spare pearls on +10m Power, keeping 450 for a Trench Egg when Trench Shop is on. Never buys Robux")
+	makeSwitch(eggs, "Auto Ink", "autoInk", "Uses Kraken Ink (free first, then 900 pearls) on the plot pet it boosts most. Never buys Robux")
 	makeSwitch(eggs, "Auto Place", "autoPlace", "Places ticked eggs from your bag")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
@@ -6888,6 +6893,12 @@ local function installHub()
 		end
 		local shop = STATE.trenchShop == true and "on" or "off"
 		lines[2] = string.format("Shop %s · %d / 450 pearls", shop, math.floor(pearls))
+		if STATE.autoInk == true then
+			local inkData = readData()
+			local inkTrench = type(inkData) == "table" and type(inkData.trench) == "table" and inkData.trench or {}
+			local freeInks = type(inkTrench.inks) == "number" and inkTrench.inks or 0
+			lines[2] = string.format("Ink · %d / 900 pearls", math.floor(pearls)) .. (freeInks > 0 and string.format(" · %d free", freeInks) or "")
+		end
 		local powerLeft = STATE.powerLeft and STATE.powerLeft() or 0
 		if STATE.powerPearls == true and powerLeft > 0 then
 			lines[2] ..= string.format(" · Power %d:%02d", math.floor(powerLeft / 60), math.floor(powerLeft % 60))
@@ -7942,13 +7953,133 @@ function STATE.pickTrenchGrip(grips, hrp)
 	return best
 end
 
+function STATE.inkConfigs()
+	if type(STATE._inkConfigs) == "table" then
+		return STATE._inkConfigs
+	end
+	local ok, configs = pcall(function()
+		local folder = ReplicatedStorage:WaitForChild("Shared", 5):WaitForChild("Configs", 5)
+		local loadModuleScript = require :: any
+		return {
+			trench = loadModuleScript(folder:WaitForChild("Trench", 5)),
+			mutations = loadModuleScript(folder:WaitForChild("Mutations", 5)),
+		}
+	end)
+	if not ok or type(configs) ~= "table" or type(configs.trench) ~= "table" or type(configs.trench.Ink) ~= "table" or type(configs.mutations) ~= "table" then
+		return nil
+	end
+	STATE._inkConfigs = configs
+	return configs
+end
+
+function STATE.inkTarget(data)
+	local configs = STATE.inkConfigs()
+	if not configs or typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
+		return nil
+	end
+	local ink = configs.trench.Ink
+	local mutations = configs.mutations
+	local best, bestGain = nil, 0
+	for uid, pet in pairs(type(data) == "table" and data.plotPets or {}) do
+		local spec = type(pet) == "table" and petSpec(pet.key)
+		if spec and not spec.IsEgg and pet.hatchAt == nil then
+			local current = type(pet.mutation) == "string" and pet.mutation ~= "None" and pet.mutation or nil
+			local okRank, rank = pcall(mutations.RankOf, current)
+			local okMult, currentMult = pcall(mutations.Multiplier, current)
+			if okRank and okMult and type(rank) == "number" and type(currentMult) == "number" and rank < 5 then
+				local expected = 0
+				for _, name in ipairs(ink.Order) do
+					local chance = (ink.Odds[name] or 0) / 100
+					local okNew, newRank = pcall(mutations.RankOf, name)
+					local okNewMult, newMult = pcall(mutations.Multiplier, name)
+					if okNew and okNewMult and type(newRank) == "number" and type(newMult) == "number" and newRank > rank then
+						expected += chance * newMult
+					else
+						expected += chance * currentMult
+					end
+				end
+				local plain = {}
+				for field, value in pairs(pet) do
+					plain[field] = value
+				end
+				plain.mutation = "None"
+				local okBase, base = pcall(Pets.IncomeFor, plain)
+				local gain = okBase and type(base) == "number" and base * (expected - currentMult) or 0
+				if gain > bestGain then
+					bestGain = gain
+					best = {
+						uid = type(pet.uid) == "string" and pet.uid or tostring(uid),
+						name = spec.DisplayName or spec.Name or tostring(pet.key),
+						mutation = current or "None",
+						gain = gain,
+					}
+				end
+			end
+		end
+	end
+	return best
+end
+
+function STATE.useInk(now)
+	if STATE.autoInk ~= true or now < (STATE.nextInk or 0) then
+		return false
+	end
+	local data = readData()
+	local trench = type(data) == "table" and type(data.trench) == "table" and data.trench or nil
+	if not trench then
+		return false
+	end
+	local configs = STATE.inkConfigs()
+	local price = configs and configs.trench.Ink.Price or 900
+	local free = type(trench.inks) == "number" and trench.inks or 0
+	local pearls = type(trench.pearls) == "number" and trench.pearls or 0
+	if free <= 0 and pearls < price then
+		return false
+	end
+	local target = STATE.inkTarget(data)
+	if not target then
+		STATE.nextInk = now + 30
+		return false
+	end
+	STATE.nextInk = now + 4
+	local ok, used, result = pcall(function()
+		return Net:InvokeServer("TrenchUseInk", target.uid)
+	end)
+	if not ok or used ~= true or type(result) ~= "table" then
+		STATE.nextInk = now + 20
+		STATE.inkStatus = "Ink was refused (" .. tostring(result) .. ")"
+		STATE.noteActivity(STATE.inkStatus)
+		return true
+	end
+	local cost = free > 0 and "free ink" or (tostring(price) .. " pearls")
+	local newMutation = type(result.new) == "string" and result.new or target.mutation
+	if result.changed == true then
+		STATE.inkStatus = string.format("Inked %s: %s → %s", target.name, target.mutation, newMutation)
+		STATE.noteActivity(STATE.inkStatus .. " (" .. cost .. ")")
+		if STATE.sendReport then
+			STATE.sendReport("Ink upgrade", string.format("**%s**\n%s → %s\nPaid with %s", target.name, target.mutation, newMutation, cost), 10181046)
+		end
+	else
+		STATE.inkStatus = string.format("Inked %s: no change (%s)", target.name, target.mutation)
+		STATE.noteActivity(STATE.inkStatus .. " (" .. cost .. ")")
+	end
+	return true
+end
+
 function STATE.powerLeft()
 	local at = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or 0
 	return math.max(0, 600 - (os.time() - at))
 end
 
 function STATE.buyTrenchEgg(now)
-	if (STATE.trenchShop ~= true and STATE.powerPearls ~= true) or now < (STATE.nextTrenchBuy or 0) then
+	if now < (STATE.nextTrenchBuy or 0) then
+		return
+	end
+	if STATE.useInk(now) then
+		STATE.nextTrenchBuy = now + 1.5
+		return
+	end
+	if STATE.trenchShop ~= true and STATE.powerPearls ~= true then
 		return
 	end
 	local pearls = LocalPlayer:GetAttribute("Pearls")
@@ -7980,7 +8111,7 @@ function STATE.buyTrenchEgg(now)
 		end
 		return
 	end
-	if STATE.trenchShop ~= true or pearls < 450 then
+	if STATE.trenchShop ~= true or pearls < 450 or (STATE.autoInk == true and pearls < 1350) then
 		return
 	end
 	STATE.nextTrenchBuy = now + 1.5
