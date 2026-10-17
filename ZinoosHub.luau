@@ -1091,10 +1091,14 @@ local function stepTrain()
 		local goal = STATE.trenchGoal
 		releaseGym()
 		if hrp and typeof(goal) == "CFrame" then
-			local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid.Sit = false
+				humanoid.PlatformStand = false
+			end
 			local offset = hrp.Position - goal.Position
 			local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-			if inArena or flat > 8 then
+			if STATE.trenchPin == true or flat > 12 then
 				pinGoal(hrp, goal)
 			end
 		end
@@ -7529,6 +7533,7 @@ function STATE.stepTrench()
 	if not running() or STATE.autoTrench ~= true then
 		STATE.trenchBusy = false
 		STATE.trenchGoal = nil
+		STATE.trenchPin = false
 		return
 	end
 	local now = os.clock()
@@ -7539,10 +7544,16 @@ function STATE.stepTrench()
 	end
 	local site = workspace:GetAttribute("TrenchSitePos")
 	local siteOk = typeof(site) == "Vector3" and site.Magnitude > 0.5
-	local eventOn = inArena or state == "seal" or state == "open" or state == "fight" or (state ~= "idle" and siteOk)
-	if not eventOn or (pendingDelivery() and not inArena) then
+	if state == "open" then
+		STATE.trenchOpenUntil = os.clock() + 20
+	end
+	local joining = state == "seal" or state == "open" or (state ~= "idle" and state ~= "fight" and siteOk)
+	local waitingPull = state == "fight" and not inArena and os.clock() < (STATE.trenchOpenUntil or 0)
+	local eventOn = inArena or joining or waitingPull
+	if not eventOn then
 		STATE.trenchBusy = false
 		STATE.trenchGoal = nil
+		STATE.trenchPin = false
 	else
 		STATE.trenchBusy = true
 	end
@@ -7552,7 +7563,9 @@ function STATE.stepTrench()
 	local grabbed = inArena and type(grabbedBy) == "string" and grabbedBy ~= ""
 	if not STATE.trenchBusy or grabbed or not (hrp and hrp:IsA("BasePart")) then
 		STATE.trenchGoal = nil
+		STATE.trenchPin = false
 	elseif inArena then
+		STATE.trenchPin = true
 		local arena = workspace:FindFirstChild("TrenchArena")
 		local kraken = arena and arena:FindFirstChild("Kraken")
 		local grips = kraken and kraken:FindFirstChild("Grips")
@@ -7580,20 +7593,22 @@ function STATE.stepTrench()
 	elseif siteOk then
 		local map = workspace:FindFirstChild("Map")
 		local rift = map and map:FindFirstChild("TrenchRift")
+		local seal = rift and rift:FindFirstChild("Seal")
+		local sealRoot = seal and (seal:FindFirstChild("SealRoot") or seal:FindFirstChild("RiftSeal"))
 		local whirl = rift and rift:FindFirstChild("Whirl")
-		local stand = site + Vector3.new(0, 2, 0)
-		if whirl and whirl:IsA("BasePart") then
-			stand = Vector3.new(whirl.Position.X, site.Y + 2, whirl.Position.Z)
+		local stand = site + Vector3.new(0, 4, 0)
+		if state == "seal" and sealRoot and sealRoot:IsA("BasePart") then
+			stand = sealRoot.Position + Vector3.new(0, 3, 0)
+		elseif whirl and whirl:IsA("BasePart") then
+			stand = Vector3.new(whirl.Position.X, math.max(site.Y + 3, whirl.Position.Y + 6), whirl.Position.Z)
 		end
+		STATE.trenchGoal = CFrame.new(stand)
 		local offset = hrp.Position - stand
 		local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-		if flat > 8 then
-			STATE.trenchGoal = CFrame.new(stand)
-		else
-			STATE.trenchGoal = nil
-		end
+		STATE.trenchPin = state == "seal" or flat > 12
 	else
 		STATE.trenchGoal = nil
+		STATE.trenchPin = false
 	end
 	if eventOn and hrp and hrp:IsA("BasePart") and now >= (STATE.nextTrenchRep or 0) then
 		if grabbed then
@@ -7626,7 +7641,7 @@ function STATE.stepTrench()
 				Net:FireServer("TrenchLiftRep", bestName)
 				STATE.nextTrenchRep = now + 0.5
 			end
-		elseif not inArena and siteOk and (state == "seal" or state == "open") then
+		elseif not inArena and siteOk and (state == "seal" or state == "open" or waitingPull) then
 			local flat = Vector3.new(hrp.Position.X - site.X, 0, hrp.Position.Z - site.Z).Magnitude
 			if flat <= 12 then
 				Net:FireServer("TrenchLiftRep", "seal")
@@ -7658,6 +7673,7 @@ task.spawn(function()
 		if not ok then
 			STATE.trenchBusy = false
 			STATE.trenchGoal = nil
+			STATE.trenchPin = false
 			warn("[Zinoos hub] trench " .. tostring(err))
 			task.wait(2)
 		else
