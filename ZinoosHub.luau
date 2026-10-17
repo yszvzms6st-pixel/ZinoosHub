@@ -2458,6 +2458,37 @@ function STATE.holdingUnseenEgg()
 	return not seen(LocalPlayer.Character) and not seen(LocalPlayer:FindFirstChild("Backpack"))
 end
 
+function STATE.zoneWasStreamed(zone)
+	local dayId = ReplicatedStorage:GetAttribute("TimeOfDayEndsAt")
+	local book = STATE.streamedZones
+	local day = type(book) == "table" and book[dayId]
+	return type(day) == "table" and day[zone] == true
+end
+
+function STATE.markZoneStreamed(zone)
+	local dayId = ReplicatedStorage:GetAttribute("TimeOfDayEndsAt")
+	if typeof(dayId) ~= "number" or type(zone) ~= "string" then
+		return
+	end
+	STATE.streamedZones = {
+		[dayId] = type(STATE.streamedZones) == "table" and STATE.streamedZones[dayId] or {},
+	}
+	STATE.streamedZones[dayId][zone] = true
+end
+
+function STATE.nextUnstreamedZone()
+	local zones = STATE.stealZones
+	if type(zones) ~= "table" or #zones == 0 then
+		zones = { stealZone() }
+	end
+	for _, name in ipairs(zones) do
+		if not STATE.zoneWasStreamed(name) then
+			return name
+		end
+	end
+	return nil
+end
+
 local function peekPrehistoric()
 	local seen = {}
 	local function consider()
@@ -2476,26 +2507,13 @@ local function peekPrehistoric()
 	consider()
 	local best = bestSeen()
 	if not (best and best.model.Parent) then
-		local zones = STATE.stealZones
-		local scanZone = stealZone()
-		if type(zones) == "table" and #zones > 0 then
-			local index = ((STATE.stealScanZone or 0) % #zones) + 1
-			if (STATE.stealScanZone or 0) == 0 then
-				for found, name in ipairs(zones) do
-					if name == scanZone then
-						index = found
-						break
-					end
-				end
-			end
-			STATE.stealScanZone = index
-			scanZone = zones[index]
-		end
+		local scanZone = STATE.nextUnstreamedZone() or stealZone()
+		STATE.markZoneStreamed(scanZone)
 		for _, pos in ipairs(scanPoints(scanZone)) do
 			if not running() or STATE.autoSteal ~= true then
 				break
 			end
-			streamAround(pos, 3)
+			streamAround(pos, 1)
 			consider()
 			best = bestSeen()
 			if best and best.model.Parent then
@@ -2505,7 +2523,7 @@ local function peekPrehistoric()
 	end
 	best = bestSeen()
 	if best and not best.model.Parent then
-		streamAround(best.pos, 3)
+		streamAround(best.pos, 1)
 		local nearest = nil
 		local nearestDist = 40
 		for _, egg in ipairs(prehistoricEggs()) do
@@ -2833,6 +2851,7 @@ local function runStealTrip()
 		STATE.triedKeys = {}
 		STATE.openedDay = nil
 		STATE.streamedDay = nil
+		STATE.streamedZones = nil
 		clearStealAttempts()
 	end
 	local function finishSteal(fields)
@@ -2910,8 +2929,7 @@ local function runStealTrip()
 		return nil
 	end
 	local target = freshTarget()
-	if not target and STATE.streamedDay ~= dayId then
-		STATE.streamedDay = dayId
+	if not target and STATE.nextUnstreamedZone() ~= nil then
 		local peeked = peekPrehistoric()
 		if peeked and canAttemptModel(peeked.model) then
 			target = peeked
@@ -3115,7 +3133,7 @@ local function runStealTrip()
 	end
 	backToBench()
 	STATE.stealTarget = nil
-	STATE.nextSteal = os.clock() + (pickupSucceeded and 12 or STEAL_RETRY_WAIT)
+	STATE.nextSteal = os.clock() + (pickupSucceeded and 2 or STEAL_RETRY_WAIT)
 	local attemptCount = stealRecord(target.model).count
 	return finishSteal({
 		outcome = deliverySucceeded and "Delivery succeeded" or "Pickup succeeded",
