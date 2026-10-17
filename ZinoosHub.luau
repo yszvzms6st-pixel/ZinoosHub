@@ -499,7 +499,7 @@ fireWrapper = function(self, remoteName, ...)
 			return
 		end
 	end
-	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true or STATE.placeBusy == true) then
+	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true or STATE.placeBusy == true or STATE.fuseBusy == true) then
 		return
 	end
 	return netFireServer(self, remoteName, ...)
@@ -824,6 +824,11 @@ end
 if STATE.autoInk == nil then
 	STATE.autoInk = true
 end
+if STATE.autoFuse == nil then
+	STATE.autoFuse = true
+end
+STATE.fuseBusy = false
+STATE.fuseGoal = nil
 if STATE.webhookReports == nil then
 	STATE.webhookReports = true
 end
@@ -1126,6 +1131,8 @@ hubCleanup(function()
 	STATE.liftSteal = false
 	STATE.stealGoal = nil
 	STATE.placeBusy = false
+	STATE.fuseBusy = false
+	STATE.fuseGoal = nil
 end)
 
 local function pinGoal(part, goal)
@@ -1173,6 +1180,19 @@ local function stepTrain()
 					pinGoal(hrp, activeGoal)
 				end
 			end)
+		end
+		return
+	end
+	if STATE.fuseBusy == true then
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if releaseGym() and hrp and typeof(STATE.fuseGoal) == "CFrame" then
+			if humanoid then
+				humanoid.Sit = false
+				humanoid.PlatformStand = false
+			end
+			pinGoal(hrp, STATE.fuseGoal)
 		end
 		return
 	end
@@ -2504,7 +2524,7 @@ function prehistoricEggs()
 end
 
 allowLeaveBench = function()
-	if STATE.autoTrain ~= true or STATE.trenchBusy == true or STATE.placeBusy == true then
+	if STATE.autoTrain ~= true or STATE.trenchBusy == true or STATE.placeBusy == true or STATE.fuseBusy == true then
 		return true
 	end
 	if STATE.trainFocus == "speed" then
@@ -4419,6 +4439,7 @@ local FLAG_KEYS = {
 	TrenchShop = "trenchShop",
 	PowerPearls = "powerPearls",
 	AutoInk = "autoInk",
+	AutoFuse = "autoFuse",
 	DiscordReports = "webhookReports",
 	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
@@ -6566,6 +6587,7 @@ local function installHub()
 	local pets = card(leftColumn, "PETS", 2)
 	makeSwitch(pets, "Auto Open", "autoOpen")
 	makeSwitch(pets, "Equip Best", "equipBest")
+	makeSwitch(pets, "Auto Fuse", "autoFuse", "Fuses 3 bag Whale Sharks, Megalodons, Moon Whales or Fossil TRexes into a better egg. Never plot pets")
 
 	local screenCard = card(leftColumn, "SCREEN", 3)
 	makeSwitch(screenCard, "Lite Pets", "litePets")
@@ -8066,6 +8088,196 @@ function STATE.useInk(now)
 	return true
 end
 
+STATE.fuseNames = {
+	["Whale Shark"] = true,
+	["Megalodon"] = true,
+	["Moon Whale"] = true,
+	["Fossil TRex"] = true,
+}
+
+function STATE.fuseConfig()
+	if type(STATE._fuseConfig) == "table" then
+		return STATE._fuseConfig
+	end
+	local ok, config = pcall(function()
+		local loadModuleScript = require :: any
+		return loadModuleScript(ReplicatedStorage:WaitForChild("Shared", 5):WaitForChild("Configs", 5):WaitForChild("Fuse", 5))
+	end)
+	if ok and type(config) == "table" and type(config.RankOf) == "function" then
+		STATE._fuseConfig = config
+		return config
+	end
+	return nil
+end
+
+function STATE.fusePlan(data)
+	local fuse = STATE.fuseConfig()
+	if not fuse or type(data) ~= "table" or typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
+		return nil
+	end
+	local room = STATE.plotRoom(data)
+	if not room or room.activeAnimals < room.activeSlots then
+		return nil
+	end
+	local worst = math.huge
+	for _, pet in pairs(data.plotPets or {}) do
+		local spec = type(pet) == "table" and petSpec(pet.key)
+		if spec and not spec.IsEgg and pet.hatchAt == nil then
+			local ok, income = pcall(Pets.IncomeFor, pet)
+			if ok and type(income) == "number" and income < worst then
+				worst = income
+			end
+		end
+	end
+	local groups = {}
+	for _, pet in pairs(data.backpack or {}) do
+		local spec = type(pet) == "table" and type(pet.uid) == "string" and petSpec(pet.key)
+		if spec and not spec.IsEgg and pet.hatchAt == nil and STATE.fuseNames[spec.DisplayName or ""] and fuse.Refusal(pet.key) == nil then
+			local ok, income = pcall(Pets.IncomeFor, pet)
+			if ok and type(income) == "number" and income < worst then
+				local group = groups[pet.key]
+				if not group then
+					group = { key = pet.key, name = spec.DisplayName, rank = fuse.RankOf(pet.key) or 0, pets = {} }
+					groups[pet.key] = group
+				end
+				group.pets[#group.pets + 1] = { uid = pet.uid, income = income }
+			end
+		end
+	end
+	local best = nil
+	for _, group in pairs(groups) do
+		if #group.pets >= 3 and (not best or group.rank > best.rank) then
+			best = group
+		end
+	end
+	if not best then
+		return nil
+	end
+	table.sort(best.pets, function(a, b)
+		return a.income > b.income
+	end)
+	return {
+		key = best.key,
+		name = best.name,
+		uids = { best.pets[1].uid, best.pets[2].uid, best.pets[3].uid },
+	}
+end
+
+function STATE.fuseSlots()
+	local raw = LocalPlayer:GetAttribute("FuseSlots")
+	if type(raw) ~= "string" then
+		return {}
+	end
+	local ok, slots = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(raw)
+	end)
+	return ok and type(slots) == "table" and slots or {}
+end
+
+function STATE.stepFuse()
+	if STATE.autoFuse ~= true or not running() or os.clock() < (STATE.nextFuse or 0) then
+		return
+	end
+	if STATE.trenchBusy == true or STATE.placeBusy == true or STATE.liftSteal == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
+		return
+	end
+	local trenchState = workspace:GetAttribute("TrenchState")
+	local endsAt = workspace:GetAttribute("TrenchEndsAt")
+	if (type(trenchState) == "string" and trenchState ~= "idle") or (type(endsAt) == "number" and endsAt - workspace:GetServerTimeNow() < 60) then
+		return
+	end
+	local map = workspace:FindFirstChild("Map")
+	local machine = map and map:FindFirstChild("FuseMachine")
+	if not machine then
+		STATE.nextFuse = os.clock() + 60
+		return
+	end
+	local leftover = STATE.fuseSlots()
+	local plan = nil
+	if #leftover == 0 then
+		plan = STATE.fusePlan(readData())
+		if not plan then
+			STATE.nextFuse = os.clock() + 30
+			return
+		end
+	end
+	STATE.nextFuse = os.clock() + 6
+	local okPivot, pivot = pcall(function()
+		return machine:IsA("Model") and machine:GetPivot() or machine.CFrame
+	end)
+	if not okPivot then
+		return
+	end
+	local centre = pivot.Position
+	STATE.fuseGoal = CFrame.new(centre + Vector3.new(0, 0, 12))
+	STATE.fuseBusy = true
+	local ok, err = pcall(function()
+		local arriveUntil = os.clock() + 5
+		local near = false
+		while os.clock() < arriveUntil and running() do
+			local character = LocalPlayer.Character
+			local hrp = character and character:FindFirstChild("HumanoidRootPart")
+			if hrp and not LocalPlayer:GetAttribute("Benching") and (hrp.Position - centre).Magnitude < 30 then
+				near = true
+				break
+			end
+			task.wait(0.1)
+		end
+		if not near then
+			STATE.fuseStatus = "Could not reach the Fuse Machine"
+			return
+		end
+		task.wait(1.2)
+		if plan then
+			for _, uid in ipairs(plan.uids) do
+				local deposited = Net:InvokeServer("FuseDeposit", uid, nil)
+				if type(deposited) ~= "table" or deposited.ok ~= true then
+					STATE.fuseStatus = "Fuse deposit refused: " .. tostring(type(deposited) == "table" and deposited.err or deposited)
+					break
+				end
+				task.wait(0.35)
+			end
+		end
+		local slots = STATE.fuseSlots()
+		if #slots < 3 then
+			for _, slot in ipairs(slots) do
+				if type(slot) == "table" and type(slot.slot) == "number" then
+					pcall(function()
+						Net:InvokeServer("FuseReturn", slot.slot)
+					end)
+					task.wait(0.35)
+				end
+			end
+			return
+		end
+		local fromKey = type(slots[1]) == "table" and slots[1].key or (plan and plan.key)
+		local fromSpec = fromKey and petSpec(fromKey)
+		local result = Net:InvokeServer("FuseRun")
+		if type(result) ~= "table" or result.ok ~= true then
+			STATE.fuseStatus = "Fuse refused: " .. tostring(type(result) == "table" and result.err or result)
+			return
+		end
+		local toSpec = petSpec(result.key)
+		local fromName = fromSpec and fromSpec.DisplayName or "animals"
+		local toName = toSpec and toSpec.DisplayName or tostring(result.key)
+		STATE.fuseStatus = string.format("Fused 3 %s → %s egg", fromName, toName)
+		STATE.noteActivity(STATE.fuseStatus)
+		local fuse = STATE.fuseConfig()
+		local jump = fuse and fromKey and result.key and ((fuse.RankOf(result.key) or 0) - (fuse.RankOf(fromKey) or 0)) or 0
+		if jump >= 2 and STATE.sendReport then
+			STATE.sendReport("Lucky fuse", string.format("3 %s fused into a **%s** egg (+%d steps)", fromName, toName, jump), 13145766)
+		end
+		task.wait(1)
+	end)
+	STATE.fuseBusy = false
+	STATE.fuseGoal = nil
+	if not ok then
+		STATE.fuseStatus = "Fuse error: " .. tostring(err)
+		STATE.nextFuse = os.clock() + 30
+		error(err)
+	end
+end
+
 function STATE.powerLeft()
 	local at = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or 0
 	return math.max(0, 600 - (os.time() - at))
@@ -8397,6 +8609,13 @@ task.spawn(function()
 			local placedOk = STATE.watchFeature("Auto Place", STATE.stepAutoPlace)
 			if not placedOk then
 				STATE.placeBusy = false
+			end
+			if not pendingDelivery() then
+				local fusedOk = STATE.watchFeature("Auto Fuse", STATE.stepFuse)
+				if not fusedOk then
+					STATE.fuseBusy = false
+					STATE.fuseGoal = nil
+				end
 			end
 		end
 		task.wait(0.6)
@@ -9180,7 +9399,7 @@ local function pullHomeIfEmpty()
 	if not running() then
 		return
 	end
-	if STATE.placeBusy == true or STATE.trenchBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
+	if STATE.placeBusy == true or STATE.trenchBusy == true or STATE.fuseBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
 		return
 	end
 	if LocalPlayer:GetAttribute("Benching") or LocalPlayer:GetAttribute("TrainingMounted") == true then
