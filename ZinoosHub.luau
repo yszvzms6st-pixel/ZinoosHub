@@ -6747,7 +6747,19 @@ local function installHub()
 		elseif STATE.trenchBusy == true then
 			lines[1] = "Trench · " .. state
 		else
-			lines[1] = "Trench · waiting for the next rift"
+			local endsAt = workspace:GetAttribute("TrenchEndsAt")
+			local remain = 0
+			if type(endsAt) == "number" then
+				remain = math.max(0, endsAt - workspace:GetServerTimeNow())
+			end
+			local show = state == "idle" and (remain + 30) or remain
+			local mins = math.floor(show / 60)
+			local secs = math.floor(show % 60)
+			if state == "warning" then
+				lines[1] = string.format("Trench · rift in %d:%02d", mins, secs)
+			else
+				lines[1] = string.format("Trench · next rift in %d:%02d", mins, secs)
+			end
 		end
 		local pearls = LocalPlayer:GetAttribute("Pearls")
 		if type(pearls) ~= "number" then
@@ -7738,7 +7750,7 @@ function STATE.stepTrench()
 	if state == "open" then
 		STATE.trenchOpenUntil = os.clock() + 20
 	end
-	local joining = state == "seal" or state == "open" or (state ~= "idle" and state ~= "fight" and siteOk)
+	local joining = state == "warning" or state == "seal" or state == "open" or (state ~= "idle" and state ~= "fight" and siteOk)
 	local waitingPull = state == "fight" and not inArena and os.clock() < (STATE.trenchOpenUntil or 0)
 	local eventOn = inArena or joining or waitingPull
 	local phase = inArena and "in" or state
@@ -7746,7 +7758,9 @@ function STATE.stepTrench()
 		local previous = STATE.trenchPhase
 		STATE.trenchPhase = phase
 		if previous ~= nil then
-			if phase == "seal" then
+			if phase == "warning" then
+				STATE.noteActivity("Heading to the rift")
+			elseif phase == "seal" then
 				STATE.noteActivity("Trench seal started")
 			elseif phase == "open" then
 				STATE.noteActivity("Trench rift is open")
@@ -7793,22 +7807,23 @@ function STATE.stepTrench()
 				STATE.noteActivity("The pinned tentacle is too heavy")
 			end
 		end
-	elseif siteOk then
+	elseif state == "warning" or state == "seal" or state == "open" or siteOk then
 		local map = workspace:FindFirstChild("Map")
 		local rift = map and map:FindFirstChild("TrenchRift")
 		local seal = rift and rift:FindFirstChild("Seal")
 		local sealRoot = seal and (seal:FindFirstChild("SealRoot") or seal:FindFirstChild("RiftSeal"))
 		local whirl = rift and rift:FindFirstChild("Whirl")
-		local stand = site + Vector3.new(0, 4, 0)
+		local stand = siteOk and (site + Vector3.new(0, 4, 0)) or Vector3.new(295, 6, 265.5)
 		if state == "seal" and sealRoot and sealRoot:IsA("BasePart") then
 			stand = sealRoot.Position + Vector3.new(0, 3, 0)
 		elseif whirl and whirl:IsA("BasePart") then
-			stand = Vector3.new(whirl.Position.X, math.max(site.Y + 3, whirl.Position.Y + 6), whirl.Position.Z)
+			local standY = siteOk and math.max(site.Y + 3, whirl.Position.Y + 6) or (whirl.Position.Y + 8)
+			stand = Vector3.new(whirl.Position.X, standY, whirl.Position.Z)
 		end
 		STATE.trenchGoal = CFrame.new(stand)
 		local offset = hrp.Position - stand
 		local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-		STATE.trenchPin = state == "seal" or flat > 12
+		STATE.trenchPin = state == "warning" or state == "seal" or flat > 12
 	else
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
