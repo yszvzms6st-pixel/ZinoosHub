@@ -6740,6 +6740,10 @@ local function installHub()
 			else
 				lines[1] = "Trench · in the fight"
 			end
+		elseif STATE.trenchBusy == true and state == "warning" then
+			local endsAt = workspace:GetAttribute("TrenchEndsAt")
+			local remain = type(endsAt) == "number" and math.max(0, endsAt - workspace:GetServerTimeNow()) or 0
+			lines[1] = string.format("Trench · at the rift, opens in %d:%02d", math.floor(remain / 60), math.floor(remain % 60))
 		elseif STATE.trenchBusy == true and state == "seal" then
 			lines[1] = "Trench · lifting the seal"
 		elseif STATE.trenchBusy == true and state == "open" then
@@ -7652,23 +7656,55 @@ function STATE.trenchTiers()
 		Crown = { Weight = 50000000000, Damage = 15 },
 	}
 	local ok, config = pcall(function()
+		local shared = ReplicatedStorage:FindFirstChild("Shared")
+		local configs = shared and shared:FindFirstChild("Configs")
+		local module = configs and configs:FindFirstChild("Trench")
+		if not (module and module:IsA("ModuleScript")) then
+			return nil
+		end
 		local loadModuleScript = require :: any
-		return loadModuleScript(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Configs"):WaitForChild("Trench"))
+		return loadModuleScript(module)
 	end)
 	if ok and type(config) == "table" and type(config.Tiers) == "table" then
-		STATE._trenchTiers = config.Tiers
-	else
-		STATE._trenchTiers = tiers
+		for name, tier in config.Tiers do
+			if type(name) == "string" and type(tier) == "table" and type(tier.Weight) == "number" then
+				tiers[name] = {
+					Weight = tier.Weight,
+					Damage = type(tier.Damage) == "number" and tier.Damage or (tiers[name] and tiers[name].Damage) or 0,
+				}
+			end
+		end
 	end
+	STATE._trenchTiers = tiers
 	return STATE._trenchTiers
 end
 
-function STATE.pickTrenchGrip(grips, hrp)
+function STATE.trenchGripTier(grip)
 	local tiers = STATE.trenchTiers()
+	local tierName = grip:GetAttribute("Tier")
+	if type(tierName) == "string" and type(tiers[tierName]) == "table" then
+		return tierName, tiers[tierName]
+	end
+	local lower = string.lower(grip.Name)
+	for name, tier in tiers do
+		if string.find(lower, string.lower(name), 1, true) then
+			return name, tier
+		end
+	end
+	return nil, nil
+end
+
+function STATE.trenchStrength()
 	local strength = LocalPlayer:GetAttribute("Strength")
 	if type(strength) ~= "number" then
-		strength = 0
+		local data = readData()
+		strength = type(data) == "table" and data.strength or 0
 	end
+	return type(strength) == "number" and strength or 0
+end
+
+function STATE.pickTrenchGrip(grips, hrp)
+	local strength = STATE.trenchStrength()
 	local best = nil
 	local bestScore = nil
 	if grips then
@@ -7676,11 +7712,10 @@ function STATE.pickTrenchGrip(grips, hrp)
 			if grip:IsA("BasePart") then
 				local gripState = grip:GetAttribute("State")
 				if gripState == nil or gripState == "pinned" then
-					local tierName = grip:GetAttribute("Tier")
-					local tier = type(tierName) == "string" and tiers[tierName] or nil
-					local weight = type(tier) == "table" and tier.Weight or 0
+					local _, tier = STATE.trenchGripTier(grip)
+					local weight = type(tier) == "table" and tier.Weight or nil
 					local damage = type(tier) == "table" and tier.Damage or 0
-					if type(weight) ~= "number" or strength >= weight then
+					if type(weight) == "number" and strength >= weight then
 						local flat = Vector3.new(hrp.Position.X - grip.Position.X, 0, hrp.Position.Z - grip.Position.Z).Magnitude
 						local score = (type(damage) == "number" and damage or 0) * 100000 - flat
 						if not bestScore or score > bestScore then
@@ -7794,7 +7829,7 @@ function STATE.stepTrench()
 		local grips = kraken and kraken:FindFirstChild("Grips")
 		local best = STATE.pickTrenchGrip(grips, hrp)
 		if best then
-			local tierName = best:GetAttribute("Tier")
+			local tierName = STATE.trenchGripTier(best)
 			STATE.trenchLift = type(tierName) == "string" and tierName or "tentacle"
 			STATE.trenchGripName = best.Name
 			STATE.trenchGoal = CFrame.new(best.Position + Vector3.new(0, 3, 0))
