@@ -23,7 +23,7 @@ Running it again replaces the hub that is already open. The new run stops the pr
 ## What it does
 
 - Trains strength on the bench until rebirth has no next tier, then trains speed on the treadmill.
-- Leaves training only for an eligible egg matching the selected rarity in the selected zone. The fresh default is Divine, in the Meadow zone. An old save that still has the automatic Prehistoric zone is moved to Meadow once. A zone you pick yourself is kept. Abyss is one of the zones you can pick.
+- Leaves training only for an eligible egg matching the selected rarity in the ticked zones. The fresh default is Divine, in the Meadow zone. An old save that still has the automatic Prehistoric zone is moved to Meadow once. Zones you pick yourself are kept, and you can tick more than one. Abyss is one of the zones you can pick.
 - Joins the free Trench when the rift seal is up or the arena is open. It lifts the seal and pinned tentacles, taps out of a grab, and spends pearls on Trench Eggs. It does not buy Robux rift skips, pearl packs, or paid boosts.
 - Rebirths, buys gym upgrades and trails, claims the daily reward, and works through the index.
 - Opens eggs when they are ready, and equips a better bag pet only when it earns more than the worst hatched pet on the plot. A failed swap puts that same pet back on its old spot.

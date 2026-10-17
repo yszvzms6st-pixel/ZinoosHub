@@ -811,6 +811,11 @@ end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Meadow"
 end
+STATE.stealZones = STATE.normalizeZones(STATE.stealZones)
+if #STATE.stealZones == 0 then
+	STATE.stealZones = { STATE.stealZone }
+end
+STATE.stealZone = STATE.stealZones[1]
 genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
 local token = genv.ZinoosGen
 STATE._alive = false
@@ -1349,6 +1354,88 @@ function STATE.toggleRarity(list, name)
 		nextList[#nextList + 1] = name
 	end
 	return STATE.normalizeRarities(nextList)
+end
+
+function STATE.normalizeZones(list)
+	local order = {
+		"Meadow",
+		"Desert",
+		"Volcano",
+		"Snow",
+		"Crystal",
+		"Jungle",
+		"Candy",
+		"Haunted",
+		"Heaven",
+		"Space",
+		"Prehistoric",
+		"Abyss",
+	}
+	local picked = {}
+	if type(list) == "table" then
+		for _, name in ipairs(list) do
+			if type(name) == "string" and FLOORS[name] then
+				picked[name] = true
+			end
+		end
+	end
+	local ordered = {}
+	for _, name in ipairs(order) do
+		if picked[name] then
+			ordered[#ordered + 1] = name
+			picked[name] = nil
+		end
+	end
+	local extra = {}
+	for name in pairs(picked) do
+		extra[#extra + 1] = name
+	end
+	table.sort(extra)
+	for _, name in ipairs(extra) do
+		ordered[#ordered + 1] = name
+	end
+	return ordered
+end
+
+function STATE.toggleZone(list, name)
+	if type(name) ~= "string" or FLOORS[name] == nil then
+		return STATE.normalizeZones(list)
+	end
+	local nextList = {}
+	local found = false
+	if type(list) == "table" then
+		for _, item in ipairs(list) do
+			if item == name then
+				found = true
+			else
+				nextList[#nextList + 1] = item
+			end
+		end
+	end
+	if not found then
+		nextList[#nextList + 1] = name
+	end
+	local ordered = STATE.normalizeZones(nextList)
+	if #ordered == 0 then
+		return STATE.normalizeZones(list)
+	end
+	return ordered
+end
+
+function STATE.zoneSelected(name)
+	if type(name) ~= "string" or FLOORS[name] == nil then
+		return false
+	end
+	local list = STATE.stealZones
+	if type(list) ~= "table" or #list == 0 then
+		return name == STATE.stealZone
+	end
+	for _, item in ipairs(list) do
+		if item == name then
+			return true
+		end
+	end
+	return false
 end
 
 if type(STATE.alertRarities) ~= "table" then
@@ -1971,16 +2058,6 @@ local function stealZone()
 	return "Meadow"
 end
 
-local function zoneChoice(value)
-	if type(value) == "table" then
-		value = value[1]
-	end
-	if type(value) == "string" and FLOORS[value] then
-		return value
-	end
-	return "Meadow"
-end
-
 local alertedEggs = setmetatable({}, { __mode = "k" })
 
 local function alertRank()
@@ -2074,10 +2151,14 @@ local function assessEgg(model, fromFront)
 			exists = false
 		end
 	end
-	local zone = stealZone()
-	local zoneOk = fromFront == true
-	if exists and not zoneOk then
-		zoneOk = model:GetAttribute("SpawnZone") == zone and inZone(pos, zone)
+	local zoneOk = false
+	if exists then
+		if fromFront == true then
+			zoneOk = STATE.zoneSelected("Meadow")
+		else
+			local spawn = model:GetAttribute("SpawnZone")
+			zoneOk = type(spawn) == "string" and STATE.zoneSelected(spawn) and inZone(pos, spawn)
+		end
 	end
 	local rank = exists and eggRank(model) or 0
 	local meets = STATE.raritySelected(STATE.alertRarities, rank)
@@ -2350,7 +2431,14 @@ local function peekPrehistoric()
 	consider()
 	local best = bestSeen()
 	if not (best and best.model.Parent) then
-		for _, pos in ipairs(scanPoints(stealZone())) do
+		local zones = STATE.stealZones
+		local scanZone = stealZone()
+		if type(zones) == "table" and #zones > 0 then
+			local index = ((STATE.stealScanZone or 0) % #zones) + 1
+			STATE.stealScanZone = index
+			scanZone = zones[index]
+		end
+		for _, pos in ipairs(scanPoints(scanZone)) do
 			if not running() or STATE.autoSteal ~= true then
 				break
 			end
@@ -2601,6 +2689,7 @@ local function resetStealScan()
 	STATE.stealGoal = nil
 	activeGoal = nil
 	STATE.stealTarget = nil
+	STATE.stealScanZone = 0
 end
 
 local function pendingDelivery()
@@ -3648,14 +3737,14 @@ local function stepView()
 	if not friends then
 		return
 	end
-	local zone = stealZone()
 	for _, model in ipairs(friends:GetChildren()) do
 		if model:IsA("Model") then
-			local show = STATE.eggEsp == true and model:GetAttribute("SpawnZone") == zone
+			local spawn = model:GetAttribute("SpawnZone")
+			local show = STATE.eggEsp == true and type(spawn) == "string" and STATE.zoneSelected(spawn)
 			local tag = model:FindFirstChild("ZinoosEggValue")
 			if show then
 				local pos = model:GetPivot().Position
-				if inZone(pos, zone) then
+				if inZone(pos, spawn) then
 					tag = tag or ensureEggTag(model)
 					local label = tag and tag:FindFirstChild("Value")
 					if label then
@@ -4372,6 +4461,7 @@ end
 local function loadSaved()
 	local function useFreshZone()
 		STATE.stealZone = "Meadow"
+		STATE.stealZones = { "Meadow" }
 		STATE.stealZoneExplicit = false
 		syncSavedVisuals()
 		return false
@@ -4487,6 +4577,15 @@ local function loadSaved()
 		STATE.stealZone = "Meadow"
 		STATE.stealZoneExplicit = false
 	end
+	local listed = {}
+	if STATE.stealZoneExplicit == true then
+		listed = STATE.normalizeZones(saved.StealZones)
+	end
+	if #listed == 0 then
+		listed[1] = STATE.stealZone
+	end
+	STATE.stealZones = listed
+	STATE.stealZone = listed[1]
 	syncSavedVisuals()
 	return migrated
 end
@@ -4504,7 +4603,8 @@ local function saveConfig()
 		ConfigVersion = CONFIG_VERSION,
 		StealZoneExplicit = STATE.stealZoneExplicit == true,
 		AutoSell = false,
-		StealZone = { STATE.stealZone or "Meadow" },
+		StealZone = { (STATE.stealZones and STATE.stealZones[1]) or STATE.stealZone or "Meadow" },
+		StealZones = STATE.stealZones,
 		WebhookRarity = { STATE.alertRarities[1] or STATE.webhookRarity or "Divine" },
 		WebhookRarities = STATE.alertRarities,
 		PlaceRarity = { STATE.placeRarities[1] or STATE.placeRarity or rarityOptions[1] or "Common" },
@@ -6079,7 +6179,7 @@ local function installHub()
 	STATE.toggleControls = {}
 	STATE.zoneControl = {
 		value = STATE.stealZone,
-		currentOption = { STATE.stealZone },
+		currentOption = STATE.stealZones,
 	}
 	STATE.rarityControl = {
 		value = STATE.alertRarities[1],
@@ -6133,16 +6233,17 @@ local function installHub()
 	if #zoneOptions == 0 then
 		zoneOptions[1] = "Meadow"
 	end
-	makeDropdown(eggs, "Steal Zone", function()
-		return STATE.stealZone or "Meadow"
+	makeMultiDropdown(eggs, "Steal Zone", function()
+		return STATE.stealZones
 	end, zoneOptions, function(option)
-		local chosen = zoneChoice(option)
-		local changed = chosen ~= STATE.stealZone
-		STATE.stealZone = chosen
+		local previous = STATE.rarityLabel(STATE.stealZones)
+		local ordered = STATE.toggleZone(STATE.stealZones, option)
+		STATE.stealZones = ordered
+		STATE.stealZone = ordered[1] or "Meadow"
 		STATE.stealZoneExplicit = true
 		STATE.zoneControl.value = STATE.stealZone
-		STATE.zoneControl.currentOption = { STATE.stealZone }
-		if changed then
+		STATE.zoneControl.currentOption = ordered
+		if STATE.rarityLabel(ordered) ~= previous then
 			resetStealScan()
 		end
 		saveConfig()
@@ -6492,7 +6593,7 @@ local function installHub()
 			phase = stealDaytime() and "Day" or "Night"
 		end
 		local lines = {
-			string.format("%s · %s · %s", stealZone(), STATE.rarityLabel(STATE.alertRarities), tostring(phase)),
+			string.format("%s · %s · %s", STATE.rarityLabel(STATE.stealZones), STATE.rarityLabel(STATE.alertRarities), tostring(phase)),
 			string.format("%d spawned · %d eligible · %d waiting for daytime", #eggs, eligible, waitingCount),
 		}
 		local status = STATE.lastStealStatus
@@ -8226,7 +8327,14 @@ local function pullHomeIfEmpty()
 	if typeof(home) == "Vector3" and (hrp.Position - home).Magnitude < 18 then
 		return
 	end
-	if hrp.Position.Z > -4000 and not inZone(hrp.Position, stealZone()) then
+	local inSelected = false
+	for _, name in ipairs(type(STATE.stealZones) == "table" and STATE.stealZones or {}) do
+		if inZone(hrp.Position, name) then
+			inSelected = true
+			break
+		end
+	end
+	if hrp.Position.Z > -4000 and not inSelected then
 		return
 	end
 	STATE.liftSteal = false
@@ -10039,6 +10147,14 @@ function STATE.runRepairChecks()
 		pcall(delfile, "ZinoosHub/theme-repair-test/manifest.json")
 	end
 	STATE._themeRoot = savedRoot
+	local savedZones = STATE.stealZones
+	local savedZone = STATE.stealZone
+	local both = STATE.rarityLabel(STATE.toggleZone({ "Meadow" }, "Abyss")) == "Meadow, Abyss"
+	local keptLast = STATE.rarityLabel(STATE.toggleZone({ "Meadow" }, "Meadow")) == "Meadow"
+	local dropped = STATE.rarityLabel(STATE.toggleZone({ "Meadow", "Abyss" }, "Meadow")) == "Abyss"
+	STATE.stealZones = savedZones
+	STATE.stealZone = savedZone
+	local zoneMulti = both and keptLast and dropped
 	local themeHost = STATE.runThemeHostChecks()
 	local authorityBypass = STATE.parseWebhook("https://discord.com:443@evil.example/api/webhooks/1/tok") == nil
 	local plot = STATE.runPlotRepairChecks()
@@ -10058,6 +10174,7 @@ function STATE.runRepairChecks()
 		rejectedUrl = rejectedUrl,
 		rejectedSize = rejectedSize,
 		stale = stale and staleUnwritten,
+		zoneMulti = zoneMulti,
 		themeHost = themeHost,
 		plot = plot,
 		plotOk = plotOk,
