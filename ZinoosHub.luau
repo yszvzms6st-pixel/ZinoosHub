@@ -192,8 +192,10 @@ local function destroyZinoosGuis()
 			end
 		end
 	end
-	sweep(CoreGui)
-	sweep(CoreGui:FindFirstChild("RobloxGui"))
+	pcall(sweep, CoreGui)
+	pcall(function()
+		sweep(CoreGui:FindFirstChild("RobloxGui"))
+	end)
 	local codex = CoreGui:FindFirstChild("CodexLiftRock")
 	if codex then
 		codex:Destroy()
@@ -324,7 +326,7 @@ local function shutdownHub(mode)
 	for index = #runtime.cleanups, 1, -1 do
 		local fn = runtime.cleanups[index]
 		runtime.cleanups[index] = nil
-		pcall(fn)
+		task.spawn(pcall, fn)
 	end
 	destroyZinoosGuis()
 	local marker = CoreGui:FindFirstChild("ZinoosHub")
@@ -377,7 +379,11 @@ local function legacyStop()
 end
 
 if not pcall(function()
-	return CoreGui:GetChildren()
+	CoreGui:GetChildren()
+	local robloxGui = CoreGui:FindFirstChild("RobloxGui")
+	if robloxGui then
+		robloxGui:GetChildren()
+	end
 end) then
 	warn("[Zinoos hub] This load could not open CoreGui, so the running hub was left as it is. Run the loader from the executor again.")
 	return
@@ -387,7 +393,18 @@ local previousShutdown = genv.ZinoosShutdown
 genv.ZinoosShutdown = shutdownHub
 STATE.shutdown = shutdownHub
 if typeof(previousShutdown) == "function" then
-	local stopped, stopErr = pcall(previousShutdown, "replace")
+	local stopped, stopErr, stopDone = true, nil, false
+	task.spawn(function()
+		stopped, stopErr = pcall(previousShutdown, "replace")
+		stopDone = true
+	end)
+	local stopUntil = os.clock() + 3
+	while not stopDone and os.clock() < stopUntil do
+		task.wait()
+	end
+	if not stopDone then
+		stopped, stopErr = false, "the previous run took too long to stop"
+	end
 	if not stopped then
 		warn("[Zinoos hub] Could not stop the previous run: " .. tostring(stopErr))
 		legacyStop()
@@ -800,6 +817,12 @@ if STATE.autoTrench == nil then
 end
 if STATE.trenchShop == nil then
 	STATE.trenchShop = true
+end
+if STATE.powerPearls == nil then
+	STATE.powerPearls = true
+end
+if STATE.webhookReports == nil then
+	STATE.webhookReports = true
 end
 if STATE.autoPlace ~= true then
 	STATE.autoPlace = false
@@ -3246,6 +3269,9 @@ local function runStealTrip()
 	LocalPlayer:SetAttribute("CodexMode", "train")
 	LocalPlayer:SetAttribute("CodexStolen", pickupSucceeded and 1 or 0)
 	LocalPlayer:SetAttribute("CodexStealName", stolenName)
+	if pickupSucceeded and typeof(STATE.noteSession) == "function" then
+		STATE.noteSession("steals")
+	end
 	if pickupSucceeded and queueRare then
 		queueRare("Stolen egg", stolenName)
 	end
@@ -3636,6 +3662,35 @@ queueRare = function(kind, name, money, mark)
 		})
 		if STATE.noteFault then
 			STATE.noteFault("Webhook Alerts", sent == true, reason)
+		end
+	end)
+	return true
+end
+
+function STATE.sendReport(title, description, color)
+	if STATE.webhookOn == false or STATE.webhookReports ~= true or STATE._unloaded then
+		return false
+	end
+	local url = webhookUrl()
+	if not url or not webhookRequest() then
+		return false
+	end
+	task.spawn(function()
+		if STATE._unloaded or not running() then
+			return
+		end
+		local sent, reason = sendWebhook(url, {
+			username = "Zinoos hub",
+			embeds = {
+				{
+					title = tostring(title),
+					description = tostring(description),
+					color = type(color) == "number" and color or 5814783,
+				},
+			},
+		})
+		if STATE.noteFault then
+			STATE.noteFault("Discord Reports", sent == true, reason)
 		end
 	end)
 	return true
@@ -4058,8 +4113,10 @@ local function destroyInvHuds(except)
 			end
 		end
 	end
-	sweep(CoreGui)
-	sweep(CoreGui:FindFirstChild("RobloxGui"))
+	pcall(sweep, CoreGui)
+	pcall(function()
+		sweep(CoreGui:FindFirstChild("RobloxGui"))
+	end)
 end
 
 local function ensureInvGui()
@@ -4357,6 +4414,8 @@ local FLAG_KEYS = {
 	AutoSteal = "autoSteal",
 	AutoTrench = "autoTrench",
 	TrenchShop = "trenchShop",
+	PowerPearls = "powerPearls",
+	DiscordReports = "webhookReports",
 	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
 	EquipBest = "equipBest",
@@ -4681,6 +4740,9 @@ local function loadSaved()
 			STATE[key] = saved[flag]
 		end
 	end
+	if type(saved.PowerPearlAt) == "number" then
+		STATE.powerPearlAt = saved.PowerPearlAt
+	end
 	STATE.autoSell = false
 	local zone = saved.StealZone
 	if type(zone) == "table" then
@@ -4816,6 +4878,7 @@ local function saveConfig()
 		PlaceRarities = STATE.placeRarities,
 		PlacementPriority = STATE.placementChoice(STATE.placementPriority),
 		PhoneGame = STATE.phoneChoice or "Critter Merge",
+		PowerPearlAt = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or nil,
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
 		MenuY = STATE.menuY,
@@ -6431,6 +6494,7 @@ local function installHub()
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
 	makeSwitch(eggs, "Auto Trench", "autoTrench", "Joins the free Trench fight and lifts the tentacles")
 	makeSwitch(eggs, "Trench Shop", "trenchShop", "Spends pearls on Trench Eggs. Never buys Robux")
+	makeSwitch(eggs, "Power Pearls", "powerPearls", "Spends spare pearls on +10m Power, keeping 450 for a Trench Egg. Never buys Robux")
 	makeSwitch(eggs, "Auto Place", "autoPlace", "Places ticked eggs from your bag")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
@@ -6735,11 +6799,29 @@ local function installHub()
 		STATE.refreshHealth = nil
 	end
 
-	local note = card(homePage, "HOW IT WORKS", 6)
+	do
+		local sessionCard = card(homePage, "SESSION", 6)
+		local sessionBody = label(sessionCard, "Reading your progress...", 13, ink, Enum.Font.Gotham, 90)
+		sessionBody.LayoutOrder = 1
+		sessionBody.AutomaticSize = Enum.AutomaticSize.Y
+		sessionBody.Size = UDim2.new(1, 0, 0, 0)
+		sessionBody.TextWrapped = true
+		remember(sessionBody, sessionCard, "session stats progress per hour")
+		STATE.refreshSessionStats = function()
+			local lines = STATE.sessionLines and STATE.sessionLines()
+			local text = lines and table.concat(lines, "\n") or "Reading your progress..."
+			if sessionBody.Text ~= text then
+				sessionBody.Text = text
+			end
+			sessionBody.TextColor3 = STATE.hubThemeDef().ink
+		end
+	end
+
+	local note = card(homePage, "HOW IT WORKS", 7)
 	local noteBody = label(note, "Tick every rarity you want stolen. Tick every rarity you want placed on your plot. An unticked egg stays in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 56)
 	noteBody.LayoutOrder = 1
 
-	local activityCard = card(homePage, "ACTIVITY", 7)
+	local activityCard = card(homePage, "ACTIVITY", 8)
 	local activityBody = label(activityCard, "Waiting for the next thing the hub does.", 13, muted, Enum.Font.Gotham, 72)
 	activityBody.LayoutOrder = 1
 	activityBody.AutomaticSize = Enum.AutomaticSize.Y
@@ -6806,6 +6888,10 @@ local function installHub()
 		end
 		local shop = STATE.trenchShop == true and "on" or "off"
 		lines[2] = string.format("Shop %s · %d / 450 pearls", shop, math.floor(pearls))
+		local powerLeft = STATE.powerLeft and STATE.powerLeft() or 0
+		if STATE.powerPearls == true and powerLeft > 0 then
+			lines[2] ..= string.format(" · Power %d:%02d", math.floor(powerLeft / 60), math.floor(powerLeft % 60))
+		end
 		local log = STATE.activity
 		if type(log) == "table" and #log > 0 then
 			lines[#lines + 1] = table.concat(log, "\n")
@@ -6818,7 +6904,7 @@ local function installHub()
 	end
 	STATE.refreshActivity = refreshActivity
 
-	local trackerCard = card(homePage, "EGG TRACKER", 8)
+	local trackerCard = card(homePage, "EGG TRACKER", 9)
 	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 112)
 	trackerStatus.LayoutOrder = 1
 	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
@@ -6974,6 +7060,7 @@ local function installHub()
 	discordBlurb.LayoutOrder = 1
 	local discordCard = card(discordPage, "WEBHOOK", 2)
 	makeSwitch(discordCard, "Webhook Alerts", "webhookOn")
+	makeSwitch(discordCard, "Trench & Hourly Reports", "webhookReports", "Posts each Trench result and an hourly progress summary")
 	local urlBox = Instance.new("TextBox")
 	urlBox.BackgroundColor3 = panel
 	urlBox.BackgroundTransparency = cardFade
@@ -7215,6 +7302,9 @@ local function installHub()
 			pcall(refreshHome)
 			pcall(refreshTracker)
 			pcall(refreshActivity)
+			if typeof(STATE.refreshSessionStats) == "function" then
+				pcall(STATE.refreshSessionStats)
+			end
 			if refreshHealth then
 				pcall(refreshHealth)
 			end
@@ -7631,7 +7721,7 @@ local function installHub()
 		end
 	end))
 
-	local saveCard = card(homePage, "CONFIG", 8)
+	local saveCard = card(homePage, "CONFIG", 10)
 	local saveNote = label(saveCard, "Saves the toggles, rarities, zone, and priority for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
 	saveNote.LayoutOrder = 1
 	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -7673,6 +7763,98 @@ task.spawn(function()
 		if running() then
 			shutdownHub("failed")
 		end
+	end
+end)
+
+function STATE.sessionData()
+	local session = STATE._session
+	if type(session) == "table" and session.jobId == game.JobId then
+		return session
+	end
+	local data = readData()
+	if type(data) ~= "table" or type(data.totalStrength) ~= "number" then
+		return nil
+	end
+	local trench = type(data.trench) == "table" and data.trench or {}
+	session = {
+		jobId = game.JobId,
+		startedAt = os.time(),
+		reportedAt = os.time(),
+		strength = data.totalStrength,
+		cash = type(data.totalCash) == "number" and data.totalCash or 0,
+		rebirths = type(data.rebirths) == "number" and data.rebirths or 0,
+		pearls = type(trench.totalPearls) == "number" and trench.totalPearls or 0,
+		steals = 0,
+		fights = 0,
+		wins = 0,
+	}
+	STATE._session = session
+	return session
+end
+
+function STATE.noteSession(field)
+	local session = STATE.sessionData()
+	if session and type(session[field]) == "number" then
+		session[field] += 1
+	end
+end
+
+function STATE.sessionLines()
+	local session = STATE.sessionData()
+	local data = readData()
+	if not session or type(data) ~= "table" then
+		return nil
+	end
+	local trench = type(data.trench) == "table" and data.trench or {}
+	local elapsed = math.max(1, os.time() - session.startedAt)
+	local strength = math.max(0, (type(data.totalStrength) == "number" and data.totalStrength or session.strength) - session.strength)
+	local cash = math.max(0, (type(data.totalCash) == "number" and data.totalCash or session.cash) - session.cash)
+	local pearls = math.max(0, (type(trench.totalPearls) == "number" and trench.totalPearls or session.pearls) - session.pearls)
+	local rebirths = math.max(0, (type(data.rebirths) == "number" and data.rebirths or session.rebirths) - session.rebirths)
+	local function rate(amount, prefix)
+		if elapsed < 300 then
+			return ""
+		end
+		return string.format("  (%s%s/h)", prefix, shortNumber(amount / (elapsed / 3600)))
+	end
+	return {
+		string.format("Time %dh %02dm", math.floor(elapsed / 3600), math.floor((elapsed % 3600) / 60)),
+		string.format("Strength +%s%s", shortNumber(strength), rate(strength, "")),
+		string.format("Cash +$%s%s", shortNumber(cash), rate(cash, "$")),
+		string.format("Rebirths +%d · Eggs stolen %d", rebirths, session.steals),
+		string.format("Trench %d fought, %d won · Pearls +%d", session.fights, session.wins, math.floor(pearls)),
+	}
+end
+
+function STATE.finishTrenchFight(fight)
+	local data = readData()
+	local trench = type(data) == "table" and type(data.trench) == "table" and data.trench or {}
+	local pearls = math.max(0, (type(trench.totalPearls) == "number" and trench.totalPearls or fight.pearls) - fight.pearls)
+	local damage = math.max(0, (type(trench.damage) == "number" and trench.damage or fight.damage) - fight.damage)
+	local won = fight.outcome == "won" or (type(trench.kills) == "number" and trench.kills > fight.kills)
+	STATE.noteSession("fights")
+	if won then
+		STATE.noteSession("wins")
+	end
+	STATE.noteActivity(string.format("Trench %s · +%d pearls", won and "won" or "lost", math.floor(pearls)))
+	STATE.sendReport(won and "Trench won" or "Trench lost", table.concat({
+		won and "The King Kraken was defeated." or "The King Kraken got away.",
+		string.format("Pearls +%d (now %d)", math.floor(pearls), math.floor(tonumber(trench.pearls) or 0)),
+		string.format("Damage dealt %.0f", damage),
+	}, "\n"), won and 3066993 or 15158332)
+end
+
+task.spawn(function()
+	while running() do
+		local session = STATE.sessionData()
+		if session and os.time() - (session.reportedAt or session.startedAt) >= 3600 then
+			session.reportedAt = os.time()
+			local lines = STATE.sessionLines()
+			if lines then
+				STATE.sendReport("Hourly progress", table.concat(lines, "\n"))
+			end
+		end
+		task.wait(30)
 	end
 end)
 
@@ -7760,8 +7942,13 @@ function STATE.pickTrenchGrip(grips, hrp)
 	return best
 end
 
+function STATE.powerLeft()
+	local at = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or 0
+	return math.max(0, 600 - (os.time() - at))
+end
+
 function STATE.buyTrenchEgg(now)
-	if STATE.trenchShop ~= true or now < (STATE.nextTrenchBuy or 0) then
+	if (STATE.trenchShop ~= true and STATE.powerPearls ~= true) or now < (STATE.nextTrenchBuy or 0) then
 		return
 	end
 	local pearls = LocalPlayer:GetAttribute("Pearls")
@@ -7772,7 +7959,28 @@ function STATE.buyTrenchEgg(now)
 			pearls = trench.pearls
 		end
 	end
-	if type(pearls) ~= "number" or pearls < 450 then
+	if type(pearls) ~= "number" then
+		return
+	end
+	local reserve = STATE.trenchShop == true and 450 or 0
+	if STATE.powerPearls == true and STATE.powerLeft() <= 0 and pearls >= reserve + 60 then
+		STATE.nextTrenchBuy = now + 1.5
+		local ok, bought = pcall(function()
+			return Net:InvokeServer("TrenchShopBuy", "PowerPearl")
+		end)
+		if ok and bought == true then
+			STATE.powerPearlAt = os.time()
+			if typeof(STATE.writeConfig) == "function" then
+				pcall(STATE.writeConfig)
+			end
+			STATE.shopStatus = "Bought +10m Power"
+			STATE.noteActivity("Bought +10m Power for 60 pearls")
+		else
+			STATE.powerPearlAt = os.time() - 540
+		end
+		return
+	end
+	if STATE.trenchShop ~= true or pearls < 450 then
 		return
 	end
 	STATE.nextTrenchBuy = now + 1.5
@@ -7879,6 +8087,28 @@ function STATE.stepTrench()
 			elseif phase == "idle" or phase == "ending" then
 				STATE.noteActivity("Trench ended")
 			end
+		end
+	end
+	local fight = STATE._trenchFight
+	if inArena and type(fight) ~= "table" then
+		local data = readData()
+		local trench = type(data) == "table" and type(data.trench) == "table" and data.trench or {}
+		STATE._trenchFight = {
+			pearls = type(trench.totalPearls) == "number" and trench.totalPearls or 0,
+			damage = type(trench.damage) == "number" and trench.damage or 0,
+			kills = type(trench.kills) == "number" and trench.kills or 0,
+		}
+	elseif type(fight) == "table" then
+		if state == "ending" and fight.outcome == nil then
+			local boss = workspace:GetAttribute("TrenchBossPhase")
+			fight.outcome = boss == "dead" and "won" or (boss == "escaped" and "lost" or nil)
+		elseif state == "idle" and not inArena then
+			STATE._trenchFight = nil
+			task.delay(3, function()
+				if running() then
+					STATE.finishTrenchFight(fight)
+				end
+			end)
 		end
 	end
 	if not eventOn then
