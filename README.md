@@ -24,7 +24,8 @@ Running it again replaces the hub that is already open. The new run stops the pr
 
 - Trains strength on the bench until rebirth has no next tier, then trains speed on the treadmill.
 - Leaves training only for the eligible egg that earns the most in the ticked zones. Abyssal, Crabby, and Cursed eggs come before a plain egg of the same rarity. It checks every ticked zone during the day, then goes again two seconds after a pickup. Pearls are saved for Trench Eggs. The fresh default is Divine, in the Meadow zone. An old save that still has the automatic Prehistoric zone is moved to Meadow once. Zones you pick yourself are kept, and you can tick more than one. Abyss is one of the zones you can pick.
-- Auto Trench is a switch. When it is on, the hub leaves the bench for the seal, keeps lifting until the rift opens, then stops holding you so the game can pull you in. Inside, it lifts each pinned tentacle, taps out of a grab, and spends pearls on Trench Eggs. It does not buy Robux rift skips, pearl packs, or paid boosts.
+- Auto Trench is a switch. When it is on, the hub leaves the bench for the seal, keeps lifting until the rift opens, then stops holding you so the game can pull you in. Inside, it lifts each pinned tentacle and taps out of a grab. Trench Shop is its own switch and spends pearls on Trench Eggs only. It does not buy Robux rift skips, pearl packs, or paid boosts.
+- Home has an Activity card. It shows whether the Trench is waiting, lifting the seal, or in the fight, how many pearls you have, and the latest gym, floor, trail, daily, index, stash, and shop actions.
 - Rebirths, buys gym upgrades and trails, claims the daily reward, and works through the index.
 - Opens eggs when they are ready, and equips a better bag pet only when it earns more than the worst hatched pet on the plot. A failed swap puts that same pet back on its old spot.
 - Custom theme colours still apply when a picture URL is rejected. Theme pictures are downloaded only from `ysoyjfnigavjajrjftmv.supabase.co`.
@@ -33,7 +34,7 @@ Running it again replaces the hub that is already open. The new run stops the pr
 - Sends a Discord message when an eligible egg matching the selected rarity appears, is stolen, or hatches.
 - Anti AFK keeps the session in the game while you are idle. It tries VirtualUser first, then VirtualInputManager, and pulses again every eight minutes. It does not move the character, leave the bench, or press anything on screen. If neither input method exists, the switch stays on and the tracker says Anti AFK is unavailable. The eight-minute gap matches the idle pulse in the script.
 
-A fresh save turns these on: Auto Train, Anti AFK, Auto Rebirth, Auto Upgrade, Auto Trails, Auto Steal, Auto Trench, Auto Open, Equip Best, Auto Daily, Auto Index, Free Stash, Lite Pets, Egg ESP, Inventory ESP, Low End, and Webhook Alerts. An existing configuration file is loaded once at startup and kept. Saved toggles, the webhook URL, menu position, and rarity stay as they were. A missing zone, or an old automatic Prehistoric zone, becomes Meadow until you choose a zone. Auto Sell stays off.
+A fresh save turns these on: Auto Train, Anti AFK, Auto Rebirth, Auto Upgrade, Auto Trails, Auto Steal, Auto Trench, Trench Shop, Auto Open, Equip Best, Auto Daily, Auto Index, Free Stash, Lite Pets, Egg ESP, Inventory ESP, Low End, and Webhook Alerts. An existing configuration file is loaded once at startup and kept. Saved toggles, the webhook URL, menu position, and rarity stay as they were. A missing zone, or an old automatic Prehistoric zone, becomes Meadow until you choose a zone. Auto Sell stays off.
 
 Press **Right Control** to open or close the menu. Drag the top bar or the sidebar to move the window. The Zinoos button can be dragged too.
 

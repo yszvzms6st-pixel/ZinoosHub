@@ -65,6 +65,22 @@ function STATE.noteFault(name, ok, err)
 	return false
 end
 
+function STATE.noteActivity(text)
+	if type(text) ~= "string" or text == "" then
+		return
+	end
+	if type(STATE.activity) ~= "table" then
+		STATE.activity = {}
+	end
+	if STATE.activity[#STATE.activity] == text then
+		return
+	end
+	STATE.activity[#STATE.activity + 1] = text
+	while #STATE.activity > 8 do
+		table.remove(STATE.activity, 1)
+	end
+end
+
 function STATE.watchFeature(name, fn)
 	local ok, result = pcall(fn)
 	STATE.noteFault(name, ok, result)
@@ -775,6 +791,9 @@ end
 if STATE.autoTrench == nil then
 	STATE.autoTrench = true
 end
+if STATE.trenchShop == nil then
+	STATE.trenchShop = true
+end
 if STATE.autoPlace ~= true then
 	STATE.autoPlace = false
 end
@@ -1223,6 +1242,8 @@ local function stepUpgrade()
 	if data.gymOwned ~= true then
 		if cash >= Gym.UnlockCost then
 			Net:InvokeServer("BuyGym")
+			STATE.upgradeStatus = "Bought the gym"
+			STATE.noteActivity("Bought the gym")
 		end
 		return
 	end
@@ -1230,6 +1251,8 @@ local function stepUpgrade()
 	local nextLevel = typeof(level) == "number" and Gym.Levels[level + 1]
 	if typeof(level) == "number" and level < #Gym.Levels and typeof(nextLevel) == "table" and typeof(nextLevel.Price) == "number" and cash >= nextLevel.Price then
 		Net:InvokeServer("UpgradeGym")
+		STATE.upgradeStatus = "Bought gym level " .. tostring(level + 1)
+		STATE.noteActivity(STATE.upgradeStatus)
 		return
 	end
 	local nextFloor = (data.baseLevel or 0) + 1
@@ -1239,6 +1262,8 @@ local function stepUpgrade()
 		end)
 		if priceOk and typeof(floorPrice) == "number" and cash >= floorPrice then
 			Net:InvokeServer("BuyFloorLevel", nextFloor)
+			STATE.upgradeStatus = "Bought floor " .. tostring(nextFloor)
+			STATE.noteActivity(STATE.upgradeStatus)
 			return
 		end
 	end
@@ -1249,6 +1274,8 @@ local function stepUpgrade()
 		end)
 		if priceOk and typeof(basementPrice) == "number" and cash >= basementPrice then
 			Net:InvokeServer("BuyBasementLevel", nextBasement)
+			STATE.upgradeStatus = "Bought basement " .. tostring(nextBasement)
+			STATE.noteActivity(STATE.upgradeStatus)
 		end
 	end
 end
@@ -1288,10 +1315,14 @@ local function stepTrails()
 	end
 	if typeof(buyName) == "string" then
 		Net:FireServer("BuyTrail", buyName)
+		STATE.trailStatus = "Bought " .. buyName
+		STATE.noteActivity(STATE.trailStatus)
 		return
 	end
 	if typeof(bestOwned) == "string" and data.trail ~= bestOwned then
 		Net:FireServer("EquipTrail", bestOwned)
+		STATE.trailStatus = "Equipped " .. bestOwned
+		STATE.noteActivity(STATE.trailStatus)
 	end
 end
 
@@ -3284,6 +3315,8 @@ local function stepDaily()
 	end
 	STATE.nextDaily = os.clock() + 8
 	Net:FireServer("ClaimDailyReward", day)
+	STATE.dailyStatus = "Claimed daily " .. tostring(day)
+	STATE.noteActivity(STATE.dailyStatus)
 end
 
 local function hasPendingIndex(rewards)
@@ -3317,6 +3350,8 @@ local function stepIndex()
 	pcall(function()
 		Net:InvokeServer("ClaimAllIndexRewards")
 	end)
+	STATE.indexStatus = "Claimed index rewards"
+	STATE.noteActivity(STATE.indexStatus)
 end
 
 local function stepStash()
@@ -3350,6 +3385,8 @@ local function stepStash()
 	end
 	STATE.nextStash = os.clock() + 0.6
 	Net:FireServer("ClaimStashCard", index)
+	STATE.stashStatus = "Claimed a free stash card"
+	STATE.noteActivity(STATE.stashStatus)
 end
 
 local function popFreeBubbles()
@@ -4292,6 +4329,7 @@ local FLAG_KEYS = {
 	AutoTrails = "trails",
 	AutoSteal = "autoSteal",
 	AutoTrench = "autoTrench",
+	TrenchShop = "trenchShop",
 	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
 	EquipBest = "equipBest",
@@ -6365,6 +6403,7 @@ local function installHub()
 	local eggs = card(leftColumn, "EGGS", 1)
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
 	makeSwitch(eggs, "Auto Trench", "autoTrench", "Joins the free Trench fight and lifts the tentacles")
+	makeSwitch(eggs, "Trench Shop", "trenchShop", "Spends pearls on Trench Eggs. Never buys Robux")
 	makeSwitch(eggs, "Auto Place", "autoPlace", "Places ticked eggs from your bag")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
@@ -6673,7 +6712,57 @@ local function installHub()
 	local noteBody = label(note, "Tick every rarity you want stolen. Tick every rarity you want placed on your plot. An unticked egg stays in your bag. Nothing here sells pets.", 13, ink, Enum.Font.Gotham, 56)
 	noteBody.LayoutOrder = 1
 
-	local trackerCard = card(homePage, "EGG TRACKER", 7)
+	local activityCard = card(homePage, "ACTIVITY", 7)
+	local activityBody = label(activityCard, "Waiting for the next thing the hub does.", 13, muted, Enum.Font.Gotham, 72)
+	activityBody.LayoutOrder = 1
+	activityBody.AutomaticSize = Enum.AutomaticSize.Y
+	activityBody.Size = UDim2.new(1, 0, 0, 0)
+	activityBody.TextWrapped = true
+	remember(activityBody, activityCard, "activity shop pearls trench")
+	local function refreshActivity()
+		local lines = {}
+		local state = workspace:GetAttribute("TrenchState")
+		if type(state) ~= "string" then
+			state = "idle"
+		end
+		local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
+		if STATE.autoTrench ~= true then
+			lines[1] = "Trench off"
+		elseif inArena then
+			lines[1] = "Trench · in the fight"
+		elseif STATE.trenchBusy == true and state == "seal" then
+			lines[1] = "Trench · lifting the seal"
+		elseif STATE.trenchBusy == true and state == "open" then
+			lines[1] = "Trench · waiting for the pull"
+		elseif STATE.trenchBusy == true then
+			lines[1] = "Trench · " .. state
+		else
+			lines[1] = "Trench · waiting for the next rift"
+		end
+		local pearls = LocalPlayer:GetAttribute("Pearls")
+		if type(pearls) ~= "number" then
+			local data = readData()
+			local trench = type(data) == "table" and data.trench
+			pearls = type(trench) == "table" and trench.pearls or 0
+		end
+		if type(pearls) ~= "number" then
+			pearls = 0
+		end
+		local shop = STATE.trenchShop == true and "on" or "off"
+		lines[2] = string.format("Shop %s · %d / 450 pearls", shop, math.floor(pearls))
+		local log = STATE.activity
+		if type(log) == "table" and #log > 0 then
+			lines[#lines + 1] = table.concat(log, "\n")
+		end
+		local text = table.concat(lines, "\n")
+		if activityBody.Text ~= text then
+			activityBody.Text = text
+		end
+		activityBody.TextColor3 = STATE.hubThemeDef().ink
+	end
+	STATE.refreshActivity = refreshActivity
+
+	local trackerCard = card(homePage, "EGG TRACKER", 8)
 	local trackerStatus = label(trackerCard, "Looking for eggs...", 13, muted, Enum.Font.Gotham, 112)
 	trackerStatus.LayoutOrder = 1
 	remember(trackerStatus, trackerCard, "egg tracker spawned eggs")
@@ -7047,6 +7136,7 @@ local function installHub()
 	end
 	refreshHome()
 	refreshTracker()
+	refreshActivity()
 	local function refreshSession()
 		local clockText = sessionClock()
 		sessionText.Text = "Session " .. clockText
@@ -7068,6 +7158,7 @@ local function installHub()
 		while running() and gui.Parent do
 			pcall(refreshHome)
 			pcall(refreshTracker)
+			pcall(refreshActivity)
 			if refreshHealth then
 				pcall(refreshHealth)
 			end
@@ -7529,11 +7620,48 @@ task.spawn(function()
 	end
 end)
 
+function STATE.buyTrenchEgg(now)
+	if STATE.trenchShop ~= true or now < (STATE.nextTrenchBuy or 0) then
+		return
+	end
+	local pearls = LocalPlayer:GetAttribute("Pearls")
+	if type(pearls) ~= "number" then
+		local data = readData()
+		local trench = type(data) == "table" and data.trench
+		if type(trench) == "table" and type(trench.pearls) == "number" then
+			pearls = trench.pearls
+		end
+	end
+	if type(pearls) ~= "number" or pearls < 450 then
+		return
+	end
+	STATE.nextTrenchBuy = now + 1.5
+	local ok = pcall(function()
+		Net:InvokeServer("TrenchShopBuy", "TrenchEgg")
+	end)
+	local after = LocalPlayer:GetAttribute("Pearls")
+	if ok and type(after) == "number" and after < pearls then
+		STATE.shopStatus = "Bought a Trench Egg"
+		STATE.noteActivity("Bought a Trench Egg for 450 pearls")
+	elseif os.clock() >= (STATE.nextShopNote or 0) then
+		STATE.nextShopNote = os.clock() + 30
+		STATE.shopStatus = "Shop did not take the pearls"
+		STATE.noteActivity(STATE.shopStatus)
+	end
+end
+
 function STATE.stepTrench()
-	if not running() or STATE.autoTrench ~= true then
+	if not running() then
 		STATE.trenchBusy = false
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
+		return
+	end
+	if STATE.autoTrench ~= true then
+		STATE.trenchBusy = false
+		STATE.trenchGoal = nil
+		STATE.trenchPin = false
+		STATE.buyTrenchEgg(os.clock())
 		return
 	end
 	local now = os.clock()
@@ -7550,6 +7678,24 @@ function STATE.stepTrench()
 	local joining = state == "seal" or state == "open" or (state ~= "idle" and state ~= "fight" and siteOk)
 	local waitingPull = state == "fight" and not inArena and os.clock() < (STATE.trenchOpenUntil or 0)
 	local eventOn = inArena or joining or waitingPull
+	local phase = inArena and "in" or state
+	if STATE.trenchPhase ~= phase then
+		local previous = STATE.trenchPhase
+		STATE.trenchPhase = phase
+		if previous ~= nil then
+			if phase == "seal" then
+				STATE.noteActivity("Trench seal started")
+			elseif phase == "open" then
+				STATE.noteActivity("Trench rift is open")
+			elseif phase == "in" then
+				STATE.noteActivity("Pulled into the trench")
+			elseif phase == "fight" then
+				STATE.noteActivity("Trench fight started")
+			elseif phase == "idle" then
+				STATE.noteActivity("Trench ended")
+			end
+		end
+	end
 	if not eventOn then
 		STATE.trenchBusy = false
 		STATE.trenchGoal = nil
@@ -7649,22 +7795,7 @@ function STATE.stepTrench()
 			end
 		end
 	end
-	if now >= (STATE.nextTrenchBuy or 0) then
-		local pearls = LocalPlayer:GetAttribute("Pearls")
-		if type(pearls) ~= "number" then
-			local data = readData()
-			local trench = type(data) == "table" and data.trench
-			if type(trench) == "table" and type(trench.pearls) == "number" then
-				pearls = trench.pearls
-			end
-		end
-		if type(pearls) == "number" and pearls >= 450 then
-			STATE.nextTrenchBuy = now + 1.5
-			pcall(function()
-				Net:InvokeServer("TrenchShopBuy", "TrenchEgg")
-			end)
-		end
-	end
+	STATE.buyTrenchEgg(now)
 end
 
 task.spawn(function()
