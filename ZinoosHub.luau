@@ -811,11 +811,9 @@ end
 if type(STATE.stealZone) ~= "string" or FLOORS[STATE.stealZone] == nil then
 	STATE.stealZone = "Meadow"
 end
-STATE.stealZones = STATE.normalizeZones(STATE.stealZones)
-if #STATE.stealZones == 0 then
+if type(STATE.stealZones) ~= "table" then
 	STATE.stealZones = { STATE.stealZone }
 end
-STATE.stealZone = STATE.stealZones[1]
 genv.ZinoosGen = (typeof(genv.ZinoosGen) == "number" and genv.ZinoosGen or 0) + 1
 local token = genv.ZinoosGen
 STATE._alive = false
@@ -1459,6 +1457,11 @@ function STATE.zoneLabel(list)
 		return "Meadow"
 	end
 	return table.concat(names, ", ")
+end
+
+STATE.stealZones = STATE.normalizeZones(STATE.stealZones)
+if #STATE.stealZones == 0 then
+	STATE.stealZones = { STATE.stealZone }
 end
 
 if type(STATE.alertRarities) ~= "table" then
