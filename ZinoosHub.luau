@@ -376,6 +376,13 @@ local function legacyStop()
 	end
 end
 
+if not pcall(function()
+	return CoreGui:GetChildren()
+end) then
+	warn("[Zinoos hub] This load could not open CoreGui, so the running hub was left as it is. Run the loader from the executor again.")
+	return
+end
+
 local previousShutdown = genv.ZinoosShutdown
 genv.ZinoosShutdown = shutdownHub
 STATE.shutdown = shutdownHub
@@ -10158,7 +10165,7 @@ function STATE.runPlotRepairChecks()
 		local packed = STATE.plotRoom()
 		report.eggsSeparate = room ~= nil and packed ~= nil and room.activeAnimals == 1 and room.growingEggs == 2 and room.free == true and packed.activeAnimals == 2 and packed.growingEggs == 1 and packed.free == false
 		local calls = {}
-		STATE._plotTestPlace = { uid = "egg", x = 1, z = 2 }
+		STATE._plotTestPlace = { uid = "bagEgg", x = 1, z = 2 }
 		STATE._plotTestInvoke = function(name)
 			calls[#calls + 1] = name
 		end
@@ -10187,6 +10194,9 @@ function STATE.runPlotRepairChecks()
 		report.fullStillBlocksPets = blockedStatus == "Confirmed full" and #blocked == 0
 		calls = {}
 		STATE._plotLock = nil
+		STATE._plotTestInvoke = function(name)
+			calls[#calls + 1] = name
+		end
 		STATE._plotTestData = function()
 			return {
 				baseLevel = 1,
