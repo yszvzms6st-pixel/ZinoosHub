@@ -475,7 +475,7 @@ fireWrapper = function(self, remoteName, ...)
 			return
 		end
 	end
-	if remoteName == "StartBench" and STATE.liftSteal == true then
+	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true) then
 		return
 	end
 	return netFireServer(self, remoteName, ...)
@@ -2469,7 +2469,7 @@ function prehistoricEggs()
 end
 
 allowLeaveBench = function()
-	if STATE.autoTrain ~= true then
+	if STATE.autoTrain ~= true or STATE.trenchBusy == true then
 		return true
 	end
 	if STATE.trainFocus == "speed" then
@@ -2891,7 +2891,13 @@ local function runStealTrip()
 		end
 		deliverHeld()
 		local deliverySucceeded = not pendingDelivery()
-		backToBench()
+		if trenchDelivery then
+			STATE.liftSteal = false
+			STATE.stealGoal = nil
+			activeGoal = nil
+		else
+			backToBench()
+		end
 		STATE.trenchDeliverUntil = 0
 		local previous = STATE.lastStealStatus
 		local eggName = nil
@@ -6740,6 +6746,8 @@ local function installHub()
 		local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
 		if STATE.autoTrench ~= true then
 			lines[1] = "Trench off"
+		elseif state == "ending" then
+			lines[1] = "Trench ended"
 		elseif inArena then
 			local lifting = STATE.trenchLift
 			if lifting == "too heavy" then
@@ -6755,7 +6763,7 @@ local function installHub()
 			lines[1] = string.format("Trench · at the rift, opens in %d:%02d", math.floor(remain / 60), math.floor(remain % 60))
 		elseif STATE.trenchBusy == true and state == "seal" then
 			lines[1] = "Trench · lifting the seal"
-		elseif STATE.trenchBusy == true and state == "open" then
+		elseif STATE.trenchBusy == true and (state == "open" or state == "fight") then
 			lines[1] = "Trench · waiting for the pull"
 		elseif STATE.trenchBusy == true then
 			lines[1] = "Trench · " .. state
@@ -6770,6 +6778,8 @@ local function installHub()
 			local secs = math.floor(show % 60)
 			if state == "warning" then
 				lines[1] = string.format("Trench · rift in %d:%02d", mins, secs)
+			elseif state == "fight" then
+				lines[1] = string.format("Trench · fight ends in %d:%02d", mins, secs)
 			else
 				lines[1] = string.format("Trench · next rift in %d:%02d", mins, secs)
 			end
@@ -7794,7 +7804,7 @@ function STATE.stepTrench()
 	if state == "open" then
 		STATE.trenchOpenUntil = os.clock() + 20
 	end
-	local joining = state == "warning" or state == "seal" or state == "open" or (state ~= "idle" and state ~= "fight" and siteOk)
+	local joining = state == "warning" or state == "seal" or state == "open"
 	local waitingPull = state == "fight" and not inArena and os.clock() < (STATE.trenchOpenUntil or 0)
 	local eventOn = inArena or joining or waitingPull
 	local phase = inArena and "in" or state
@@ -7812,7 +7822,7 @@ function STATE.stepTrench()
 				STATE.noteActivity("Pulled into the trench")
 			elseif phase == "fight" then
 				STATE.noteActivity("Trench fight started")
-			elseif phase == "idle" then
+			elseif phase == "idle" or phase == "ending" then
 				STATE.noteActivity("Trench ended")
 			end
 		end
@@ -7831,6 +7841,11 @@ function STATE.stepTrench()
 	if not STATE.trenchBusy or grabbed or not (hrp and hrp:IsA("BasePart")) then
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
+	elseif inArena and state ~= "fight" then
+		STATE.trenchGoal = nil
+		STATE.trenchPin = false
+		STATE.trenchLift = nil
+		STATE.trenchGripName = nil
 	elseif inArena then
 		STATE.trenchPin = true
 		local arena = workspace:FindFirstChild("TrenchArena")
@@ -7851,18 +7866,16 @@ function STATE.stepTrench()
 				STATE.noteActivity("The pinned tentacle is too heavy")
 			end
 		end
-	elseif state == "warning" or state == "seal" or state == "open" or siteOk then
+	elseif joining or waitingPull then
 		local map = workspace:FindFirstChild("Map")
 		local rift = map and map:FindFirstChild("TrenchRift")
-		local seal = rift and rift:FindFirstChild("Seal")
-		local sealRoot = seal and (seal:FindFirstChild("SealRoot") or seal:FindFirstChild("RiftSeal"))
-		local whirl = rift and rift:FindFirstChild("Whirl")
-		local stand = siteOk and (site + Vector3.new(0, 4, 0)) or Vector3.new(295, 6, 265.5)
-		if state == "seal" and sealRoot and sealRoot:IsA("BasePart") then
-			stand = sealRoot.Position + Vector3.new(0, 3, 0)
-		elseif whirl and whirl:IsA("BasePart") then
-			local standY = siteOk and math.max(site.Y + 3, whirl.Position.Y + 6) or (whirl.Position.Y + 8)
-			stand = Vector3.new(whirl.Position.X, standY, whirl.Position.Z)
+		local cover = rift and rift:GetAttribute("CoverCenter")
+		local stand = Vector3.new(295, 4, 265.5)
+		if siteOk then
+			stand = site + Vector3.new(0, 3, 3.5)
+			if typeof(cover) == "Vector3" and Vector3.new(cover.X - site.X, 0, cover.Z - site.Z).Magnitude <= 8 then
+				stand = Vector3.new(cover.X, math.max(site.Y, cover.Y) + 3, cover.Z)
+			end
 		end
 		STATE.trenchGoal = CFrame.new(stand)
 		local offset = hrp.Position - stand
