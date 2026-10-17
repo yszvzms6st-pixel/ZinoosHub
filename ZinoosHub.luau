@@ -1104,7 +1104,7 @@ local function pinGoal(part, goal)
 end
 
 local function stepTrain()
-	if STATE.trenchBusy == true then
+	if STATE.trenchBusy == true and os.clock() >= (STATE.trenchDeliverUntil or 0) then
 		local character = LocalPlayer.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
 		local goal = STATE.trenchGoal
@@ -2868,10 +2868,15 @@ local function pendingDelivery()
 end
 
 local function runStealTrip()
-	if STATE.trenchBusy == true and not pendingDelivery() then
-		STATE.liftSteal = false
-		activeGoal = nil
-		return nil
+	local trenchDelivery = false
+	if STATE.trenchBusy == true then
+		local early = workspace:GetAttribute("TrenchState") == "warning" and LocalPlayer:GetAttribute("InTrenchArena") ~= true
+		if not early or not pendingDelivery() then
+			STATE.liftSteal = false
+			activeGoal = nil
+			return nil
+		end
+		trenchDelivery = true
 	end
 	if STATE.autoSteal ~= true or not featureReady("Auto Steal") then
 		return
@@ -2881,9 +2886,13 @@ local function runStealTrip()
 			return nil
 		end
 		STATE.liftSteal = true
+		if trenchDelivery then
+			STATE.trenchDeliverUntil = os.clock() + 10
+		end
 		deliverHeld()
 		local deliverySucceeded = not pendingDelivery()
 		backToBench()
+		STATE.trenchDeliverUntil = 0
 		local previous = STATE.lastStealStatus
 		local eggName = nil
 		local attempt = nil
