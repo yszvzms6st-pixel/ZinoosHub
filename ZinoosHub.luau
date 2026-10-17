@@ -530,6 +530,7 @@ local FLOORS = {
 	Heaven = { pos = Vector3.new(198, 33, -3444), size = Vector3.new(96, 64, 969) },
 	Space = { pos = Vector3.new(198, 34, -4575), size = Vector3.new(96, 67, 1260) },
 	Prehistoric = { pos = Vector3.new(198, 34, -5835), size = Vector3.new(96, 67, 1260) },
+	Abyss = { pos = Vector3.new(198, 34.5, -7284), size = Vector3.new(96, 67, 1638) },
 }
 local FALLBACK_RARITIES = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine", "Exclusive" }
 local rarityOptions = {}
@@ -1062,6 +1063,16 @@ local function pinGoal(part, goal)
 end
 
 local function stepTrain()
+	if STATE.trenchBusy == true then
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local goal = STATE.trenchGoal
+		releaseGym()
+		if hrp and typeof(goal) == "CFrame" then
+			pinGoal(hrp, goal)
+		end
+		return
+	end
 	if STATE.liftSteal then
 		local character = LocalPlayer.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
@@ -2603,6 +2614,11 @@ local function pendingDelivery()
 end
 
 local function runStealTrip()
+	if STATE.trenchBusy == true and not pendingDelivery() then
+		STATE.liftSteal = false
+		activeGoal = nil
+		return nil
+	end
 	if STATE.autoSteal ~= true or not featureReady("Auto Steal") then
 		return
 	end
@@ -7254,6 +7270,112 @@ task.spawn(function()
 		warn("[Zinoos hub] " .. tostring(err))
 		if running() then
 			shutdownHub("failed")
+		end
+	end
+end)
+
+function STATE.stepTrench()
+	if not running() then
+		return
+	end
+	local now = os.clock()
+	local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
+	local state = workspace:GetAttribute("TrenchState")
+	if type(state) ~= "string" then
+		state = "idle"
+	end
+	local eventOn = inArena or state == "seal" or state == "open"
+	if not eventOn or (pendingDelivery() and not inArena) then
+		STATE.trenchBusy = false
+		STATE.trenchGoal = nil
+	else
+		STATE.trenchBusy = true
+		if inArena then
+			STATE.trenchGoal = nil
+		else
+			local site = workspace:GetAttribute("TrenchSitePos")
+			if typeof(site) == "Vector3" and site.Magnitude > 0.5 then
+				STATE.trenchGoal = CFrame.new(site + Vector3.new(0, 4, 0))
+			end
+		end
+	end
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if eventOn and hrp and hrp:IsA("BasePart") and now >= (STATE.nextTrenchRep or 0) then
+		if inArena then
+			local grabbed = false
+			for name, value in pairs(LocalPlayer:GetAttributes()) do
+				local lower = string.lower(name)
+				if string.find(lower, "grab", 1, true) and (value == true or (type(value) == "number" and value > 0 and value < 7)) then
+					grabbed = true
+					break
+				end
+			end
+			if grabbed then
+				Net:FireServer("TrenchGrabTap")
+				STATE.nextTrenchRep = now + 0.15
+			else
+				local arena = workspace:FindFirstChild("TrenchArena")
+				local kraken = arena and arena:FindFirstChild("Kraken")
+				local grips = kraken and kraken:FindFirstChild("Grips")
+				local bestName = nil
+				local bestDist = nil
+				if grips then
+					for _, grip in grips:GetChildren() do
+						if grip:IsA("BasePart") then
+							local offset = hrp.Position - grip.Position
+							local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
+							if flat <= 14 and math.abs(offset.Y) < 8 and (not bestDist or flat < bestDist) then
+								bestDist = flat
+								bestName = grip.Name
+							end
+						end
+					end
+				end
+				if type(bestName) == "string" then
+					Net:FireServer("TrenchLiftRep", bestName)
+					STATE.nextTrenchRep = now + 0.5
+				end
+			end
+		elseif state == "seal" or state == "open" then
+			local site = workspace:GetAttribute("TrenchSitePos")
+			if typeof(site) == "Vector3" then
+				local flat = Vector3.new(hrp.Position.X - site.X, 0, hrp.Position.Z - site.Z).Magnitude
+				if flat <= 12 then
+					Net:FireServer("TrenchLiftRep", "seal")
+					STATE.nextTrenchRep = now + 0.5
+				end
+			end
+		end
+	end
+	if now >= (STATE.nextTrenchBuy or 0) then
+		local pearls = LocalPlayer:GetAttribute("Pearls")
+		if type(pearls) ~= "number" then
+			local data = readData()
+			local trench = type(data) == "table" and data.trench
+			if type(trench) == "table" and type(trench.pearls) == "number" then
+				pearls = trench.pearls
+			end
+		end
+		if type(pearls) == "number" and pearls >= 450 then
+			STATE.nextTrenchBuy = now + 1.5
+			pcall(function()
+				Net:InvokeServer("TrenchShopBuy", "TrenchEgg")
+			end)
+		end
+	end
+end
+
+task.spawn(function()
+	while running() do
+		local ok, err = pcall(STATE.stepTrench)
+		if not ok then
+			STATE.trenchBusy = false
+			STATE.trenchGoal = nil
+			warn("[Zinoos hub] trench " .. tostring(err))
+			task.wait(2)
+		else
+			task.wait(0.45)
 		end
 	end
 end)
