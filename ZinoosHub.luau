@@ -1438,6 +1438,29 @@ function STATE.zoneSelected(name)
 	return false
 end
 
+function STATE.zoneLabel(list)
+	local ordered = STATE.normalizeZones(list)
+	local names = {}
+	local primary = STATE.stealZone
+	if type(primary) == "string" then
+		for _, name in ipairs(ordered) do
+			if name == primary then
+				names[1] = primary
+				break
+			end
+		end
+	end
+	for _, name in ipairs(ordered) do
+		if name ~= names[1] then
+			names[#names + 1] = name
+		end
+	end
+	if #names == 0 then
+		return "Meadow"
+	end
+	return table.concat(names, ", ")
+end
+
 if type(STATE.alertRarities) ~= "table" then
 	STATE.alertRarities = STATE.expandRarity(STATE.webhookRarity or "Divine")
 end
@@ -2052,6 +2075,17 @@ end
 
 local function stealZone()
 	local name = STATE.stealZone
+	if type(name) == "string" and FLOORS[name] and STATE.zoneSelected(name) then
+		return name
+	end
+	local list = STATE.stealZones
+	if type(list) == "table" then
+		for _, item in ipairs(list) do
+			if type(item) == "string" and FLOORS[item] then
+				return item
+			end
+		end
+	end
 	if type(name) == "string" and FLOORS[name] then
 		return name
 	end
@@ -2435,6 +2469,14 @@ local function peekPrehistoric()
 		local scanZone = stealZone()
 		if type(zones) == "table" and #zones > 0 then
 			local index = ((STATE.stealScanZone or 0) % #zones) + 1
+			if (STATE.stealScanZone or 0) == 0 then
+				for found, name in ipairs(zones) do
+					if name == scanZone then
+						index = found
+						break
+					end
+				end
+			end
 			STATE.stealScanZone = index
 			scanZone = zones[index]
 		end
@@ -4584,8 +4626,16 @@ local function loadSaved()
 	if #listed == 0 then
 		listed[1] = STATE.stealZone
 	end
+	local primary = STATE.stealZone
 	STATE.stealZones = listed
-	STATE.stealZone = listed[1]
+	local keepPrimary = false
+	for _, name in ipairs(listed) do
+		if name == primary then
+			keepPrimary = true
+			break
+		end
+	end
+	STATE.stealZone = keepPrimary and primary or listed[1]
 	syncSavedVisuals()
 	return migrated
 end
@@ -4603,7 +4653,7 @@ local function saveConfig()
 		ConfigVersion = CONFIG_VERSION,
 		StealZoneExplicit = STATE.stealZoneExplicit == true,
 		AutoSell = false,
-		StealZone = { (STATE.stealZones and STATE.stealZones[1]) or STATE.stealZone or "Meadow" },
+		StealZone = { STATE.stealZone or (STATE.stealZones and STATE.stealZones[1]) or "Meadow" },
 		StealZones = STATE.stealZones,
 		WebhookRarity = { STATE.alertRarities[1] or STATE.webhookRarity or "Divine" },
 		WebhookRarities = STATE.alertRarities,
@@ -6123,7 +6173,8 @@ local function installHub()
 		return pick
 	end
 
-	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName)
+	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName, labelOf)
+		local showList = labelOf or STATE.rarityLabel
 		local row = Instance.new("Frame")
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 2
@@ -6149,12 +6200,12 @@ local function installHub()
 		role(pick, "field")
 		pick.TextXAlignment = Enum.TextXAlignment.Left
 		pick.TextTruncate = Enum.TextTruncate.AtEnd
-		pick.Text = " " .. STATE.rarityLabel(getList())
+		pick.Text = " " .. showList(getList())
 		pick.BackgroundColor3 = panel
 		pick.BackgroundTransparency = cardFade
 		pick.AnchorPoint = Vector2.new(1, 0.5)
 		pick.Position = UDim2.new(1, 0, 0.5, 0)
-		pick.Size = UDim2.fromOffset(156, 26)
+		pick.Size = UDim2.fromOffset(210, 26)
 		pick.ZIndex = 7
 		pick.Parent = row
 		local pickCorner = Instance.new("UICorner")
@@ -6169,7 +6220,7 @@ local function installHub()
 		onActivate(pick, function()
 			openPopup(pick, options, getList(), function(option)
 				onToggleName(option)
-				pick.Text = " " .. STATE.rarityLabel(getList())
+				pick.Text = " " .. showList(getList())
 			end, true)
 		end)
 		remember(row, parentBox, name)
@@ -6236,21 +6287,33 @@ local function installHub()
 	makeMultiDropdown(eggs, "Steal Zone", function()
 		return STATE.stealZones
 	end, zoneOptions, function(option)
-		local previous = STATE.rarityLabel(STATE.stealZones)
+		local previous = STATE.zoneLabel(STATE.stealZones)
 		local ordered = STATE.toggleZone(STATE.stealZones, option)
 		STATE.stealZones = ordered
-		STATE.stealZone = ordered[1] or "Meadow"
+		if STATE.zoneSelected(option) then
+			STATE.stealZone = option
+		else
+			STATE.stealZone = ordered[1] or "Meadow"
+		end
 		STATE.stealZoneExplicit = true
 		STATE.zoneControl.value = STATE.stealZone
 		STATE.zoneControl.currentOption = ordered
-		if STATE.rarityLabel(ordered) ~= previous then
+		if STATE.zoneLabel(ordered) ~= previous then
 			resetStealScan()
+			local start = 0
+			for index, name in ipairs(ordered) do
+				if name == STATE.stealZone then
+					start = index - 1
+					break
+				end
+			end
+			STATE.stealScanZone = start
 		end
 		saveConfig()
 		if typeof(STATE.refreshTracker) == "function" then
 			pcall(STATE.refreshTracker)
 		end
-	end)
+	end, STATE.zoneLabel)
 	local rarityPick = makeMultiDropdown(eggs, "Alert Rarity", function()
 		return STATE.alertRarities
 	end, rarityOptions, function(option)
@@ -6593,7 +6656,7 @@ local function installHub()
 			phase = stealDaytime() and "Day" or "Night"
 		end
 		local lines = {
-			string.format("%s · %s · %s", STATE.rarityLabel(STATE.stealZones), STATE.rarityLabel(STATE.alertRarities), tostring(phase)),
+			string.format("%s · %s · %s", STATE.zoneLabel(STATE.stealZones), STATE.rarityLabel(STATE.alertRarities), tostring(phase)),
 			string.format("%d spawned · %d eligible · %d waiting for daytime", #eggs, eligible, waitingCount),
 		}
 		local status = STATE.lastStealStatus
@@ -10152,9 +10215,11 @@ function STATE.runRepairChecks()
 	local both = STATE.rarityLabel(STATE.toggleZone({ "Meadow" }, "Abyss")) == "Meadow, Abyss"
 	local keptLast = STATE.rarityLabel(STATE.toggleZone({ "Meadow" }, "Meadow")) == "Meadow"
 	local dropped = STATE.rarityLabel(STATE.toggleZone({ "Meadow", "Abyss" }, "Meadow")) == "Abyss"
+	STATE.stealZone = "Abyss"
+	local abyssFirst = STATE.zoneLabel({ "Meadow", "Abyss" }) == "Abyss, Meadow"
 	STATE.stealZones = savedZones
 	STATE.stealZone = savedZone
-	local zoneMulti = both and keptLast and dropped
+	local zoneMulti = both and keptLast and dropped and abyssFirst
 	local themeHost = STATE.runThemeHostChecks()
 	local authorityBypass = STATE.parseWebhook("https://discord.com:443@evil.example/api/webhooks/1/tok") == nil
 	local plot = STATE.runPlotRepairChecks()
