@@ -1120,7 +1120,9 @@ local function stepTrain()
 			end
 			local offset = hrp.Position - goal.Position
 			local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-			if STATE.trenchPin == true or flat > 12 then
+			local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
+			local leavingArena = not inArena and typeof(STATE.nearTrenchArena) == "function" and STATE.nearTrenchArena(hrp.Position)
+			if (STATE.trenchPin == true or flat > 12) and not leavingArena then
 				pinGoal(hrp, goal)
 			end
 		end
@@ -6746,8 +6748,10 @@ local function installHub()
 		local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
 		if STATE.autoTrench ~= true then
 			lines[1] = "Trench off"
-		elseif state == "ending" then
+		elseif state == "ending" or (inArena and state == "idle") then
 			lines[1] = "Trench ended"
+		elseif inArena and state ~= "fight" then
+			lines[1] = "Trench · pulled in, fight starts soon"
 		elseif inArena then
 			local lifting = STATE.trenchLift
 			if lifting == "too heavy" then
@@ -7779,6 +7783,45 @@ function STATE.buyTrenchEgg(now)
 	end
 end
 
+STATE.trenchPullAt = nil
+if typeof(Net) == "table" and typeof(Net.OnClient) == "function" then
+	pcall(function()
+		trackConnection(Net:OnClient("TrenchTransition", function(kind)
+			if kind == "in" then
+				STATE.trenchPullAt = os.clock()
+				if LocalPlayer:GetAttribute("InTrenchArena") ~= true then
+					STATE.trenchGoal = nil
+					STATE.trenchPin = false
+				end
+			elseif kind == "cancel" then
+				STATE.trenchPullAt = nil
+			end
+		end))
+	end)
+end
+
+function STATE.trenchDivePrompt()
+	local folder = workspace:FindFirstChild("Trench")
+	local whirlpool = folder and folder:FindFirstChild("Whirlpool")
+	if not whirlpool then
+		return nil
+	end
+	for _, item in ipairs(whirlpool:GetDescendants()) do
+		if item:IsA("ProximityPrompt") and item.Name ~= "OpenRiftPrompt" and item.Enabled and item.ActionText == "Dive In" then
+			return item
+		end
+	end
+	return nil
+end
+
+function STATE.nearTrenchArena(pos)
+	if typeof(pos) ~= "Vector3" then
+		return false
+	end
+	local rel = pos - Vector3.new(1700, 1, -1000)
+	return math.abs(rel.X) <= 230 and math.abs(rel.Z) <= 260
+end
+
 function STATE.stepTrench()
 	if not running() then
 		STATE.trenchBusy = false
@@ -7804,8 +7847,12 @@ function STATE.stepTrench()
 	if state == "open" then
 		STATE.trenchOpenUntil = os.clock() + 20
 	end
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local pulling = type(STATE.trenchPullAt) == "number" and now - STATE.trenchPullAt < 6
+	local nearArena = hrp ~= nil and hrp:IsA("BasePart") and STATE.nearTrenchArena(hrp.Position)
 	local joining = state == "warning" or state == "seal" or state == "open"
-	local waitingPull = state == "fight" and not inArena and os.clock() < (STATE.trenchOpenUntil or 0)
+	local waitingPull = state == "fight" and not inArena and (now < (STATE.trenchOpenUntil or 0) or pulling or nearArena)
 	local eventOn = inArena or joining or waitingPull
 	local phase = inArena and "in" or state
 	if STATE.trenchPhase ~= phase then
@@ -7834,18 +7881,19 @@ function STATE.stepTrench()
 	else
 		STATE.trenchBusy = true
 	end
-	local character = LocalPlayer.Character
-	local hrp = character and character:FindFirstChild("HumanoidRootPart")
 	local grabbedBy = LocalPlayer:GetAttribute("TrenchGrabbedBy")
 	local grabbed = inArena and type(grabbedBy) == "string" and grabbedBy ~= ""
 	if not STATE.trenchBusy or grabbed or not (hrp and hrp:IsA("BasePart")) then
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
-	elseif inArena and state ~= "fight" then
+	elseif inArena and (state ~= "fight" or workspace:GetAttribute("TrenchBossPhase") ~= "awake") then
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
 		STATE.trenchLift = nil
 		STATE.trenchGripName = nil
+	elseif not inArena and (pulling or nearArena) then
+		STATE.trenchGoal = nil
+		STATE.trenchPin = false
 	elseif inArena then
 		STATE.trenchPin = true
 		local arena = workspace:FindFirstChild("TrenchArena")
@@ -7905,6 +7953,20 @@ function STATE.stepTrench()
 				STATE.nextTrenchRep = now + 0.5
 			end
 		end
+	end
+	if not inArena and not pulling and (state == "open" or waitingPull) and hrp and hrp:IsA("BasePart") and now >= (STATE.nextTrenchDive or 0) and typeof(fireproximityprompt) == "function" then
+		local prompt = STATE.trenchDivePrompt()
+		local anchor = prompt and prompt.Parent
+		if anchor and anchor:IsA("BasePart") and (hrp.Position - anchor.Position).Magnitude <= math.max(4, prompt.MaxActivationDistance - 2) then
+			STATE.nextTrenchDive = now + 1.5
+			if pcall(fireproximityprompt, prompt) and STATE.trenchDiveNote ~= true then
+				STATE.trenchDiveNote = true
+				STATE.noteActivity("Dived into the rift")
+			end
+		end
+	end
+	if state == "idle" then
+		STATE.trenchDiveNote = false
 	end
 	STATE.buyTrenchEgg(now)
 end
