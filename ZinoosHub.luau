@@ -1111,6 +1111,9 @@ local function stepTrain()
 		releaseGym()
 		if hrp and typeof(goal) == "CFrame" then
 			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if humanoid and humanoid.Health <= 0 then
+				return
+			end
 			if humanoid then
 				humanoid.Sit = false
 				humanoid.PlatformStand = false
@@ -6729,7 +6732,14 @@ local function installHub()
 		if STATE.autoTrench ~= true then
 			lines[1] = "Trench off"
 		elseif inArena then
-			lines[1] = "Trench · in the fight"
+			local lifting = STATE.trenchLift
+			if lifting == "too heavy" then
+				lines[1] = "Trench · pinned tentacle is too heavy"
+			elseif type(lifting) == "string" and lifting ~= "" then
+				lines[1] = "Trench · lifting " .. lifting
+			else
+				lines[1] = "Trench · in the fight"
+			end
 		elseif STATE.trenchBusy == true and state == "seal" then
 			lines[1] = "Trench · lifting the seal"
 		elseif STATE.trenchBusy == true and state == "open" then
@@ -7620,6 +7630,59 @@ task.spawn(function()
 	end
 end)
 
+function STATE.trenchTiers()
+	if type(STATE._trenchTiers) == "table" then
+		return STATE._trenchTiers
+	end
+	local tiers = {
+		Small = { Weight = 500, Damage = 1 },
+		Big = { Weight = 5000000, Damage = 4 },
+		Crown = { Weight = 50000000000, Damage = 15 },
+	}
+	local ok, config = pcall(function()
+		local loadModuleScript = require :: any
+		return loadModuleScript(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Configs"):WaitForChild("Trench"))
+	end)
+	if ok and type(config) == "table" and type(config.Tiers) == "table" then
+		STATE._trenchTiers = config.Tiers
+	else
+		STATE._trenchTiers = tiers
+	end
+	return STATE._trenchTiers
+end
+
+function STATE.pickTrenchGrip(grips, hrp)
+	local tiers = STATE.trenchTiers()
+	local strength = LocalPlayer:GetAttribute("Strength")
+	if type(strength) ~= "number" then
+		strength = 0
+	end
+	local best = nil
+	local bestScore = nil
+	if grips then
+		for _, grip in grips:GetChildren() do
+			if grip:IsA("BasePart") then
+				local gripState = grip:GetAttribute("State")
+				if gripState == nil or gripState == "pinned" then
+					local tierName = grip:GetAttribute("Tier")
+					local tier = type(tierName) == "string" and tiers[tierName] or nil
+					local weight = type(tier) == "table" and tier.Weight or 0
+					local damage = type(tier) == "table" and tier.Damage or 0
+					if type(weight) ~= "number" or strength >= weight then
+						local flat = Vector3.new(hrp.Position.X - grip.Position.X, 0, hrp.Position.Z - grip.Position.Z).Magnitude
+						local score = (type(damage) == "number" and damage or 0) * 100000 - flat
+						if not bestScore or score > bestScore then
+							bestScore = score
+							best = grip
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
 function STATE.buyTrenchEgg(now)
 	if STATE.trenchShop ~= true or now < (STATE.nextTrenchBuy or 0) then
 		return
@@ -7715,26 +7778,20 @@ function STATE.stepTrench()
 		local arena = workspace:FindFirstChild("TrenchArena")
 		local kraken = arena and arena:FindFirstChild("Kraken")
 		local grips = kraken and kraken:FindFirstChild("Grips")
-		local best = nil
-		local bestDist = nil
-		if grips then
-			for _, grip in grips:GetChildren() do
-				if grip:IsA("BasePart") then
-					local gripState = grip:GetAttribute("State")
-					if gripState == nil or gripState == "pinned" then
-						local flat = Vector3.new(hrp.Position.X - grip.Position.X, 0, hrp.Position.Z - grip.Position.Z).Magnitude
-						if not bestDist or flat < bestDist then
-							bestDist = flat
-							best = grip
-						end
-					end
-				end
-			end
-		end
+		local best = STATE.pickTrenchGrip(grips, hrp)
 		if best then
+			local tierName = best:GetAttribute("Tier")
+			STATE.trenchLift = type(tierName) == "string" and tierName or "tentacle"
+			STATE.trenchGripName = best.Name
 			STATE.trenchGoal = CFrame.new(best.Position + Vector3.new(0, 3, 0))
 		else
-			STATE.trenchGoal = nil
+			STATE.trenchLift = "too heavy"
+			STATE.trenchGripName = nil
+			STATE.trenchGoal = CFrame.new(1700, 12, -1000)
+			if STATE.trenchHeavyNote ~= true then
+				STATE.trenchHeavyNote = true
+				STATE.noteActivity("The pinned tentacle is too heavy")
+			end
 		end
 	elseif siteOk then
 		local map = workspace:FindFirstChild("Map")
@@ -7760,32 +7817,14 @@ function STATE.stepTrench()
 		if grabbed then
 			Net:FireServer("TrenchGrabTap")
 			STATE.nextTrenchRep = now + 0.15
-		elseif inArena and typeof(STATE.trenchGoal) == "CFrame" then
+		elseif inArena and typeof(STATE.trenchGoal) == "CFrame" and type(STATE.trenchGripName) == "string" then
 			local goalPos = STATE.trenchGoal.Position
 			local offset = hrp.Position - goalPos
 			local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-			local arena = workspace:FindFirstChild("TrenchArena")
-			local kraken = arena and arena:FindFirstChild("Kraken")
-			local grips = kraken and kraken:FindFirstChild("Grips")
-			local bestName = nil
-			local bestDist = nil
-			if grips then
-				for _, grip in grips:GetChildren() do
-					if grip:IsA("BasePart") then
-						local gripState = grip:GetAttribute("State")
-						if gripState == nil or gripState == "pinned" then
-							local gripFlat = Vector3.new(hrp.Position.X - grip.Position.X, 0, hrp.Position.Z - grip.Position.Z).Magnitude
-							if gripFlat <= 14 and math.abs(hrp.Position.Y - grip.Position.Y) < 8 and (not bestDist or gripFlat < bestDist) then
-								bestDist = gripFlat
-								bestName = grip.Name
-							end
-						end
-					end
-				end
-			end
-			if type(bestName) == "string" and flat <= 14 then
-				Net:FireServer("TrenchLiftRep", bestName)
+			if flat <= 14 and math.abs(offset.Y) < 8 then
+				Net:FireServer("TrenchLiftRep", STATE.trenchGripName)
 				STATE.nextTrenchRep = now + 0.5
+				STATE.trenchHeavyNote = false
 			end
 		elseif not inArena and siteOk and (state == "seal" or state == "open" or waitingPull) then
 			local flat = Vector3.new(hrp.Position.X - site.X, 0, hrp.Position.Z - site.Z).Magnitude
