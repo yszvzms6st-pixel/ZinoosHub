@@ -756,6 +756,9 @@ end
 if STATE.autoSteal == nil then
 	STATE.autoSteal = true
 end
+if STATE.autoTrench == nil then
+	STATE.autoTrench = true
+end
 if STATE.autoPlace ~= true then
 	STATE.autoPlace = false
 end
@@ -1072,7 +1075,12 @@ local function stepTrain()
 		local goal = STATE.trenchGoal
 		releaseGym()
 		if hrp and typeof(goal) == "CFrame" then
-			pinGoal(hrp, goal)
+			local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
+			local offset = hrp.Position - goal.Position
+			local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
+			if inArena or flat > 8 then
+				pinGoal(hrp, goal)
+			end
 		end
 		return
 	end
@@ -4205,6 +4213,7 @@ local FLAG_KEYS = {
 	AutoUpgrade = "upgrade",
 	AutoTrails = "trails",
 	AutoSteal = "autoSteal",
+	AutoTrench = "autoTrench",
 	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
 	EquipBest = "equipBest",
@@ -6277,6 +6286,7 @@ local function installHub()
 
 	local eggs = card(leftColumn, "EGGS", 1)
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
+	makeSwitch(eggs, "Auto Trench", "autoTrench", "Joins the free Trench fight and lifts the tentacles")
 	makeSwitch(eggs, "Auto Place", "autoPlace", "Places ticked eggs from your bag")
 	local zoneOptions = {}
 	if typeof(Zones) == "table" and typeof(Zones.Order) == "table" then
@@ -7442,7 +7452,9 @@ task.spawn(function()
 end)
 
 function STATE.stepTrench()
-	if not running() then
+	if not running() or STATE.autoTrench ~= true then
+		STATE.trenchBusy = false
+		STATE.trenchGoal = nil
 		return
 	end
 	local now = os.clock()
@@ -7492,7 +7504,20 @@ function STATE.stepTrench()
 			STATE.trenchGoal = nil
 		end
 	elseif siteOk then
-		STATE.trenchGoal = CFrame.new(site + Vector3.new(0, 4, 0))
+		local map = workspace:FindFirstChild("Map")
+		local rift = map and map:FindFirstChild("TrenchRift")
+		local whirl = rift and rift:FindFirstChild("Whirl")
+		local stand = site + Vector3.new(0, 2, 0)
+		if whirl and whirl:IsA("BasePart") then
+			stand = Vector3.new(whirl.Position.X, site.Y + 2, whirl.Position.Z)
+		end
+		local offset = hrp.Position - stand
+		local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
+		if flat > 8 then
+			STATE.trenchGoal = CFrame.new(stand)
+		else
+			STATE.trenchGoal = nil
+		end
 	else
 		STATE.trenchGoal = nil
 	end
