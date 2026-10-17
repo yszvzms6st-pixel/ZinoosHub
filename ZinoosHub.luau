@@ -549,7 +549,23 @@ if #rarityOptions == 0 then
 		rarityOptions[index] = name
 	end
 end
-local mutationRank = { None = 0, Golden = 1, Diamond = 2, Rainbow = 3, Cursed = 4 }
+local mutationMult = {
+	Golden = 2,
+	Diamond = 2.5,
+	Rainbow = 3,
+	Toxic = 2,
+	Hacked = 2,
+	Taco = 3,
+	Splashy = 3,
+	Slimey = 3,
+	Crabby = 3.5,
+	Cursed = 4,
+	Abyssal = 5,
+}
+local mutationRank = { None = 0 }
+for name, mult in pairs(mutationMult) do
+	mutationRank[name] = math.floor(mult * 10)
+end
 local rarityOfName = {}
 local weightOfName = {}
 if typeof(Zones) == "table" and typeof(Zones.Order) == "table" and typeof(Wild) == "table" and typeof(Wild.SpawnWeights) == "table" and typeof(Pets) == "table" and typeof(Pets.Specs) == "table" then
@@ -1824,12 +1840,23 @@ function STATE.collectPlaceEggs()
 		end
 		for index, child in ipairs(container:GetChildren()) do
 			if child:IsA("Tool") and child:GetAttribute("isEgg") and type(child:GetAttribute("petUID")) == "string" and STATE.eggWorthPlacing(child) then
+				local mutationName = child:GetAttribute("Mutation")
+				local eventName = child:GetAttribute("EventMutation")
+				local mutationScore = math.max(mutationRank[tostring(mutationName)] or 0, mutationRank[tostring(eventName)] or 0)
+				local spec = petSpec(child:GetAttribute("Key"))
+				local income = spec and type(spec.Income) == "number" and spec.Income or 0
+				local chosenMutation = mutationName
+				if (mutationRank[tostring(eventName)] or 0) > (mutationRank[tostring(mutationName)] or 0) then
+					chosenMutation = eventName
+				end
 				list[#list + 1] = {
 					tool = child,
 					rank = STATE.toolEggRank(child) or 0,
 					order = (equipped and 0 or 1000) + index,
 					name = child.Name,
 					uid = child:GetAttribute("petUID"),
+					cashScore = income * (mutationMult[tostring(chosenMutation)] or 1),
+					mutationScore = mutationScore,
 				}
 			end
 		end
@@ -1842,9 +1869,15 @@ function STATE.collectPlaceEggs()
 			return a.order < b.order
 		end
 		if priority == "Lowest Rarity First" then
-			return a.rank < b.rank
+			if a.rank ~= b.rank then
+				return a.rank < b.rank
+			end
+			return (a.cashScore or 0) > (b.cashScore or 0)
 		end
-		return a.rank > b.rank
+		if a.rank ~= b.rank then
+			return a.rank > b.rank
+		end
+		return (a.cashScore or 0) > (b.cashScore or 0)
 	end)
 	return list
 end
@@ -2256,7 +2289,22 @@ local function assessEgg(model, fromFront)
 		if mutationOk and mutation ~= nil then
 			mutationName = tostring(mutation)
 		end
+		local eventOk, eventName = pcall(function()
+			return model:GetAttribute("EventMutation")
+		end)
+		if eventOk and mutationRank[tostring(eventName)] and (mutationRank[tostring(eventName)] or 0) > (mutationRank[mutationName] or 0) then
+			mutationName = tostring(eventName)
+		end
 	end
+	local income = 0
+	if exists then
+		local key = model:GetAttribute("Key")
+		local spec = petSpec(key)
+		if spec and type(spec.Income) == "number" then
+			income = spec.Income
+		end
+	end
+	local cashScore = income * (mutationMult[mutationName] or 1)
 	local petName = string.gsub(label, " Egg$", "")
 	return {
 		model = model,
@@ -2267,6 +2315,7 @@ local function assessEgg(model, fromFront)
 		rank = rank,
 		mutation = mutationName,
 		mutationScore = mutationRank[mutationName] or 0,
+		cashScore = cashScore,
 		weight = weightOfName[petName] or 999,
 		front = fromFront == true,
 		locked = locked,
@@ -2349,6 +2398,7 @@ function prehistoricEggs()
 			rarity = info.rank,
 			weight = info.weight,
 			mutation = info.mutationScore,
+			cashScore = info.cashScore,
 			label = info.label,
 		}
 	end
@@ -2368,6 +2418,9 @@ function prehistoricEggs()
 	table.sort(list, function(a, b)
 		if a.rarity ~= b.rarity then
 			return a.rarity > b.rarity
+		end
+		if (a.cashScore or 0) ~= (b.cashScore or 0) then
+			return (a.cashScore or 0) > (b.cashScore or 0)
 		end
 		if a.weight ~= b.weight then
 			return a.weight < b.weight
@@ -2398,6 +2451,9 @@ local function betterEgg(a, b)
 	end
 	if a.rarity ~= b.rarity then
 		return a.rarity > b.rarity and a or b
+	end
+	if (a.cashScore or 0) ~= (b.cashScore or 0) then
+		return (a.cashScore or 0) > (b.cashScore or 0) and a or b
 	end
 	if a.weight ~= b.weight then
 		return a.weight < b.weight and a or b
