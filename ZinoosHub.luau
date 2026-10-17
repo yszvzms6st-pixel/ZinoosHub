@@ -475,7 +475,7 @@ fireWrapper = function(self, remoteName, ...)
 			return
 		end
 	end
-	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true) then
+	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true or STATE.placeBusy == true) then
 		return
 	end
 	return netFireServer(self, remoteName, ...)
@@ -2471,7 +2471,7 @@ function prehistoricEggs()
 end
 
 allowLeaveBench = function()
-	if STATE.autoTrain ~= true or STATE.trenchBusy == true then
+	if STATE.autoTrain ~= true or STATE.trenchBusy == true or STATE.placeBusy == true then
 		return true
 	end
 	if STATE.trainFocus == "speed" then
