@@ -4684,6 +4684,12 @@ function STATE.readTheme(raw)
 	}, name, source, nil
 end
 
+STATE.hubSizes = { Compact = 0.8, Normal = 0.9, Large = 1 }
+
+function STATE.hubScaleValue()
+	return STATE.hubSizes[STATE.hubSize or "Compact"] or STATE.hubSizes.Compact
+end
+
 STATE.dashFeatures = {
 	{ label = "Train", key = "autoTrain", fault = "Auto Train" },
 	{ label = "Steal", key = "autoSteal", fault = "Auto Steal", busy = "liftSteal" },
@@ -4993,6 +4999,9 @@ local function loadSaved()
 	if type(saved.PowerPearlAt) == "number" then
 		STATE.powerPearlAt = saved.PowerPearlAt
 	end
+	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
+		STATE.hubSize = saved.HubSize
+	end
 	STATE.autoSell = false
 	local zone = saved.StealZone
 	if type(zone) == "table" then
@@ -5129,6 +5138,7 @@ local function saveConfig()
 		PlacementPriority = STATE.placementChoice(STATE.placementPriority),
 		PhoneGame = STATE.phoneChoice or "Critter Merge",
 		PowerPearlAt = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or nil,
+		HubSize = STATE.hubSize or "Compact",
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
 		MenuY = STATE.menuY,
@@ -5557,7 +5567,6 @@ local function installHub()
 		local view = viewSize()
 		local phone = UserInputService.TouchEnabled and math.min(view.X, view.Y) < 820
 		local compact = phone or view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
-		local medium = not compact and (view.X < 1400 or view.Y < 820)
 		local margin = (compact or fullMode) and 0 or 16
 		local baseW, baseH
 		if phone and not fullMode then
@@ -5568,15 +5577,14 @@ local function installHub()
 		elseif compact or fullMode then
 			baseW = math.max(320, view.X - margin * 2)
 			baseH = math.max(480, view.Y - margin * 2)
-		elseif medium then
-			baseW = math.min(972, math.max(640, view.X - 32))
-			baseH = math.min(668, math.max(480, view.Y - 32))
 		else
-			baseW = 972
-			baseH = 668
+			local wanted = STATE.hubScaleValue and STATE.hubScaleValue() or 1
+			baseW = math.min(972, math.max(640, math.floor((view.X - 32) / wanted)))
+			baseH = math.min(668, math.max(480, math.floor((view.Y - 32) / wanted)))
 		end
 		holder.Size = UDim2.fromOffset(baseW, baseH)
-		uiScale.Scale = 1
+		local desktopScale = (phone or compact or fullMode) and 1 or (STATE.hubScaleValue and STATE.hubScaleValue() or 1)
+		uiScale.Scale = desktopScale
 		if launcher then
 			launcher.Size = phone and UDim2.fromOffset(232, 120) or UDim2.fromOffset(300, 136)
 		end
@@ -6821,6 +6829,20 @@ local function installHub()
 	makeSwitch(screenCard, "Egg ESP", "eggEsp", "Steal eggs, and what your plot eggs will hatch into")
 	makeSwitch(screenCard, "Inventory ESP", "invEsp")
 	makeSwitch(screenCard, "Low End", "lowEnd")
+	makeDropdown(screenCard, "Hub Size", function()
+		return STATE.hubSize or "Compact"
+	end, { "Compact", "Normal", "Large" }, function(option)
+		if STATE.hubSizes[option] then
+			STATE.hubSize = option
+		end
+		saveConfig()
+		fitScale()
+		task.defer(function()
+			if typeof(STATE.clampHub) == "function" then
+				pcall(STATE.clampHub)
+			end
+		end)
+	end, true)
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
@@ -7691,6 +7713,12 @@ local function installHub()
 		local y = math.clamp(pos.Y, 0, math.max(0, view.Y - size.Y))
 		if math.abs(x - pos.X) > 1 or math.abs(y - pos.Y) > 1 then
 			placeTopLeft(obj, x, y)
+		end
+	end
+	STATE.clampHub = function()
+		clampObject(holder)
+		if launcher then
+			clampObject(launcher)
 		end
 	end
 
