@@ -8471,7 +8471,7 @@ function STATE.fusePlan(data)
 		local spec = type(pet) == "table" and type(pet.uid) == "string" and petSpec(pet.key)
 		if spec and not spec.IsEgg and pet.hatchAt == nil and STATE.fuseNames[spec.DisplayName or ""] and fuse.Refusal(pet.key) == nil then
 			local ok, income = pcall(Pets.IncomeFor, pet)
-			if ok and type(income) == "number" and income < worst then
+			if ok and type(income) == "number" and income <= worst then
 				local group = groups[pet.key]
 				if not group then
 					group = { key = pet.key, name = spec.DisplayName, rank = fuse.RankOf(pet.key) or 0, pets = {} }
