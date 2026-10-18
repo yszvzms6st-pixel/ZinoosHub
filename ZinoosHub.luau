@@ -8209,6 +8209,9 @@ function STATE.stepFuse()
 		return
 	end
 	local centre = pivot.Position
+	local startCharacter = LocalPlayer.Character
+	local startRoot = startCharacter and startCharacter:FindFirstChild("HumanoidRootPart")
+	local startCFrame = startRoot and startRoot.CFrame or nil
 	STATE.fuseGoal = CFrame.new(centre + Vector3.new(0, 0, 12))
 	STATE.fuseBusy = true
 	local ok, err = pcall(function()
@@ -8271,6 +8274,13 @@ function STATE.stepFuse()
 	end)
 	STATE.fuseBusy = false
 	STATE.fuseGoal = nil
+	if STATE.autoTrain ~= true and typeof(startCFrame) == "CFrame" and (startCFrame.Position - centre).Magnitude > 40 then
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			pinGoal(hrp, startCFrame)
+		end
+	end
 	if not ok then
 		STATE.fuseStatus = "Fuse error: " .. tostring(err)
 		STATE.nextFuse = os.clock() + 30
@@ -8284,7 +8294,7 @@ function STATE.powerLeft()
 end
 
 function STATE.buyTrenchEgg(now)
-	if now < (STATE.nextTrenchBuy or 0) then
+	if now < (STATE.nextTrenchBuy or 0) or STATE.trenchBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
 		return
 	end
 	if STATE.useInk(now) then
