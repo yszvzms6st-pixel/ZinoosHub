@@ -819,13 +819,13 @@ if STATE.trenchShop == nil then
 	STATE.trenchShop = true
 end
 if STATE.powerPearls == nil then
-	STATE.powerPearls = true
+	STATE.powerPearls = false
 end
 if STATE.autoInk == nil then
-	STATE.autoInk = true
+	STATE.autoInk = false
 end
 if STATE.autoFuse == nil then
-	STATE.autoFuse = true
+	STATE.autoFuse = false
 end
 if STATE.autoReload == nil then
 	STATE.autoReload = true
