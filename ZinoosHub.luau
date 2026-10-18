@@ -828,7 +828,7 @@ if STATE.autoFuse == nil then
 	STATE.autoFuse = false
 end
 if STATE.autoReload == nil then
-	STATE.autoReload = true
+	STATE.autoReload = false
 end
 STATE.fuseBusy = false
 STATE.fuseGoal = nil
