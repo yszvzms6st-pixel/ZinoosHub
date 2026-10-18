@@ -827,6 +827,9 @@ end
 if STATE.autoFuse == nil then
 	STATE.autoFuse = true
 end
+if STATE.autoReload == nil then
+	STATE.autoReload = true
+end
 STATE.fuseBusy = false
 STATE.fuseGoal = nil
 if STATE.webhookReports == nil then
@@ -3295,6 +3298,9 @@ local function runStealTrip()
 	if pickupSucceeded and typeof(STATE.noteSession) == "function" then
 		STATE.noteSession("steals")
 	end
+	if pickupSucceeded and typeof(STATE.toast) == "function" then
+		STATE.toast("Stole " .. tostring(stolenName))
+	end
 	if pickupSucceeded and queueRare then
 		queueRare("Stolen egg", stolenName)
 	end
@@ -3853,6 +3859,13 @@ end
 function STATE.hideLiteModel(model)
 	if typeof(model) ~= "Instance" or not model:IsA("Model") then
 		return
+	end
+	if model:GetAttribute("ZinoosLite") == true then
+		STATE.ensureLiteGen()
+		local watchedId = STATE.liteId(model)
+		if type(watchedId) == "string" and STATE._liteOwned[watchedId] ~= nil then
+			return
+		end
 	end
 	if model:GetAttribute("ZinoosLite") ~= true then
 		local animator = model:FindFirstChildWhichIsA("Animator", true)
@@ -4440,6 +4453,7 @@ local FLAG_KEYS = {
 	PowerPearls = "powerPearls",
 	AutoInk = "autoInk",
 	AutoFuse = "autoFuse",
+	AutoReload = "autoReload",
 	DiscordReports = "webhookReports",
 	AutoPlace = "autoPlace",
 	AutoOpen = "autoOpen",
@@ -4668,6 +4682,217 @@ function STATE.readTheme(raw)
 		glow = pick(body, "Glow", "glow") == true,
 		name = name,
 	}, name, source, nil
+end
+
+STATE.dashFeatures = {
+	{ label = "Train", key = "autoTrain", fault = "Auto Train" },
+	{ label = "Steal", key = "autoSteal", fault = "Auto Steal", busy = "liftSteal" },
+	{ label = "Place", key = "autoPlace", fault = "Auto Place", busy = "placeBusy" },
+	{ label = "Trench", key = "autoTrench", busy = "trenchBusy" },
+	{ label = "Ink", key = "autoInk" },
+	{ label = "Fuse", key = "autoFuse", fault = "Auto Fuse", busy = "fuseBusy" },
+	{ label = "Equip", key = "equipBest", fault = "Equip Best" },
+	{ label = "Rebirth", key = "rebirth", fault = "Auto Rebirth" },
+	{ label = "Open", key = "autoOpen", fault = "Auto Open" },
+	{ label = "Reports", key = "webhookOn", fault = "Discord Reports" },
+}
+
+STATE.dashColors = {
+	off = Color3.fromRGB(110, 110, 110),
+	ok = Color3.fromRGB(70, 205, 110),
+	busy = Color3.fromRGB(255, 184, 64),
+	fault = Color3.fromRGB(235, 80, 80),
+}
+
+function STATE.buildDashboard(gui, homePage, card, label)
+	local box = card(homePage, "DASHBOARD", 5)
+	local grid = Instance.new("Frame")
+	grid.BackgroundTransparency = 1
+	grid.LayoutOrder = 1
+	grid.Size = UDim2.new(1, 0, 0, 0)
+	grid.AutomaticSize = Enum.AutomaticSize.Y
+	grid.ZIndex = 6
+	grid.Parent = box
+	local gridLayout = Instance.new("UIGridLayout")
+	gridLayout.CellSize = UDim2.new(0.2, -4, 0, 18)
+	gridLayout.CellPadding = UDim2.fromOffset(4, 4)
+	gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	gridLayout.Parent = grid
+	local lights = {}
+	for index, feature in ipairs(STATE.dashFeatures) do
+		local chip = Instance.new("Frame")
+		chip.BackgroundTransparency = 1
+		chip.LayoutOrder = index
+		chip.ZIndex = 6
+		chip.Parent = grid
+		local dot = Instance.new("Frame")
+		dot.AnchorPoint = Vector2.new(0, 0.5)
+		dot.Position = UDim2.new(0, 0, 0.5, 0)
+		dot.Size = UDim2.fromOffset(8, 8)
+		dot.BorderSizePixel = 0
+		dot.BackgroundColor3 = STATE.dashColors.off
+		dot.ZIndex = 7
+		dot.Parent = chip
+		local dotCorner = Instance.new("UICorner")
+		dotCorner.CornerRadius = UDim.new(1, 0)
+		dotCorner.Parent = dot
+		local name = label(chip, feature.label, 12, Color3.new(1, 1, 1), Enum.Font.GothamMedium, 18)
+		name.Position = UDim2.fromOffset(12, 0)
+		name.Size = UDim2.new(1, -12, 1, 0)
+		name.TextYAlignment = Enum.TextYAlignment.Center
+		name.TextWrapped = false
+		name.ZIndex = 7
+		lights[index] = { dot = dot, name = name }
+	end
+	local bars = {}
+	for index = 1, 3 do
+		local row = Instance.new("Frame")
+		row.BackgroundTransparency = 1
+		row.LayoutOrder = 1 + index
+		row.Size = UDim2.new(1, 0, 0, 30)
+		row.ZIndex = 6
+		row.Parent = box
+		local text = label(row, "", 12, Color3.new(1, 1, 1), Enum.Font.Gotham, 16)
+		text.Size = UDim2.new(1, 0, 0, 16)
+		text.TextWrapped = false
+		text.TextTruncate = Enum.TextTruncate.AtEnd
+		text.ZIndex = 7
+		local track = Instance.new("Frame")
+		track.Position = UDim2.fromOffset(0, 20)
+		track.Size = UDim2.new(1, 0, 0, 6)
+		track.BorderSizePixel = 0
+		track.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		track.BackgroundTransparency = 0.85
+		track.ZIndex = 7
+		track.Parent = row
+		local trackCorner = Instance.new("UICorner")
+		trackCorner.CornerRadius = UDim.new(1, 0)
+		trackCorner.Parent = track
+		local fill = Instance.new("Frame")
+		fill.Size = UDim2.fromScale(0, 1)
+		fill.BorderSizePixel = 0
+		fill.BackgroundColor3 = STATE.dashColors.ok
+		fill.ZIndex = 8
+		fill.Parent = track
+		local fillCorner = Instance.new("UICorner")
+		fillCorner.CornerRadius = UDim.new(1, 0)
+		fillCorner.Parent = fill
+		bars[index] = { text = text, fill = fill }
+	end
+	local function setBar(bar, text, fraction, color)
+		if bar.text.Text ~= text then
+			bar.text.Text = text
+		end
+		local size = UDim2.fromScale(math.clamp(fraction, 0, 1), 1)
+		if bar.fill.Size ~= size then
+			bar.fill.Size = size
+		end
+		if bar.fill.BackgroundColor3 ~= color then
+			bar.fill.BackgroundColor3 = color
+		end
+	end
+	STATE.refreshDashboard = function()
+		local theme = STATE.hubThemeDef()
+		local faults = type(STATE.featureFaults) == "table" and STATE.featureFaults or {}
+		for index, feature in ipairs(STATE.dashFeatures) do
+			local light = lights[index]
+			local color = STATE.dashColors.ok
+			if STATE[feature.key] ~= true then
+				color = STATE.dashColors.off
+			elseif feature.fault and type(faults[feature.fault]) == "string" and faults[feature.fault] ~= "" then
+				color = STATE.dashColors.fault
+			elseif feature.busy and STATE[feature.busy] == true then
+				color = STATE.dashColors.busy
+			end
+			if light.dot.BackgroundColor3 ~= color then
+				light.dot.BackgroundColor3 = color
+			end
+			if light.name.TextColor3 ~= theme.ink then
+				light.name.TextColor3 = theme.ink
+			end
+		end
+		local data = readData()
+		local trench = type(data) == "table" and type(data.trench) == "table" and data.trench or {}
+		local pearls = type(trench.pearls) == "number" and trench.pearls or 0
+		local free = type(trench.inks) == "number" and trench.inks or 0
+		if STATE.autoInk ~= true then
+			setBar(bars[1], "Auto Ink off", 0, STATE.dashColors.off)
+		elseif free > 0 then
+			setBar(bars[1], string.format("Next ink · %d free ink ready", free), 1, STATE.dashColors.ok)
+		else
+			setBar(bars[1], string.format("Next ink · %d / 900 pearls", math.floor(pearls)), pearls / 900, STATE.dashColors.ok)
+		end
+		local mastery = STATE.masteryInfo and STATE.masteryInfo()
+		if mastery then
+			local span = math.max(1, mastery.target - mastery.from)
+			local eta = mastery.fightsLeft and string.format(" (~%d Trenches)", mastery.fightsLeft) or ""
+			setBar(bars[2], string.format("Mastery · %d / %d → %s%s", math.floor(mastery.damage), mastery.target, mastery.reward, eta), (mastery.damage - mastery.from) / span, STATE.dashColors.busy)
+		else
+			setBar(bars[2], "Mastery · reading...", 0, STATE.dashColors.off)
+		end
+		local state = workspace:GetAttribute("TrenchState")
+		local endsAt = workspace:GetAttribute("TrenchEndsAt")
+		local remain = type(endsAt) == "number" and math.max(0, endsAt - workspace:GetServerTimeNow()) or 0
+		if type(state) ~= "string" or state == "idle" then
+			local untilOpen = remain + 30
+			setBar(bars[3], string.format("Next Trench · %d:%02d", math.floor(untilOpen / 60), math.floor(untilOpen % 60)), 1 - untilOpen / 1230, STATE.dashColors.ok)
+		else
+			setBar(bars[3], "Trench · " .. state, 1, STATE.dashColors.busy)
+		end
+	end
+	local toast = Instance.new("TextLabel")
+	toast.Name = "ZinoosToast"
+	toast.AnchorPoint = Vector2.new(0.5, 1)
+	toast.Position = UDim2.new(0.5, 0, 1, -130)
+	toast.Size = UDim2.fromOffset(340, 36)
+	toast.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
+	toast.BackgroundTransparency = 1
+	toast.BorderSizePixel = 0
+	toast.Font = Enum.Font.GothamBold
+	toast.TextSize = 14
+	toast.TextColor3 = Color3.new(1, 1, 1)
+	toast.TextTransparency = 1
+	toast.Text = ""
+	toast.Visible = false
+	toast.ZIndex = 50
+	toast.Parent = gui
+	local toastCorner = Instance.new("UICorner")
+	toastCorner.CornerRadius = UDim.new(0, 10)
+	toastCorner.Parent = toast
+	local toastStroke = Instance.new("UIStroke")
+	toastStroke.Color = STATE.dashColors.ok
+	toastStroke.Thickness = 1.5
+	toastStroke.Transparency = 1
+	toastStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	toastStroke.Parent = toast
+	local queue = {}
+	local showing = false
+	local tweens = game:GetService("TweenService")
+	local fadeInfo = TweenInfo.new(0.25)
+	STATE.toast = function(text)
+		if type(text) ~= "string" or text == "" or #queue >= 5 then
+			return
+		end
+		queue[#queue + 1] = text
+		if showing then
+			return
+		end
+		showing = true
+		task.spawn(function()
+			while #queue > 0 and toast.Parent do
+				toast.Text = table.remove(queue, 1)
+				toast.Visible = true
+				tweens:Create(toast, fadeInfo, { BackgroundTransparency = 0.05, TextTransparency = 0 }):Play()
+				tweens:Create(toastStroke, fadeInfo, { Transparency = 0.2 }):Play()
+				task.wait(3.5)
+				tweens:Create(toast, fadeInfo, { BackgroundTransparency = 1, TextTransparency = 1 }):Play()
+				tweens:Create(toastStroke, fadeInfo, { Transparency = 1 }):Play()
+				task.wait(0.3)
+			end
+			toast.Visible = false
+			showing = false
+		end)
+	end
 end
 
 function STATE.hubThemeDef()
@@ -6126,6 +6351,8 @@ local function installHub()
 			task.defer(pulseAntiAfk)
 		elseif key == "lowEnd" then
 			applyLowEnd(on)
+		elseif key == "autoReload" and STATE.applyAutoReload then
+			STATE.applyAutoReload()
 		elseif key == "invEsp" and not on then
 			STATE._invShown = false
 			clearInvEsp()
@@ -6587,7 +6814,7 @@ local function installHub()
 	local pets = card(leftColumn, "PETS", 2)
 	makeSwitch(pets, "Auto Open", "autoOpen")
 	makeSwitch(pets, "Equip Best", "equipBest")
-	makeSwitch(pets, "Auto Fuse", "autoFuse", "Fuses 3 bag Whale Sharks, Megalodons, Moon Whales or Fossil TRexes into a better egg. Never plot pets")
+	makeSwitch(pets, "Auto Fuse", "autoFuse", "Fuses 3 bag Whale Sharks, Megalodons, Moon Whales, Fossil TRexes or Abyss Dragons into a better egg. Never plot pets")
 
 	local screenCard = card(leftColumn, "SCREEN", 3)
 	makeSwitch(screenCard, "Lite Pets", "litePets")
@@ -6607,6 +6834,7 @@ local function installHub()
 		saveConfig()
 	end, true)
 	makeSwitch(training, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
+	makeSwitch(training, "Auto-load on Rejoin", "autoReload", "Loads the newest hub again by itself after a rejoin or server hop")
 	makeSwitch(training, "Auto Rebirth", "rebirth")
 
 	local upgrades = card(rightColumn, "UPGRADES", 2)
@@ -6841,6 +7069,11 @@ local function installHub()
 				sessionBody.Text = text
 			end
 			sessionBody.TextColor3 = STATE.hubThemeDef().ink
+		end
+		local dashOk, dashErr = pcall(STATE.buildDashboard, gui, homePage, card, label)
+		if not dashOk then
+			STATE.refreshDashboard = nil
+			STATE.noteFault("Dashboard", false, dashErr)
 		end
 	end
 
@@ -7338,6 +7571,9 @@ local function installHub()
 			if typeof(STATE.refreshSessionStats) == "function" then
 				pcall(STATE.refreshSessionStats)
 			end
+			if typeof(STATE.refreshDashboard) == "function" then
+				pcall(STATE.refreshDashboard)
+			end
 			if refreshHealth then
 				pcall(refreshHealth)
 			end
@@ -7820,6 +8056,8 @@ function STATE.sessionData()
 		steals = 0,
 		fights = 0,
 		wins = 0,
+		damage = 0,
+		damageFights = 0,
 	}
 	STATE._session = session
 	return session
@@ -7869,13 +8107,108 @@ function STATE.finishTrenchFight(fight)
 	if won then
 		STATE.noteSession("wins")
 	end
+	local session = STATE.sessionData()
+	if session then
+		session.damage = (type(session.damage) == "number" and session.damage or 0) + damage
+		session.damageFights = (type(session.damageFights) == "number" and session.damageFights or 0) + 1
+	end
 	STATE.noteActivity(string.format("Trench %s · +%d pearls", won and "won" or "lost", math.floor(pearls)))
+	if STATE.toast then
+		STATE.toast(string.format("Trench %s · +%d pearls", won and "won" or "lost", math.floor(pearls)))
+	end
 	STATE.sendReport(won and "Trench won" or "Trench lost", table.concat({
 		won and "The King Kraken was defeated." or "The King Kraken got away.",
 		string.format("Pearls +%d (now %d)", math.floor(pearls), math.floor(tonumber(trench.pearls) or 0)),
 		string.format("Damage dealt %.0f", damage),
 	}, "\n"), won and 3066993 or 15158332)
 end
+
+function STATE.masteryReward(step)
+	if type(step) ~= "table" then
+		return "reward"
+	end
+	if step.Kind == "egg" then
+		local spec = petSpec(step.Key)
+		local name = spec and (spec.DisplayName or spec.Name) or "Egg"
+		if not string.find(name, "Egg", 1, true) then
+			name ..= " Egg"
+		end
+		local count = tonumber(step.Count) or 1
+		return count > 1 and (tostring(count) .. "x " .. name) or name
+	elseif step.Kind == "ink" then
+		return tostring(tonumber(step.Count) or 1) .. "x Kraken Ink"
+	elseif step.Kind == "pearls" then
+		return tostring(step.Amount or 0) .. " pearls"
+	elseif step.Kind == "perk" then
+		return "damage perk"
+	end
+	return tostring(step.Kind or "reward")
+end
+
+function STATE.masteryInfo()
+	local configs = STATE.inkConfigs and STATE.inkConfigs()
+	local data = readData()
+	local trench = type(data) == "table" and type(data.trench) == "table" and data.trench or nil
+	local steps = configs and configs.trench and configs.trench.Mastery
+	if not trench or type(trench.damage) ~= "number" or type(steps) ~= "table" or #steps == 0 then
+		return nil
+	end
+	local lapLength = steps[#steps].Damage
+	local damage = trench.damage
+	local lap = math.floor(damage / lapLength)
+	local within = damage - lap * lapLength
+	local nextStep, previous = nil, 0
+	for _, step in ipairs(steps) do
+		if within < step.Damage then
+			nextStep = step
+			break
+		end
+		previous = step.Damage
+	end
+	if not nextStep then
+		lap += 1
+		previous = 0
+		nextStep = steps[1]
+	end
+	if lap >= 1 and type(configs.trench.MasteryStepFor) == "function" then
+		local ok, adjusted = pcall(configs.trench.MasteryStepFor, nextStep, lap)
+		if ok and type(adjusted) == "table" then
+			nextStep = adjusted
+		end
+	end
+	local session = STATE.sessionData()
+	local damageFights = session and type(session.damageFights) == "number" and session.damageFights or 0
+	local perFight = damageFights > 0 and (session.damage or 0) / damageFights or nil
+	local target = lap * lapLength + nextStep.Damage
+	return {
+		damage = damage,
+		from = lap * lapLength + previous,
+		target = target,
+		reward = STATE.masteryReward(nextStep),
+		fightsLeft = perFight and perFight > 0 and math.ceil((target - damage) / perFight) or nil,
+	}
+end
+
+task.spawn(function()
+	while running() do
+		local info = STATE.masteryInfo()
+		local last = STATE._masteryLast
+		if info then
+			if type(last) == "table" and info.damage >= last.target and last.target > 0 then
+				local text = "Mastery reward: " .. tostring(last.reward)
+				STATE.noteActivity(text)
+				if STATE.toast then
+					STATE.toast(text)
+				end
+				if STATE.sendReport then
+					STATE.sendReport("Trench Mastery", string.format("Reached %d damage\nReward: **%s**", last.target, tostring(last.reward)), 15844367)
+				end
+			end
+			STATE._masteryLast = { target = info.target, reward = info.reward }
+		end
+		task.wait(15)
+	end
+end)
 
 task.spawn(function()
 	while running() do
@@ -8081,6 +8414,9 @@ function STATE.useInk(now)
 		if STATE.sendReport then
 			STATE.sendReport("Ink upgrade", string.format("**%s**\n%s → %s\nPaid with %s", target.name, target.mutation, newMutation, cost), 10181046)
 		end
+		if STATE.toast then
+			STATE.toast(string.format("Ink: %s is now %s!", target.name, newMutation))
+		end
 	else
 		STATE.inkStatus = string.format("Inked %s: no change (%s)", target.name, target.mutation)
 		STATE.noteActivity(STATE.inkStatus .. " (" .. cost .. ")")
@@ -8093,6 +8429,7 @@ STATE.fuseNames = {
 	["Megalodon"] = true,
 	["Moon Whale"] = true,
 	["Fossil TRex"] = true,
+	["Abyss Dragon"] = true,
 }
 
 function STATE.fuseConfig()
@@ -8269,6 +8606,9 @@ function STATE.stepFuse()
 		local jump = fuse and fromKey and result.key and ((fuse.RankOf(result.key) or 0) - (fuse.RankOf(fromKey) or 0)) or 0
 		if jump >= 2 and STATE.sendReport then
 			STATE.sendReport("Lucky fuse", string.format("3 %s fused into a **%s** egg (+%d steps)", fromName, toName, jump), 13145766)
+		end
+		if jump >= 2 and STATE.toast then
+			STATE.toast(string.format("Lucky fuse: %s egg!", toName))
 		end
 		task.wait(1)
 	end)
@@ -11215,6 +11555,29 @@ function STATE.runPlotRepairChecks()
 	end
 	return report
 end
+
+STATE.reloadLoader = [[
+if game.PlaceId ~= 76731343328034 then
+	return
+end
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+task.wait(8)
+loadstring(game:HttpGet("https://raw.githubusercontent.com/yszvzms6st-pixel/ZinoosHub/main/ZinoosHub.luau?t=" .. tostring(os.time())))()
+]]
+
+function STATE.applyAutoReload()
+	local queue = queue_on_teleport or queueonteleport
+	local clear = clear_teleport_queue or clearqueueonteleport
+	if typeof(clear) == "function" then
+		pcall(clear)
+	end
+	if STATE.autoReload == true and typeof(queue) == "function" then
+		pcall(queue, STATE.reloadLoader)
+	end
+end
+pcall(STATE.applyAutoReload)
 
 function STATE.runRepairChecks()
 	local webhookOk, webhookFailed = STATE.runWebhookParserTests()
