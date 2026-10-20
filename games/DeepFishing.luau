@@ -42,16 +42,73 @@ local STATE = {
 	selling = false,
 	fishing = false,
 	stats = { caught = 0, sold = 0, earned = 0, casts = 0, startedAt = os.time() },
+	busyTask = nil,
+	-- Fishing
 	autoFish = true,
 	perfect = true,
+	perfectChance = 100,
+	fastReel = true,
+	doubleSpeed = false,
+	fastFights = true,
+	collectFish = false,
+	collectRarities = {},
+	collectMutations = {},
+	stopEmpty = false,
+	collectFinds = false,
+	findTypes = {},
+	bigFish = true,
+	bigMouth = false,
+	freeRewards = true,
+	extraCodes = "",
+	codeInput = "",
+	-- Economy
 	sell = true,
+	sellFull = true,
 	sellAt = 60,
-	upgrade = true,
+	sellRarities = {},
+	sellMutations = {},
+	sellMatch = "Either",
+	autoFavorite = false,
+	favRarities = {},
+	favMutations = {},
+	favMatch = "Either",
+	gameAutoFavorite = "None",
+	autoBuyBait = false,
 	rod = true,
+	upgrade = true,
+	upgradeList = {},
+	autoBestBait = false,
+	autoUseBait = false,
+	useBait = "Classic Bait",
+	-- Enchant
+	autoEnchant = false,
+	enchantStone = "Enchant Stone",
+	enchantTargets = {},
+	enchantDelay = 1,
+	autoReroll = false,
+	rerollStops = {},
+	useUltra = false,
+	skipAnim = true,
+	-- Webhooks
+	webhookOn = false,
+	webhook = "",
+	hookRarities = {},
+	hookMutations = {},
+	hookSells = false,
+	hookReports = false,
+	-- Player
+	walkSpeedOn = false,
+	walkSpeed = 32,
+	jumpOn = false,
+	jumpPower = 75,
+	infJump = false,
+	noclip = false,
 	antiAfk = true,
 	autoReload = false,
 	hubSize = "Compact",
 }
+
+genv.ZinoosFishingState = STATE
 
 -- One copy at a time: a new run stops the old one first.
 if typeof(genv.ZinoosFishingStop) == "function" then
@@ -197,12 +254,12 @@ end
 AF.Boost = function(self)
 	local real = originals.Boost(self)
 	if running() and STATE.perfect == true then
-		return math.max(real or 0, PERFECT_CHANCE)
+		return math.max(real or 0, math.clamp((tonumber(STATE.perfectChance) or PERFECT_CHANCE * 100) / 100, 0.05, 1))
 	end
 	return real
 end
 AF.DriveCast = function(self, fishing)
-	if running() and STATE.selling then
+	if running() and (STATE.selling or STATE.busyTask) then
 		return
 	end
 	if running() then
@@ -255,7 +312,12 @@ local function stepFish()
 		STATE.status = "Idle"
 		return
 	end
-	if STATE.selling then
+	if STATE.selling or STATE.busyTask then
+		return
+	end
+	-- Auto Reroll needs the fish in your hand, so fishing waits while it is on.
+	if STATE.autoReroll == true then
+		STATE.status = "Waiting for Auto Reroll"
 		return
 	end
 	local hrp = hrpOf()
@@ -278,17 +340,89 @@ local function stepFish()
 	STATE.status = STATE.fishing and "Fishing" or "Casting"
 end
 
-local function sellOnce(minimum)
-	if STATE.selling or busy() then
-		return
+local function inList(list, value)
+	return type(list) == "table" and value ~= nil and table.find(list, value) ~= nil
+end
+
+local function fishRarity(name)
+	local info = AF.Content.Item.Fish.Items[name]
+	return info and info.Rarity or nil
+end
+
+local function fishMutation(item)
+	local data = type(item) == "table" and item.Data
+	local mutation = type(data) == "table" and data.Mutation or nil
+	return if type(mutation) == "string" and mutation ~= "" then mutation else "None"
+end
+
+-- Either: the rarity or the mutation is ticked. Both: every ticked list matches (an empty list matches anything).
+local function matchesFilter(rarity, mutation, rarities, mutations, mode)
+	local hasRarity = type(rarities) == "table" and #rarities > 0
+	local hasMutation = type(mutations) == "table" and #mutations > 0
+	if not hasRarity and not hasMutation then
+		return false
 	end
-	if fishCount() < minimum then
-		return
+	local rarityHit = hasRarity and inList(rarities, rarity)
+	local mutationHit = hasMutation and inList(mutations, mutation)
+	if mode == "Both" then
+		return (not hasRarity or rarityHit) and (not hasMutation or mutationHit)
+	end
+	return rarityHit or mutationHit
+end
+
+local function isLocked(item)
+	local ok, locked = pcall(AF.Modules.Items.Lock.IsLocked, item)
+	return ok and locked == true
+end
+
+local function inventoryFish()
+	local data = readData()
+	local list = {}
+	for guid, item in pairs(data and data.Inventory or {}) do
+		if type(item) == "table" and item.Type == "Fish" then
+			list[#list + 1] = { guid = guid, item = item, name = item.Name, rarity = fishRarity(item.Name), mutation = fishMutation(item), locked = isLocked(item) }
+		end
+	end
+	return list
+end
+
+local function sellFilterOn()
+	return #STATE.sellRarities > 0 or #STATE.sellMutations > 0
+end
+
+local function bagFull()
+	local ok, cap = pcall(function()
+		return AF.Services.Backpack:GetCap(LocalPlayer)
+	end)
+	elevate()
+	return ok and type(cap) == "table" and (cap.IsCapped == true or (tonumber(cap.Count) or 0) >= (tonumber(cap.Cap) or math.huge))
+end
+
+local function toggleLock(guid)
+	AF.Events.Client("Lock"):Fire(true, "Toggle", guid)
+end
+
+-- Walks to the sell NPC, sells, and walks back. filtered = only fish matching the sell filters.
+local function sellTrip(filtered)
+	if STATE.selling or STATE.busyTask or busy() then
+		return false
 	end
 	local npc = interactable("NPC_Sell")
 	local hrp = hrpOf()
 	if not npc or not hrp then
-		return
+		return false
+	end
+	-- A filtered sell sells each matching fish on its own by id, so a fish you keep is never sent.
+	local picked = {}
+	if filtered then
+		for _, fish in ipairs(inventoryFish()) do
+			if not fish.locked and matchesFilter(fish.rarity, fish.mutation, STATE.sellRarities, STATE.sellMutations, STATE.sellMatch) then
+				picked[#picked + 1] = fish.guid
+			end
+		end
+		if #picked == 0 then
+			return false
+		end
 	end
 	STATE.selling = true
 	STATE.status = "Selling"
@@ -297,9 +431,28 @@ local function sellOnce(minimum)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.CFrame = CFrame.new(pivot.Position + pivot.LookVector * 6 + Vector3.new(0, 2, 0))
 	task.wait(0.35)
-	local ok, result = pcall(function()
-		return AF.Events.Client("SellAll"):Invoke(5, "Fish", nil)
-	end)
+	local ok, result = true, nil
+	if filtered then
+		local amount, value = 0, 0
+		for _, guid in ipairs(picked) do
+			if not running() then
+				break
+			end
+			local sold, got = pcall(function()
+				return AF.Events.Client("Sell"):Invoke(5, guid)
+			end)
+			if sold and type(got) == "number" and got > 0 then
+				amount += 1
+				value += got
+			end
+		end
+		result = { Amount = amount, Value = value }
+	else
+		ok, result = pcall(function()
+			return AF.Events.Client("SellAll"):Invoke(5, "Fish", nil)
+		end)
+	end
+	elevate()
 	hrp = hrpOf()
 	if hrp then
 		hrp.AssemblyLinearVelocity = Vector3.zero
@@ -313,24 +466,40 @@ local function sellOnce(minimum)
 		local text = string.format("Sold %d fish for %s", amount, shortNumber(value))
 		STATE.noteActivity(text)
 		toast(text)
+		if STATE.onSold then
+			STATE.onSold(amount, value)
+		end
 	end
 	task.wait(0.3)
 	STATE.selling = false
+	return true
 end
 
 local function stepSell()
-	if STATE.sell == true then
-		sellOnce(STATE.sellAt)
+	local count = fishCount()
+	local due = (STATE.sell == true and count >= math.max(1, tonumber(STATE.sellAt) or 60)) or (STATE.sellFull == true and count > 0 and bagFull())
+	if due then
+		sellTrip(sellFilterOn())
 	end
 end
 
-function STATE.sellNow()
+local function afterCast(fn)
 	task.spawn(function()
-		while running() and busy() do
+		local waited = 0
+		while running() and busy() and waited < 30 do
 			task.wait(0.2)
+			waited += 0.2
 		end
+		fn()
+	end)
+end
+
+function STATE.sellNow(filtered)
+	afterCast(function()
 		STATE.watchFeature("Auto Sell", function()
-			sellOnce(1)
+			if fishCount() > 0 then
+				sellTrip(filtered == true)
+			end
 		end)
 	end)
 end
@@ -416,9 +585,10 @@ function STATE.nextUpgrade()
 	local U = AF.Config.UpgradesConfig
 	local key = U.KeyForData(data)
 	local cheapest, cheapestPrice, cheapestLevel = nil, math.huge, 0
+	local only = type(STATE.upgradeList) == "table" and #STATE.upgradeList > 0
 	for _, name in ipairs(U.Order) do
 		local level = U.LevelOf(data, name, key)
-		if level < U.MaxLevelFor(name, key) then
+		if level < U.MaxLevelFor(name, key) and (not only or inList(STATE.upgradeList, name)) then
 			local ok, price = pcall(U.GetPrice, name, level, key)
 			if ok and type(price) == "number" and price < cheapestPrice then
 				cheapest, cheapestPrice, cheapestLevel = name, price, level
@@ -509,6 +679,1064 @@ function STATE.sessionLines()
 	return lines
 end
 
+-- Lists the hub's dropdowns offer.
+STATE.rarityOptions = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Secret", "Exotic" }
+pcall(function()
+	local order = AF.Config.RarityConfig.Order
+	if type(order) == "table" and #order > 0 then
+		STATE.rarityOptions = table.clone(order)
+	end
+end)
+STATE.mutationOptions = { "None" }
+pcall(function()
+	for _, name in ipairs({ "Gold", "Diamond", "Frozen", "Wet", "Toxic", "Lava", "Electro", "Bloodlit", "Cosmic", "Cursed" }) do
+		if AF.Config.MutationConfig.Get(name) then
+			STATE.mutationOptions[#STATE.mutationOptions + 1] = name
+		end
+	end
+	for name in pairs(AF.Config.MutationConfig.Mutations or {}) do
+		if type(name) == "string" and not table.find(STATE.mutationOptions, name) then
+			STATE.mutationOptions[#STATE.mutationOptions + 1] = name
+		end
+	end
+end)
+STATE.findOptions = { "Bait", "Potion", "Scroll", "Shard", "Egg", "Cage", "Stone", "Chest", "Key", "Relic" }
+STATE.upgradeOptions = { "Capacity", "Strength", "Weight", "Bounce" }
+pcall(function()
+	STATE.upgradeOptions = table.clone(AF.Config.UpgradesConfig.Order)
+end)
+STATE.stoneOptions = { "Enchant Stone", "Ultra Enchant Stone" }
+STATE.favoriteOptions = { "None" }
+pcall(function()
+	STATE.favoriteOptions = {}
+	for _, option in ipairs(AF.Modules.Items.Lock.Options()) do
+		STATE.favoriteOptions[#STATE.favoriteOptions + 1] = tostring(option)
+	end
+end)
+elevate()
+
+function STATE.listLabel(list)
+	if type(list) ~= "table" or #list == 0 then
+		return "None"
+	end
+	return table.concat(list, ", ")
+end
+
+function STATE.toggleListValue(key, value)
+	local list = type(STATE[key]) == "table" and STATE[key] or {}
+	local index = table.find(list, value)
+	if index then
+		table.remove(list, index)
+	else
+		list[#list + 1] = value
+	end
+	STATE[key] = list
+	return list
+end
+
+function STATE.enchantOptions()
+	local slot = STATE.enchantStone == "Ultra Enchant Stone" and 2 or 1
+	local names = {}
+	pcall(function()
+		for _, entry in ipairs(AF.Config.EnchantConfig.Pool(slot)) do
+			names[#names + 1] = entry.Name
+		end
+	end)
+	elevate()
+	return names
+end
+
+-- Fishing: fight clicks, reel showcase, double speed, collecting from the school.
+local function wantsFish(fish)
+	if fish.special or fish.boss then
+		return false
+	end
+	local rarity = fish.rarity or fishRarity(fish.name)
+	local mutation = fish.mutation or fish.pendingMutation or "None"
+	if #STATE.collectRarities == 0 and #STATE.collectMutations == 0 then
+		return true
+	end
+	return matchesFilter(rarity, mutation, STATE.collectRarities, STATE.collectMutations, "Either")
+end
+
+local function findType(name)
+	local ok, info = pcall(function()
+		return AF.Content.Item:FindInfo(name)
+	end)
+	return ok and type(info) == "table" and info.Type or nil
+end
+
+local function wantsFind(fish)
+	if not fish.special then
+		return false
+	end
+	if #STATE.findTypes == 0 then
+		return true
+	end
+	return inList(STATE.findTypes, findType(fish.name)) or inList(STATE.findTypes, fish.name)
+end
+
+local function grabbable(fish)
+	return type(fish) == "table" and not fish.caught and not fish.escaped and fish.model and fish.model.Parent ~= nil
+end
+
+originals.PickTarget = originals.PickTarget or AF.PickTarget
+originals.PickFind = originals.PickFind or AF.PickFind
+AF.PickTarget = function(self, list, hangY)
+	if running() and STATE.collectFish == true and (#STATE.collectRarities > 0 or #STATE.collectMutations > 0) then
+		local best, bestScore = nil, -math.huge
+		for _, fish in ipairs(list) do
+			if self:TargetValid(fish, hangY) and wantsFish(fish) and (fish.markerScore or 0) > bestScore then
+				best, bestScore = fish, fish.markerScore or 0
+			end
+		end
+		if best then
+			return best
+		end
+	end
+	return originals.PickTarget(self, list, hangY)
+end
+AF.PickFind = function(self, list, hangY)
+	if running() and STATE.collectFinds == true and #STATE.findTypes > 0 then
+		local filtered = {}
+		for _, fish in ipairs(list) do
+			if wantsFind(fish) then
+				filtered[#filtered + 1] = fish
+			end
+		end
+		return originals.PickFind(self, filtered, hangY)
+	end
+	return originals.PickFind(self, list, hangY)
+end
+hubCleanup(function()
+	AF.PickTarget = originals.PickTarget
+	AF.PickFind = originals.PickFind
+	AF.ThrowFinds = false
+end)
+
+local lastGrab = 0
+local catchableSince = nil
+local function stepCatch()
+	local sub = Cinematic.Sub
+	local school = sub and sub.FishSchool
+	local minigame = sub and sub.CatchMinigame
+	if STATE.fastFights == true and minigame and minigame.Fight then
+		minigame.Fight.nextAuto = 0
+		pcall(minigame.Click, minigame)
+	end
+	if STATE.fastReel == true and sub and sub.RareShowcase then
+		pcall(function()
+			local showcase = sub.RareShowcase
+			local current = showcase:Current()
+			if current and current.SkipButton and current.SkipButton.Visible then
+				showcase:Skip(current)
+			end
+		end)
+	end
+	AF.ThrowFinds = STATE.collectFinds == true
+	if not (Cinematic.Active and Cinematic.Catchable and not Cinematic.ReelRequested and school and type(school.Fish) == "table") then
+		catchableSince = nil
+		return
+	end
+	catchableSince = catchableSince or os.clock()
+	local fighting = minigame and minigame.IsActive and minigame:IsActive()
+	local remaining = 0
+	if (STATE.collectFish == true or STATE.collectFinds == true) and not fighting and os.clock() - lastGrab > 0.15 and os.clock() - catchableSince > 0.3 then
+		local best, bestScore = nil, -math.huge
+		for _, fish in ipairs(school.Fish) do
+			if grabbable(fish) and ((STATE.collectFish == true and wantsFish(fish)) or (STATE.collectFinds == true and wantsFind(fish))) then
+				local score = (fish.special and 2000 or 0) + (fish.markerScore or 0)
+				if score > bestScore then
+					best, bestScore = fish, score
+				end
+			end
+		end
+		if best then
+			lastGrab = os.clock()
+			local offered = false
+			if not best.special and minigame and minigame.Offer then
+				local ok, result = pcall(minigame.Offer, minigame, best)
+				offered = ok and result == true
+			end
+			if not offered then
+				pcall(school.CompleteGrab, school, best)
+			end
+		end
+	end
+	if STATE.stopEmpty == true and not fighting and os.clock() - catchableSince > 1.2 then
+		for _, fish in ipairs(school.Fish) do
+			if grabbable(fish) and ((STATE.collectFinds == true and wantsFind(fish)) or (not fish.special and wantsFish(fish))) then
+				remaining += 1
+			end
+		end
+		local full = false
+		pcall(function()
+			full = Cinematic:CaughtFishCount() >= Cinematic:GetHookCapacity()
+		end)
+		if remaining == 0 or full then
+			Cinematic.EarlyOutPending = true
+		end
+	end
+end
+trackConnection(RunService.Heartbeat:Connect(function()
+	if running() then
+		pcall(stepCatch)
+	end
+end))
+
+local function stepDoubleSpeed()
+	local data = readData()
+	if not data or data.IsInGroup ~= true then
+		return
+	end
+	local want = STATE.doubleSpeed == true
+	local ok, now = pcall(Cinematic.DoubleSpeedEnabled, Cinematic)
+	if ok and now ~= want then
+		pcall(Cinematic.SetDoubleSpeed, Cinematic, want)
+		AF.Events.Client("Settings"):Fire(true, "DoubleSpeed", want)
+	end
+end
+
+-- Favorites: ticks matching fish, and keeps the game's own auto favorite in sync.
+-- Favorite is a toggle and the server drops bursts, so it sends a few at a time and only
+-- tries a fish again once it has clearly stayed unfavorited.
+local favoriteSentAt = {}
+local function stepFavorite()
+	if STATE.autoFavorite == true and (#STATE.favRarities > 0 or #STATE.favMutations > 0) then
+		local sent = 0
+		for _, fish in ipairs(inventoryFish()) do
+			if not fish.locked and os.clock() - (favoriteSentAt[fish.guid] or -math.huge) > 10 and matchesFilter(fish.rarity, fish.mutation, STATE.favRarities, STATE.favMutations, STATE.favMatch) then
+				favoriteSentAt[fish.guid] = os.clock()
+				toggleLock(fish.guid)
+				sent += 1
+				if sent >= 5 then
+					break
+				end
+			end
+		end
+	end
+	local data = readData()
+	if data and type(STATE.gameAutoFavorite) == "string" and data.AutoLock ~= STATE.gameAutoFavorite and table.find(STATE.favoriteOptions, STATE.gameAutoFavorite) then
+		AF.Events.Client("Lock"):Fire(true, "AutoLock", STATE.gameAutoFavorite)
+	end
+end
+
+-- Bait: buying the best bait for this world and putting baits on.
+local function baitInfo(name)
+	local ok, info = pcall(function()
+		return AF.Content.Item.Bait:Get(name, true)
+	end)
+	return ok and info or nil
+end
+
+local function baitStacks()
+	local data = readData()
+	local stacks = {}
+	for guid, item in pairs(data and data.Inventory or {}) do
+		if type(item) == "table" and item.Type == "Bait" then
+			local amount = tonumber(item.Data and item.Data.Amount) or 1
+			stacks[#stacks + 1] = { guid = guid, name = item.Name, amount = amount, luck = (baitInfo(item.Name) or {}).Luck or 0 }
+		end
+	end
+	table.sort(stacks, function(a, b)
+		return a.luck > b.luck
+	end)
+	return stacks
+end
+
+local function activeBaitCount()
+	local data = readData()
+	local total = 0
+	for _, amount in pairs(data and data.ActiveBaits or {}) do
+		if type(amount) == "number" then
+			total += amount
+		end
+	end
+	return total
+end
+
+function STATE.bestShopBait()
+	local data = readData()
+	if not data then
+		return nil
+	end
+	local set = nil
+	pcall(function()
+		set = AF.Config.EventGearConfig.SetHere(data)
+	end)
+	local pick = nil
+	for name, bait in pairs(AF.Content.Item.Bait.Items or {}) do
+		if type(bait) == "table" and type(bait.Price) == "number" and bait.Price <= (data.Cash or 0) then
+			local sameSet = true
+			pcall(function()
+				sameSet = AF.Config.EventGearConfig.SetOf(name) == set
+			end)
+			if sameSet and (not pick or (bait.Luck or 0) > (pick.luck or 0)) then
+				pick = { name = name, price = bait.Price, luck = bait.Luck or 0 }
+			end
+		end
+	end
+	elevate()
+	return pick
+end
+
+function STATE.buyBestBait(amount)
+	local pick = STATE.bestShopBait()
+	if not pick then
+		return false
+	end
+	local data = readData()
+	local count = math.clamp(math.floor((data and data.Cash or 0) / math.max(1, pick.price)), 1, amount or 1)
+	AF.Events.Client("BaitShop"):Fire(true, "Buy", pick.name, count)
+	STATE.noteActivity(string.format("Bought %dx %s", count, pick.name))
+	return true
+end
+
+function STATE.useBestBait()
+	local stack = baitStacks()[1]
+	if stack then
+		AF.Events.Client("ConsumeBait"):Fire(true, stack.guid, math.min(10, stack.amount))
+		STATE.noteActivity("Put on " .. stack.name)
+		return true
+	end
+	return false
+end
+
+function STATE.useChosenBait()
+	for _, stack in ipairs(baitStacks()) do
+		if stack.name == STATE.useBait then
+			AF.Events.Client("ConsumeBait"):Fire(true, stack.guid, math.min(10, stack.amount))
+			STATE.noteActivity("Put on " .. stack.name)
+			return true
+		end
+	end
+	return false
+end
+
+local function stepBait()
+	if STATE.autoBuyBait == true and #baitStacks() == 0 and activeBaitCount() < 3 then
+		STATE.buyBestBait(10)
+		task.wait(1)
+	end
+	if activeBaitCount() > 0 then
+		return
+	end
+	if STATE.autoUseBait == true then
+		if STATE.useChosenBait() then
+			return
+		end
+	end
+	if STATE.autoBestBait == true then
+		STATE.useBestBait()
+	end
+end
+
+-- Codes and free rewards.
+STATE.codeList = {
+	"halloween", "update11", "pets", "update10", "sunkencrown", "boats", "volcano", "update9", "keys", "kraken",
+	"skins", "pond", "Fishing", "ThanksforPlaying", "Gifting", "Mutations", "BigFish", "Frostmere", "Release",
+}
+
+local function normalizeCode(code)
+	return string.lower((string.gsub(tostring(code), "%s+", "")))
+end
+
+function STATE.redeemCode(code)
+	code = string.match(tostring(code or ""), "^%s*(.-)%s*$")
+	if code == "" then
+		return false
+	end
+	AF.Events.Client("Codes"):Fire(true, code)
+	STATE.noteActivity("Tried code " .. code)
+	return true
+end
+
+function STATE.redeemAllCodes()
+	task.spawn(function()
+		local data = readData()
+		local used = {}
+		for name in pairs(data and data.Codes or {}) do
+			used[normalizeCode(name)] = true
+		end
+		local list = table.clone(STATE.codeList)
+		for extra in string.gmatch(tostring(STATE.extraCodes or ""), "[^,%s]+") do
+			list[#list + 1] = extra
+		end
+		local tried = 0
+		for _, code in ipairs(list) do
+			if not running() then
+				return
+			end
+			if not used[normalizeCode(code)] then
+				used[normalizeCode(code)] = true
+				STATE.redeemCode(code)
+				tried += 1
+				task.wait(1.2)
+			end
+		end
+		toast(tried > 0 and string.format("Tried %d codes", tried) or "Every code is already redeemed")
+	end)
+end
+
+local nextReward = {}
+local function due(name, seconds)
+	if os.clock() < (nextReward[name] or 0) then
+		return false
+	end
+	nextReward[name] = os.clock() + seconds
+	return true
+end
+
+local function stepRewards()
+	if STATE.freeRewards ~= true then
+		return
+	end
+	local data = readData()
+	if not data then
+		return
+	end
+	local now = workspace:GetServerTimeNow()
+	if due("playtime", 60) then
+		AF.Events.Client("PlaytimeGift"):Fire(true, "Claim")
+	end
+	local daily = data.DailyRewards
+	if type(daily) == "table" and (daily.Unlocked or 0) > (daily.Claimed or 0) and due("daily", 20) then
+		AF.Events.Client("DailyRewards"):Fire(true, "Claim", (daily.Claimed or 0) + 1)
+	end
+	local claimable = data.DailyClaimable
+	if type(claimable) == "table" and claimable.Free ~= true and due("claimable", 60) then
+		AF.Events.Client("DailyClaimable"):Fire(true, "Claim")
+	end
+	if data.IsInGroup == true and data.IsGroupRewardClaimed ~= true and due("group", 120) then
+		AF.Events.Client("GroupReward"):Fire(true)
+	end
+	if type(data.Achievements) == "table" and type(data.Achievements.Counters) == "table" and due("achievements", 300) then
+		for key in pairs(data.Achievements.Counters) do
+			AF.Events.Client("Achievement"):Fire(true, "Claim", key)
+		end
+	end
+end
+
+-- Trips to a spot in this world, doing something there, and coming back.
+local function standNear(position, distance)
+	local hrp = hrpOf()
+	if not hrp or typeof(position) ~= "Vector3" then
+		return false
+	end
+	local away = hrp.Position - position
+	away = Vector3.new(away.X, 0, away.Z)
+	if away.Magnitude < 0.1 then
+		away = Vector3.new(0, 0, 1)
+	end
+	local spot = position + away.Unit * (distance or 5) + Vector3.new(0, 2.5, 0)
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.CFrame = CFrame.lookAt(spot, Vector3.new(position.X, spot.Y, position.Z))
+	return true
+end
+
+local function goBack()
+	local hrp = hrpOf()
+	if hrp then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = fishSpot or CFrame.new(DEFAULT_SPOT)
+	end
+end
+
+local function holdItem(guid)
+	AF.Events.Client("EquipTool"):Fire(true, guid, "Equip")
+	task.wait(0.5)
+end
+
+local function heldItem()
+	local ok, data = pcall(function()
+		return AF.Services.Backpack:GetEquippedItemData()
+	end)
+	elevate()
+	return ok and type(data) == "table" and data or nil
+end
+
+local function placePosition(name)
+	local spot = interactable(name)
+	if not spot then
+		return nil
+	end
+	if spot:IsA("Folder") then
+		local attach = spot:FindFirstChildWhichIsA("Attachment", true)
+		if attach then
+			return attach.WorldPosition
+		end
+		local part = spot:FindFirstChildWhichIsA("BasePart", true)
+		return part and part.Position or nil
+	end
+	local ok, pivot = pcall(function()
+		return spot:GetPivot().Position
+	end)
+	return ok and pivot or nil
+end
+
+-- Big Fish: the Next Day Reward NPC hands out a big fish once its timer reads Claim!.
+local function stepBigFishReward()
+	if STATE.bigFish ~= true or STATE.busyTask or STATE.selling or busy() then
+		return
+	end
+	local data = readData()
+	if not data or data.IsNextDayRewardClaimed == true then
+		return
+	end
+	local npc = interactable("NextDayReward")
+	if not npc then
+		return
+	end
+	local ready = false
+	for _, item in ipairs(npc:GetDescendants()) do
+		if item:IsA("TextLabel") and string.find(item.Text, "Claim!", 1, true) then
+			ready = true
+			break
+		end
+	end
+	if not ready then
+		return
+	end
+	STATE.busyTask = "Claiming the big fish"
+	STATE.status = STATE.busyTask
+	local ok, err = pcall(function()
+		standNear(npc:GetPivot().Position, 5)
+		task.wait(0.5)
+		AF.Events.Client("NextDayReward"):Fire(true)
+		task.wait(1.5)
+	end)
+	STATE.busyTask = nil
+	goBack()
+	if ok and readData() and readData().IsNextDayRewardClaimed == true then
+		STATE.noteActivity("Claimed the big fish")
+		toast("Claimed the big fish")
+	end
+	STATE.noteFault("Big Fish", ok, err)
+end
+
+-- Big Mouth: feeds it the cheapest fish you are not keeping until it is full, then opens it.
+local function stepBigFish()
+	if STATE.bigMouth ~= true or STATE.busyTask or STATE.selling or busy() then
+		return
+	end
+	local data = readData()
+	local state = data and data.BigMouth
+	if type(state) ~= "table" or (state.ReadyAt or 0) > workspace:GetServerTimeNow() then
+		return
+	end
+	local mouth = placePosition("BigMouthFish")
+	if not mouth then
+		return
+	end
+	local prompt = interactable("BigMouthFish"):FindFirstChild("ProximityAttachment", true)
+	local target = prompt and prompt:IsA("Attachment") and prompt.WorldPosition or mouth
+	STATE.busyTask = "Feeding the Big Mouth"
+	STATE.status = STATE.busyTask
+	local ok, err = pcall(function()
+		standNear(target, 4)
+		task.wait(0.4)
+		if (state.Goal or 0) <= 0 then
+			AF.Events.Client("BigMouth"):Fire(true, "Open")
+			task.wait(1)
+			return
+		end
+		for _ = 1, 12 do
+			if not running() or STATE.bigMouth ~= true then
+				break
+			end
+			local now = readData()
+			local mouthState = now and now.BigMouth
+			if type(mouthState) ~= "table" or (mouthState.ReadyAt or 0) > workspace:GetServerTimeNow() or (mouthState.Progress or 0) >= (mouthState.Goal or math.huge) then
+				break
+			end
+			local pick, pickPrice = nil, math.huge
+			for _, fish in ipairs(inventoryFish()) do
+				if not fish.locked and fish.mutation == "None" then
+					local info = AF.Content.Item.Fish.Items[fish.name]
+					local price = info and info.SellPrice or 0
+					if price < pickPrice then
+						pick, pickPrice = fish, price
+					end
+				end
+			end
+			if not pick then
+				break
+			end
+			holdItem(pick.guid)
+			AF.Events.Client("BigMouth"):Fire(true, "Feed")
+			task.wait(1.2)
+		end
+	end)
+	STATE.busyTask = nil
+	equipRod()
+	goBack()
+	STATE.noteFault("Big Mouth", ok, err)
+end
+
+-- Enchanting: holds the stone at the shrine and rolls until a ticked enchant lands.
+local enchantReply = nil
+trackConnection(AF.Events.Client("Enchant"):Connect(function(kind, payload)
+	enchantReply = { kind = kind, payload = payload, at = os.clock() }
+end))
+
+local function currentEnchant(slot)
+	local data = readData()
+	local ok, normal, ultra = pcall(AF.Modules.Items.Enchant.Names, data)
+	elevate()
+	if not ok then
+		return nil
+	end
+	local name = if slot == 2 then ultra else normal
+	return if name == "__nil" then nil else name
+end
+
+local function stoneStack(name)
+	local data = readData()
+	for guid, item in pairs(data and data.Inventory or {}) do
+		if type(item) == "table" and item.Name == name then
+			return guid, tonumber(item.Data and item.Data.Amount) or 1
+		end
+	end
+	return nil, 0
+end
+
+function STATE.shrinePosition()
+	local ok, node = pcall(function()
+		return AF.Modules.World.WorldFolder.Path({ "Map", "Enchant", "ProxmityAttachment" })
+	end)
+	elevate()
+	if ok and typeof(node) == "Instance" then
+		if node:IsA("Attachment") then
+			return node.WorldPosition
+		end
+		local okPivot, pivot = pcall(function()
+			return node:GetPivot().Position
+		end)
+		if okPivot then
+			return pivot
+		end
+	end
+	return nil
+end
+
+local function stepEnchant()
+	if STATE.autoEnchant ~= true or STATE.busyTask or STATE.selling or busy() then
+		return
+	end
+	local slot = STATE.enchantStone == "Ultra Enchant Stone" and 2 or 1
+	if #STATE.enchantTargets == 0 then
+		STATE.enchantStatus = "Tick at least one enchant to stop on"
+		return
+	end
+	local have = currentEnchant(slot)
+	if have and inList(STATE.enchantTargets, have) then
+		STATE.enchantStatus = "Your rod already has " .. have
+		return
+	end
+	local stone, count = stoneStack(STATE.enchantStone)
+	if not stone or count < 1 then
+		STATE.enchantStatus = "No " .. STATE.enchantStone .. " left"
+		return
+	end
+	local shrine = STATE.shrinePosition()
+	if not shrine then
+		STATE.enchantStatus = "There is no Enchant Shrine in this world"
+		return
+	end
+	STATE.busyTask = "Enchanting"
+	STATE.enchanting = true
+	STATE.status = STATE.busyTask
+	local ok, err = pcall(function()
+		standNear(shrine, 5)
+		task.wait(0.4)
+		for _ = 1, 200 do
+			if not running() or STATE.autoEnchant ~= true then
+				break
+			end
+			stone, count = stoneStack(STATE.enchantStone)
+			if not stone or count < 1 then
+				STATE.enchantStatus = "Ran out of " .. STATE.enchantStone
+				break
+			end
+			local held = heldItem()
+			if not held or held.Name ~= STATE.enchantStone then
+				holdItem(stone)
+			end
+			enchantReply = nil
+			local sentAt = os.clock()
+			AF.Events.Client("Enchant"):Fire(true, "Roll")
+			while running() and not enchantReply and os.clock() - sentAt < 6 do
+				task.wait(0.1)
+			end
+			if enchantReply and enchantReply.kind == "Denied" then
+				STATE.enchantStatus = "The shrine said no: " .. tostring(enchantReply.payload)
+				if enchantReply.payload ~= "Busy" and enchantReply.payload ~= "AutoBusy" then
+					break
+				end
+			elseif enchantReply and enchantReply.kind == "Result" and type(enchantReply.payload) == "table" then
+				local name = tostring(enchantReply.payload.Name)
+				STATE.enchantStatus = "Rolled " .. name
+				STATE.noteActivity("Enchanted " .. name)
+				if inList(STATE.enchantTargets, name) then
+					toast("Rod enchanted with " .. name)
+					if STATE.sendAlert then
+						STATE.sendAlert("Enchant landed", "**" .. name .. "**", 11829830)
+					end
+					break
+				end
+			end
+			task.wait(math.clamp(tonumber(STATE.enchantDelay) or 1, 0.2, 10))
+		end
+	end)
+	STATE.busyTask = nil
+	STATE.enchanting = false
+	equipRod()
+	goBack()
+	STATE.noteFault("Auto Enchant", ok, err)
+end
+
+-- Mutation reroll: spins the fish you are holding at the dealer until a ticked mutation lands.
+local rerollReply = nil
+trackConnection(AF.Events.Client("MutationReroll"):Connect(function(kind, payload)
+	rerollReply = { kind = kind, payload = payload, at = os.clock() }
+end))
+
+local function scrollCount(ultra)
+	local data = readData()
+	local ok, count = pcall(AF.Config.MutationRerollConfig.CountFor, data and data.Inventory, ultra)
+	elevate()
+	return ok and tonumber(count) or 0
+end
+
+local function stepReroll()
+	if STATE.autoReroll ~= true or STATE.selling then
+		return
+	end
+	local held = heldItem()
+	if not held or held.Type ~= "Fish" then
+		STATE.rerollStatus = "Hold the fish you want to reroll"
+		return
+	end
+	local ultra = STATE.useUltra == true
+	if scrollCount(ultra) < 1 then
+		STATE.rerollStatus = ultra and "No Ultra Mutation Scrolls left" or "No Mutation Scrolls left"
+		return
+	end
+	local dealer = placePosition("MutationDealer")
+	if not dealer then
+		STATE.rerollStatus = "There is no Mutation Dealer in this world"
+		return
+	end
+	STATE.busyTask = "Rerolling"
+	STATE.rerolling = true
+	STATE.status = STATE.busyTask
+	local ok, err = pcall(function()
+		standNear(dealer, 5)
+		task.wait(0.5)
+		for _ = 1, 500 do
+			if not running() or STATE.autoReroll ~= true then
+				break
+			end
+			local fish = heldItem()
+			if not fish or fish.Type ~= "Fish" then
+				STATE.rerollStatus = "You stopped holding the fish"
+				break
+			end
+			if scrollCount(ultra) < 1 then
+				STATE.rerollStatus = "Ran out of scrolls"
+				break
+			end
+			rerollReply = nil
+			local sentAt = os.clock()
+			AF.Events.Client("MutationReroll"):Fire(true, "Spin", ultra)
+			if STATE.skipAnim == true then
+				task.wait(0.35)
+				AF.Events.Client("MutationReroll"):Fire(true, "Skip")
+			end
+			while running() and not rerollReply and os.clock() - sentAt < 8 do
+				task.wait(0.1)
+			end
+			if rerollReply and rerollReply.kind == "Denied" then
+				STATE.rerollStatus = "The dealer said no: " .. tostring(rerollReply.payload)
+				break
+			elseif rerollReply and rerollReply.kind == "Result" and type(rerollReply.payload) == "table" then
+				local landed = tostring(rerollReply.payload.To or "None")
+				STATE.rerollStatus = "Rolled " .. landed
+				STATE.noteActivity("Rerolled to " .. landed)
+				if inList(STATE.rerollStops, landed) then
+					toast("Fish rerolled to " .. landed)
+					if STATE.sendAlert then
+						STATE.sendAlert("Mutation landed", string.format("**%s** is now **%s**", tostring(rerollReply.payload.Name), landed), 11829830)
+					end
+					STATE.autoReroll = false
+					break
+				end
+			end
+			task.wait(STATE.skipAnim == true and 0.3 or 1.2)
+		end
+	end)
+	STATE.busyTask = nil
+	STATE.rerolling = false
+	STATE.noteFault("Auto Reroll", ok, err)
+end
+
+-- Webhooks: the Lift Rock hub's Discord sender.
+local webhookHosts = {
+	["discord.com"] = true,
+	["discordapp.com"] = true,
+	["canary.discord.com"] = true,
+	["ptb.discord.com"] = true,
+}
+
+function STATE.parseWebhook(raw)
+	if type(raw) ~= "string" or raw == "" then
+		return nil
+	end
+	if string.find(raw, "%s") or string.find(raw, "@", 1, true) or string.find(raw, "?", 1, true) or string.find(raw, "#", 1, true) or string.find(raw, "%%") then
+		return nil
+	end
+	local host, id, secret = string.match(raw, "^https://([^/]+)/api/webhooks/([^/]+)/([^/]+)$")
+	if type(host) ~= "string" or type(id) ~= "string" or type(secret) ~= "string" then
+		return nil
+	end
+	host = string.lower(host)
+	if string.find(host, ":", 1, true) or not webhookHosts[host] then
+		return nil
+	end
+	if not string.match(id, "^%d+$") or not string.match(secret, "^[%w_%-]+$") then
+		return nil
+	end
+	return "https://" .. host .. "/api/webhooks/" .. id .. "/" .. secret
+end
+
+local function webhookRequest()
+	if typeof(request) == "function" then
+		return request
+	end
+	return nil
+end
+
+local function sendWebhook(url, payload)
+	local requester = webhookRequest()
+	if not requester then
+		return false, "Request is not available."
+	end
+	local okEncode, body = pcall(function()
+		return game:GetService("HttpService"):JSONEncode(payload)
+	end)
+	if not okEncode then
+		return false, "Could not build the message."
+	end
+	local ok, result = pcall(requester, {
+		Url = url,
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = body,
+	})
+	if not ok then
+		return false, "The request failed."
+	end
+	local code = type(result) == "table" and (result.StatusCode or result.Status) or result
+	if type(code) == "number" and code >= 200 and code < 300 then
+		return true, "Webhook sent."
+	end
+	return false, "Webhook failed."
+end
+
+function STATE.testWebhook()
+	local url = STATE.parseWebhook(STATE.webhook)
+	if not url then
+		return false, "That is not a Discord webhook link."
+	end
+	return sendWebhook(url, { username = "Zinoos hub", content = "Webhook connected. Deep Fishing alerts will post here." })
+end
+
+function STATE.sendAlert(title, description, color)
+	if STATE.webhookOn ~= true then
+		return false
+	end
+	local url = STATE.parseWebhook(STATE.webhook)
+	if not url or not webhookRequest() then
+		return false
+	end
+	task.spawn(function()
+		local sent, reason = sendWebhook(url, {
+			username = "Zinoos hub",
+			embeds = { { title = tostring(title), description = tostring(description), color = type(color) == "number" and color or 5814783 } },
+		})
+		STATE.noteFault("Webhooks", sent, reason)
+	end)
+	return true
+end
+
+trackConnection(AF.Events.Client("FishesReceivedNotification"):Connect(function(fish, info)
+	if STATE.webhookOn ~= true or (#STATE.hookRarities == 0 and #STATE.hookMutations == 0) then
+		return
+	end
+	if type(info) == "table" and (info.Offline or info.Pet) then
+		return
+	end
+	local list = type(fish) == "table" and (if fish.Name then { fish } else fish) or {}
+	for _, entry in ipairs(list) do
+		if type(entry) == "table" and entry.Name then
+			local rarity = fishRarity(entry.Name) or "?"
+			local mutation = entry.Mutation or (type(entry.Data) == "table" and entry.Data.Mutation) or "None"
+			if matchesFilter(rarity, mutation, STATE.hookRarities, STATE.hookMutations, "Either") then
+				local text = string.format("**%s**\n%s%s", tostring(entry.Name), rarity, mutation ~= "None" and (" · " .. tostring(mutation)) or "")
+				STATE.sendAlert("Caught a fish", text, 16098851)
+			end
+		end
+	end
+end))
+
+function STATE.onSold(amount, value)
+	if STATE.hookSells == true then
+		STATE.sendAlert("Sold fish", string.format("Sold **%d** fish for **%s**", amount, shortNumber(value)), 5763719)
+	end
+end
+
+local nextReport = os.clock() + 3600
+local function stepReport()
+	if STATE.hookReports == true and os.clock() >= nextReport then
+		nextReport = os.clock() + 3600
+		STATE.sendAlert("Hourly report", table.concat(STATE.sessionLines(), "\n"), 5814783)
+	end
+end
+
+-- Player: movement and quick teleports.
+STATE.teleportSpots = { "Fishing Spot", "Sell", "Rods", "Baits", "Upgrades", "Mutation Dealer", "Big Mouth", "Enchant Shrine" }
+
+function STATE.teleportTo(name)
+	local hrp = hrpOf()
+	if not hrp then
+		return false
+	end
+	local positions = {
+		Sell = function()
+			return placePosition("NPC_Sell")
+		end,
+		Rods = function()
+			return placePosition("Rods")
+		end,
+		Baits = function()
+			return placePosition("Baits")
+		end,
+		Upgrades = function()
+			return placePosition("Upgrades")
+		end,
+		["Mutation Dealer"] = function()
+			return placePosition("MutationDealer")
+		end,
+		["Big Mouth"] = function()
+			return placePosition("BigMouthFish")
+		end,
+		["Enchant Shrine"] = STATE.shrinePosition,
+	}
+	if name == "Fishing Spot" then
+		goBack()
+		return true
+	end
+	local finder = positions[name]
+	local spot = finder and finder()
+	if not spot then
+		toast(name .. " is not in this world")
+		return false
+	end
+	return standNear(spot, 6)
+end
+
+function STATE.worldOptions()
+	local data = readData()
+	local list = {}
+	for name, unlocked in pairs(data and data.UnlockedWorlds or {}) do
+		if unlocked then
+			list[#list + 1] = tostring(name)
+		end
+	end
+	table.sort(list)
+	return list
+end
+
+function STATE.travelTo(world)
+	AF.Events.Client("Teleport"):Fire(true, world)
+	STATE.noteActivity("Travelling to " .. tostring(world))
+end
+
+local baseMovement = nil
+local function humanoidOf()
+	local character = LocalPlayer.Character
+	return character and character:FindFirstChildOfClass("Humanoid")
+end
+trackConnection(RunService.Heartbeat:Connect(function()
+	if not running() then
+		return
+	end
+	local humanoid = humanoidOf()
+	if not humanoid then
+		return
+	end
+	if not baseMovement then
+		baseMovement = { speed = humanoid.WalkSpeed, jump = humanoid.JumpPower, useJump = humanoid.UseJumpPower }
+	end
+	if STATE.walkSpeedOn == true then
+		humanoid.WalkSpeed = math.clamp(tonumber(STATE.walkSpeed) or 16, 8, 200)
+	elseif STATE._speedWasOn then
+		humanoid.WalkSpeed = baseMovement.speed
+	end
+	STATE._speedWasOn = STATE.walkSpeedOn == true
+	if STATE.jumpOn == true then
+		humanoid.UseJumpPower = true
+		humanoid.JumpPower = math.clamp(tonumber(STATE.jumpPower) or 50, 20, 300)
+	elseif STATE._jumpWasOn then
+		humanoid.UseJumpPower = baseMovement.useJump
+		humanoid.JumpPower = baseMovement.jump
+	end
+	STATE._jumpWasOn = STATE.jumpOn == true
+end))
+trackConnection(UserInputService.JumpRequest:Connect(function()
+	if running() and STATE.infJump == true then
+		local humanoid = humanoidOf()
+		if humanoid then
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end
+end))
+local noclipParts = {}
+trackConnection(RunService.Stepped:Connect(function()
+	if not running() then
+		return
+	end
+	local character = LocalPlayer.Character
+	if STATE.noclip == true and character then
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") and part.CanCollide then
+				noclipParts[part] = true
+				part.CanCollide = false
+			end
+		end
+	elseif next(noclipParts) then
+		for part in pairs(noclipParts) do
+			if part.Parent then
+				part.CanCollide = true
+			end
+		end
+		table.clear(noclipParts)
+	end
+end))
+hubCleanup(function()
+	local humanoid = humanoidOf()
+	if humanoid and baseMovement then
+		humanoid.WalkSpeed = baseMovement.speed
+		humanoid.UseJumpPower = baseMovement.useJump
+		humanoid.JumpPower = baseMovement.jump
+	end
+	for part in pairs(noclipParts) do
+		if part.Parent then
+			part.CanCollide = true
+		end
+	end
+end)
+
 local function destroyMenus()
 	local roots = { game:GetService("CoreGui") }
 	if typeof(gethui) == "function" then
@@ -533,11 +1761,64 @@ hubCleanup(destroyMenus)
 local FLAG_KEYS = {
 	AutoFish = "autoFish",
 	PerfectCasts = "perfect",
+	FastReel = "fastReel",
+	DoubleSpeed = "doubleSpeed",
+	FastFights = "fastFights",
+	CollectFish = "collectFish",
+	StopEmpty = "stopEmpty",
+	CollectFinds = "collectFinds",
+	BigFish = "bigFish",
+	BigMouth = "bigMouth",
+	FreeRewards = "freeRewards",
 	AutoSell = "sell",
-	AutoUpgrade = "upgrade",
+	SellFull = "sellFull",
+	AutoFavorite = "autoFavorite",
+	AutoBuyBait = "autoBuyBait",
 	AutoRod = "rod",
+	AutoUpgrade = "upgrade",
+	AutoBestBait = "autoBestBait",
+	AutoUseBait = "autoUseBait",
+	AutoEnchant = "autoEnchant",
+	AutoReroll = "autoReroll",
+	UseUltra = "useUltra",
+	SkipAnim = "skipAnim",
+	WebhookAlerts = "webhookOn",
+	HookSells = "hookSells",
+	HookReports = "hookReports",
+	WalkSpeedOn = "walkSpeedOn",
+	JumpOn = "jumpOn",
+	InfJump = "infJump",
+	Noclip = "noclip",
 	AntiAfk = "antiAfk",
 	AutoReload = "autoReload",
+}
+
+-- Saved values that are not on/off switches, with the type each one must have.
+local VALUE_KEYS = {
+	PerfectChance = { "perfectChance", "number" },
+	SellAt = { "sellAt", "number" },
+	EnchantDelay = { "enchantDelay", "number" },
+	WalkSpeed = { "walkSpeed", "number" },
+	JumpPower = { "jumpPower", "number" },
+	SellMatch = { "sellMatch", "string" },
+	FavMatch = { "favMatch", "string" },
+	GameAutoFavorite = { "gameAutoFavorite", "string" },
+	UseBait = { "useBait", "string" },
+	EnchantStone = { "enchantStone", "string" },
+	ExtraCodes = { "extraCodes", "string" },
+	WebhookUrl = { "webhook", "string" },
+	CollectRarities = { "collectRarities", "table" },
+	CollectMutations = { "collectMutations", "table" },
+	FindTypes = { "findTypes", "table" },
+	SellRarities = { "sellRarities", "table" },
+	SellMutations = { "sellMutations", "table" },
+	FavRarities = { "favRarities", "table" },
+	FavMutations = { "favMutations", "table" },
+	UpgradeList = { "upgradeList", "table" },
+	EnchantTargets = { "enchantTargets", "table" },
+	RerollStops = { "rerollStops", "table" },
+	HookRarities = { "hookRarities", "table" },
+	HookMutations = { "hookMutations", "table" },
 }
 
 STATE.adminIds = {
@@ -766,8 +2047,16 @@ STATE.dashFeatures = {
 	{ label = "Sell", key = "sell", fault = "Auto Sell", busy = "selling" },
 	{ label = "Upgrade", key = "upgrade", fault = "Auto Upgrade" },
 	{ label = "Rod", key = "rod", fault = "Auto Rod" },
+	{ label = "Collect", key = "collectFish" },
+	{ label = "Finds", key = "collectFinds" },
+	{ label = "Favorite", key = "autoFavorite", fault = "Auto Favorite" },
+	{ label = "Bait", key = "autoBestBait", fault = "Bait" },
+	{ label = "Rewards", key = "freeRewards", fault = "Free Rewards" },
+	{ label = "Big Fish", key = "bigFish", fault = "Big Fish" },
+	{ label = "Enchant", key = "autoEnchant", fault = "Auto Enchant", busy = "enchanting" },
+	{ label = "Reroll", key = "autoReroll", fault = "Auto Reroll", busy = "rerolling" },
+	{ label = "Webhook", key = "webhookOn", fault = "Webhooks" },
 	{ label = "Anti AFK", key = "antiAfk" },
-	{ label = "Rejoin", key = "autoReload" },
 }
 
 STATE.dashColors = {
@@ -1045,9 +2334,23 @@ local function loadSaved()
 			STATE[key] = saved[flag]
 		end
 	end
-	if type(saved.SellAt) == "number" and saved.SellAt >= 1 then
-		STATE.sellAt = saved.SellAt
+	for flag, spec in pairs(VALUE_KEYS) do
+		local value = saved[flag]
+		if type(value) == spec[2] then
+			if spec[2] == "table" then
+				local list = {}
+				for _, item in ipairs(value) do
+					if type(item) == "string" then
+						list[#list + 1] = item
+					end
+				end
+				STATE[spec[1]] = list
+			else
+				STATE[spec[1]] = value
+			end
+		end
 	end
+	STATE.sellAt = math.max(1, tonumber(STATE.sellAt) or 60)
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
 	end
@@ -1098,6 +2401,11 @@ local function saveConfig()
 	}
 	for flag, key in pairs(FLAG_KEYS) do
 		payload[flag] = STATE[key] == true
+	end
+	for flag, spec in pairs(VALUE_KEYS) do
+		if type(STATE[spec[1]]) == spec[2] then
+			payload[flag] = STATE[spec[1]]
+		end
 	end
 	local ok, encoded = pcall(function()
 		return game:GetService("HttpService"):JSONEncode(payload)
@@ -1909,8 +3217,13 @@ local function installHub()
 		return page
 	end
 
+	local PAGE_ORDER = { "Home", "Fishing", "Economy", "Enchant", "Webhooks", "Player", "Settings" }
 	local homePage = newPage("Home")
-	local mainPage = newPage("Main")
+	local fishingPage = newPage("Fishing")
+	local economyPage = newPage("Economy")
+	local enchantPage = newPage("Enchant")
+	local webhookPage = newPage("Webhooks")
+	local playerPage = newPage("Player")
 	local discordPage = newPage("Settings")
 
 	local currentPage = "Home"
@@ -2018,6 +3331,21 @@ local function installHub()
 			mark(6, 6, 9, 0, false)
 			mark(6, 6, 0, 9, false)
 			mark(6, 6, 9, 9, false)
+		elseif kind == "Fishing" then
+			mark(2, 12, 3, 1, false)
+			mark(8, 6, 6, 9, true)
+		elseif kind == "Economy" then
+			mark(12, 12, 2, 2, true)
+			mark(2, 6, 7, 5, false)
+		elseif kind == "Enchant" then
+			local gem = mark(9, 9, 3, 3, false)
+			gem.Rotation = 45
+		elseif kind == "Webhooks" then
+			mark(12, 8, 2, 3, false)
+			mark(4, 4, 3, 11, false)
+		elseif kind == "Player" then
+			mark(6, 6, 5, 1, true)
+			mark(12, 6, 2, 9, true)
 		else
 			mark(10, 10, 3, 3, true)
 		end
@@ -2074,9 +3402,9 @@ local function installHub()
 			showPage(name)
 		end)
 	end
-	addNav("Home", 1)
-	addNav("Main", 2)
-	addNav("Settings", 3)
+	for order, name in ipairs(PAGE_ORDER) do
+		addNav(name, order)
+	end
 
 	local profile = Instance.new("Frame")
 	profile.BackgroundColor3 = cardColor
@@ -2214,17 +3542,11 @@ local function installHub()
 	local searchRows = {}
 	local function remember(row, cardFrame, text)
 		row:SetAttribute("ZinoosSearch", string.lower(text))
-		local page = "Main"
+		local page = "Home"
 		local current = row
 		while current do
-			if current == discordPage then
-				page = "Settings"
-				break
-			elseif current == homePage then
-				page = "Home"
-				break
-			elseif current == mainPage then
-				page = "Main"
+			if current.Parent == pageHost then
+				page = current.Name
 				break
 			end
 			current = current.Parent
@@ -2606,72 +3928,507 @@ local function installHub()
 
 	STATE.toggleControls = {}
 
-	local columns = Instance.new("Frame")
-	columns.BackgroundTransparency = 1
-	columns.Size = UDim2.new(1, 0, 0, 0)
-	columns.AutomaticSize = Enum.AutomaticSize.Y
-	columns.Parent = mainPage
-	local columnLayout = Instance.new("UIListLayout")
-	columnLayout.FillDirection = Enum.FillDirection.Horizontal
-	columnLayout.Padding = UDim.new(0, 12)
-	columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	columnLayout.Parent = columns
+	STATE.rarityLabel = STATE.rarityLabel or STATE.listLabel
 
-	local function column(order)
-		local frame = Instance.new("Frame")
-		frame.BackgroundTransparency = 1
-		frame.LayoutOrder = order
-		frame.Size = UDim2.new(0.5, -6, 0, 0)
-		frame.AutomaticSize = Enum.AutomaticSize.Y
-		frame.Parent = columns
-		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 12)
-		layout.SortOrder = Enum.SortOrder.LayoutOrder
-		layout.Parent = frame
-		return frame
+	local columnSets = {}
+	local function pageColumns(page)
+		local columns = Instance.new("Frame")
+		columns.Name = "Columns"
+		columns.BackgroundTransparency = 1
+		columns.Size = UDim2.new(1, 0, 0, 0)
+		columns.AutomaticSize = Enum.AutomaticSize.Y
+		columns.LayoutOrder = 2
+		columns.Parent = page
+		local columnLayout = Instance.new("UIListLayout")
+		columnLayout.FillDirection = Enum.FillDirection.Horizontal
+		columnLayout.Padding = UDim.new(0, 12)
+		columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		columnLayout.Parent = columns
+		local function column(order)
+			local frame = Instance.new("Frame")
+			frame.BackgroundTransparency = 1
+			frame.LayoutOrder = order
+			frame.Size = UDim2.new(0.5, -6, 0, 0)
+			frame.AutomaticSize = Enum.AutomaticSize.Y
+			frame.Parent = columns
+			local layout = Instance.new("UIListLayout")
+			layout.Padding = UDim.new(0, 12)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.Parent = frame
+			return frame
+		end
+		local left, right = column(1), column(2)
+		columnSets[#columnSets + 1] = { layout = columnLayout, left = left, right = right }
+		return left, right
 	end
-	local leftColumn = column(1)
-	local rightColumn = column(2)
 
-	local fishingCard = card(leftColumn, "FISHING", 1)
-	makeSwitch(fishingCard, "Auto Fish", "autoFish", "Casts, steers the bait to fish and reels them in. Works below the Level 5 unlock")
-	makeSwitch(fishingCard, "Perfect Casts", "perfect", "Faster casts, about three Perfect throws in four")
-
-	local sellCard = card(leftColumn, "SELLING", 2)
-	makeSwitch(sellCard, "Auto Sell", "sell", "Sells at the NPC between casts, then comes back")
-	makeDropdown(sellCard, "Sell At", function()
-		return tostring(STATE.sellAt) .. " fish"
-	end, SELL_OPTIONS, function(option)
-		local amount = tonumber(string.match(option, "%d+"))
-		if amount then
-			STATE.sellAt = amount
+	-- Rows go in the order they are written, like Tora's menu.
+	local rowOrder = 0
+	local function seq(object)
+		rowOrder += 1
+		local target = object
+		if (object:IsA("GuiButton") or object:IsA("TextBox")) and object.Parent and object.Parent.Name ~= "Motion" and object.Parent:IsA("Frame") then
+			target = object.Parent
 		end
-		saveConfig()
-	end, true)
+		target.LayoutOrder = rowOrder
+		return object
+	end
 
-	local screenCard = card(leftColumn, "SCREEN", 3)
-	makeDropdown(screenCard, "Hub Size", function()
-		return STATE.hubSize or "Compact"
-	end, { "Compact", "Normal", "Large" }, function(option)
-		if STATE.hubSizes[option] then
-			STATE.hubSize = option
+	local function actionButton(parentFrame, text, order, filled, callback)
+		local button = Instance.new("TextButton")
+		button.AutoButtonColor = false
+		button.Font = Enum.Font.GothamBold
+		button.Text = text
+		button.TextSize = 14
+		button.TextColor3 = filled and inkDark or ink
+		button.BackgroundColor3 = filled and accent or panel
+		button.BackgroundTransparency = filled and 0 or cardFade
+		role(button, filled and "accentFill" or "card")
+		button:SetAttribute("ZinoosTextRole", filled and "inkDark" or "ink")
+		button.LayoutOrder = order
+		button.Size = UDim2.new(1, 0, 0, 34)
+		button.ZIndex = 6
+		button.Parent = parentFrame
+		local buttonCorner = Instance.new("UICorner")
+		buttonCorner.CornerRadius = UDim.new(0, 8)
+		buttonCorner.Parent = button
+		if not filled then
+			local buttonStroke = Instance.new("UIStroke")
+			buttonStroke.Color = accent
+			buttonStroke.Transparency = 0.5
+			buttonStroke.Thickness = 1
+			buttonStroke.Parent = button
 		end
-		saveConfig()
-		fitScale()
-		task.defer(function()
-			if typeof(STATE.clampHub) == "function" then
-				pcall(STATE.clampHub)
+		bindPress(button)
+		button.MouseEnter:Connect(function()
+			local themeNow = STATE.hubThemeDef()
+			local base = filled and themeNow.accent or themeNow.card
+			playMotion(button, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
+		end)
+		button.MouseLeave:Connect(function()
+			local themeNow = STATE.hubThemeDef()
+			playMotion(button, { BackgroundColor3 = filled and themeNow.accent or themeNow.card }, tweenInfo.hover)
+		end)
+		onActivate(button, callback)
+		remember(button, parentFrame, text)
+		return button
+	end
+
+	local function makeSlider(parentBox, name, key, minimum, maximum, step, suffix, hint)
+		local row = Instance.new("Frame")
+		row.Name = name
+		row.BackgroundTransparency = 1
+		row.Size = UDim2.new(1, 0, 0, hint and 58 or 40)
+		row.ZIndex = 6
+		row.Parent = parentBox
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamMedium
+		title.Text = name
+		title.TextColor3 = ink
+		role(title, "ink")
+		title.TextSize = 14
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Size = UDim2.new(1, -70, 0, 18)
+		title.ZIndex = 6
+		title.Parent = row
+		local valueText = Instance.new("TextLabel")
+		valueText.BackgroundTransparency = 1
+		valueText.Font = Enum.Font.GothamBold
+		valueText.TextColor3 = accent
+		role(valueText, "accentText")
+		valueText.TextSize = 13
+		valueText.TextXAlignment = Enum.TextXAlignment.Right
+		valueText.AnchorPoint = Vector2.new(1, 0)
+		valueText.Position = UDim2.new(1, 0, 0, 0)
+		valueText.Size = UDim2.fromOffset(70, 18)
+		valueText.ZIndex = 6
+		valueText.Parent = row
+		if hint then
+			local note = Instance.new("TextLabel")
+			note.BackgroundTransparency = 1
+			note.Font = Enum.Font.Gotham
+			note.Text = hint
+			note.TextColor3 = muted
+			role(note, "muted")
+			note.TextSize = 11
+			note.TextWrapped = true
+			note.TextXAlignment = Enum.TextXAlignment.Left
+			note.Position = UDim2.fromOffset(0, 18)
+			note.Size = UDim2.new(1, 0, 0, 16)
+			note.ZIndex = 6
+			note.Parent = row
+		end
+		local track = Instance.new("TextButton")
+		track.AutoButtonColor = false
+		track.Text = ""
+		track.BackgroundColor3 = off
+		role(track, "card")
+		track.BorderSizePixel = 0
+		track.AnchorPoint = Vector2.new(0, 1)
+		track.Position = UDim2.new(0, 0, 1, -6)
+		track.Size = UDim2.new(1, 0, 0, 6)
+		track.ZIndex = 7
+		track.Parent = row
+		local trackCorner = Instance.new("UICorner")
+		trackCorner.CornerRadius = UDim.new(1, 0)
+		trackCorner.Parent = track
+		local trackStroke = Instance.new("UIStroke")
+		trackStroke.Color = accent
+		trackStroke.Transparency = 0.6
+		trackStroke.Thickness = 1
+		trackStroke.Parent = track
+		local fill = Instance.new("Frame")
+		fill.BackgroundColor3 = accent
+		role(fill, "accentFill")
+		fill.BorderSizePixel = 0
+		fill.Size = UDim2.fromScale(0, 1)
+		fill.ZIndex = 8
+		fill.Parent = track
+		local fillCorner = Instance.new("UICorner")
+		fillCorner.CornerRadius = UDim.new(1, 0)
+		fillCorner.Parent = fill
+		local knob = Instance.new("Frame")
+		knob.AnchorPoint = Vector2.new(0.5, 0.5)
+		knob.BackgroundColor3 = Color3.new(1, 1, 1)
+		knob.BorderSizePixel = 0
+		knob.Size = UDim2.fromOffset(14, 14)
+		knob.ZIndex = 9
+		knob.Parent = track
+		local knobCorner = Instance.new("UICorner")
+		knobCorner.CornerRadius = UDim.new(1, 0)
+		knobCorner.Parent = knob
+		local function show(value)
+			local fraction = (value - minimum) / math.max(maximum - minimum, 1e-6)
+			fill.Size = UDim2.fromScale(math.clamp(fraction, 0, 1), 1)
+			knob.Position = UDim2.new(math.clamp(fraction, 0, 1), 0, 0.5, 0)
+			local text = if step < 1 then string.format("%.1f", value) else tostring(math.floor(value + 0.5))
+			valueText.Text = text .. (suffix or "")
+		end
+		local function setFromX(x)
+			local fraction = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+			local value = minimum + (maximum - minimum) * fraction
+			value = math.clamp(math.floor(value / step + 0.5) * step, minimum, maximum)
+			STATE[key] = value
+			show(value)
+		end
+		show(math.clamp(tonumber(STATE[key]) or minimum, minimum, maximum))
+		local dragging = false
+		track.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				setFromX(input.Position.X)
 			end
 		end)
-	end, true)
+		trackConnection(UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				setFromX(input.Position.X)
+			end
+		end))
+		trackConnection(UserInputService.InputEnded:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+				dragging = false
+				saveConfig()
+			end
+		end))
+		remember(row, parentBox, name .. " " .. (hint or ""))
+		return row
+	end
 
-	local upgrades = card(rightColumn, "UPGRADES", 1)
-	makeSwitch(upgrades, "Auto Upgrade", "upgrade", "Buys the cheapest of Capacity, Strength, Weight and Bounce")
-	makeSwitch(upgrades, "Auto Rod", "rod", "Buys and equips the best rod you can afford. Skips event rods")
+	local function makeInput(parentBox, name, key, placeholder, onDone)
+		local row = Instance.new("Frame")
+		row.Name = name
+		row.BackgroundTransparency = 1
+		row.Size = UDim2.new(1, 0, 0, 54)
+		row.ZIndex = 6
+		row.Parent = parentBox
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamMedium
+		title.Text = name
+		title.TextColor3 = ink
+		role(title, "ink")
+		title.TextSize = 14
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Size = UDim2.new(1, 0, 0, 18)
+		title.ZIndex = 6
+		title.Parent = row
+		local box = Instance.new("TextBox")
+		box.BackgroundColor3 = panel
+		box.BackgroundTransparency = cardFade
+		box.BorderSizePixel = 0
+		box.ClearTextOnFocus = false
+		box.Font = Enum.Font.Gotham
+		box.PlaceholderText = placeholder or ""
+		box.PlaceholderColor3 = muted
+		box.Text = type(STATE[key]) == "string" and STATE[key] or ""
+		box.TextColor3 = ink
+		role(box, "field")
+		box.TextSize = 13
+		box.TextXAlignment = Enum.TextXAlignment.Left
+		box.TextTruncate = Enum.TextTruncate.AtEnd
+		box.AnchorPoint = Vector2.new(0, 1)
+		box.Position = UDim2.new(0, 0, 1, 0)
+		box.Size = UDim2.new(1, 0, 0, 30)
+		box.ZIndex = 7
+		box.Parent = row
+		local boxCorner = Instance.new("UICorner")
+		boxCorner.CornerRadius = UDim.new(0, 8)
+		boxCorner.Parent = box
+		local boxStroke = Instance.new("UIStroke")
+		boxStroke.Color = accent
+		boxStroke.Transparency = 0.58
+		boxStroke.Thickness = 1
+		boxStroke.Parent = box
+		local boxPad = Instance.new("UIPadding")
+		boxPad.PaddingLeft = UDim.new(0, 8)
+		boxPad.PaddingRight = UDim.new(0, 8)
+		boxPad.Parent = box
+		box.FocusLost:Connect(function()
+			STATE[key] = box.Text
+			saveConfig()
+			if onDone then
+				onDone(box.Text)
+			end
+		end)
+		remember(row, parentBox, name)
+		return box
+	end
 
-	local general = card(rightColumn, "GENERAL", 2)
-	makeSwitch(general, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
-	makeSwitch(general, "Auto-load on Rejoin", "autoReload", "Loads the newest hub again by itself after a rejoin or server hop")
+	local function statusLine(parentBox, getText)
+		local line = label(parentBox, "", 12, muted, Enum.Font.Gotham, 16)
+		line.AutomaticSize = Enum.AutomaticSize.Y
+		line.Size = UDim2.new(1, 0, 0, 0)
+		seq(line)
+		STATE.statusLines = STATE.statusLines or {}
+		STATE.statusLines[#STATE.statusLines + 1] = { label = line, get = getText }
+		return line
+	end
+
+	local function multi(parentBox, name, key, options, emptyText)
+		return seq(makeMultiDropdown(parentBox, name, function()
+			return STATE[key]
+		end, options, function(option)
+			STATE.toggleListValue(key, option)
+			saveConfig()
+		end, function(list)
+			if type(list) ~= "table" or #list == 0 then
+				return emptyText or "None"
+			end
+			return STATE.listLabel(list)
+		end))
+	end
+
+	local function choice(parentBox, name, key, options, after)
+		return seq(makeDropdown(parentBox, name, function()
+			return tostring(STATE[key])
+		end, options, function(option)
+			STATE[key] = option
+			saveConfig()
+			if after then
+				after(option)
+			end
+		end, true))
+	end
+
+	local function switch(parentBox, name, key, hint)
+		return seq(makeSwitch(parentBox, name, key, hint))
+	end
+
+	local function button(parentBox, text, filled, callback)
+		return seq(actionButton(parentBox, text, 0, filled, callback))
+	end
+
+	-- FISHING
+	do
+		local left, right = pageColumns(fishingPage)
+		local fishing = card(left, "FISHING", 1)
+		switch(fishing, "Auto Fish", "autoFish", "Casts, steers the bait and reels in. Works below the Level 5 unlock")
+		switch(fishing, "Auto Perfect Fishing", "perfect", "Lands Perfect throws at the chance below")
+		seq(makeSlider(fishing, "Perfect Chance", "perfectChance", 50, 100, 5, "%"))
+		switch(fishing, "Fast Reel Animation", "fastReel", "Skips the rare catch showcase")
+		switch(fishing, "Game Double Speed (shorter casts)", "doubleSpeed", "The game's own 1.5x speed. Needs the group, which you are in")
+		switch(fishing, "Fast Win Rare Fights", "fastFights", "Clicks fights at the fastest rate the game allows")
+		switch(fishing, "Auto Collect Fish", "collectFish", "Grabs the fish you tick straight from the school")
+		multi(fishing, "Collect Rarities", "collectRarities", STATE.rarityOptions, "All")
+		multi(fishing, "Collect Mutations", "collectMutations", STATE.mutationOptions, "All")
+		switch(fishing, "Auto Stop When Empty", "stopEmpty", "Reels in once nothing you want is left")
+
+		local finds = card(left, "FINDS", 2)
+		switch(finds, "Auto Collect Finds", "collectFinds", "Grabs chests, baits and other finds in the water")
+		multi(finds, "Find Types", "findTypes", STATE.findOptions, "All")
+
+		local rewards = card(right, "REWARDS", 1)
+		switch(rewards, "Auto Claim Big Fish", "bigFish", "Walks to the Next Day Reward and claims the big fish once it says Claim!")
+		switch(rewards, "Auto Claim Free Rewards", "freeRewards", "Playtime gift, daily rewards, the daily free claim, group reward and achievements")
+		switch(rewards, "Auto Feed Big Mouth", "bigMouth", "Feeds the Big Mouth your cheapest plain fish until it is full. Uses up those fish")
+
+		local codes = card(right, "CODES", 2)
+		button(codes, "Redeem All Codes", true, function()
+			STATE.redeemAllCodes()
+		end)
+		seq(makeInput(codes, "Extra Codes", "extraCodes", "code1, code2"))
+		local codeBox = seq(makeInput(codes, "Code", "codeInput", "Enter code"))
+		button(codes, "Redeem Code", false, function()
+			STATE.redeemCode(codeBox.Text)
+		end)
+	end
+
+	-- ECONOMY
+	do
+		local left, right = pageColumns(economyPage)
+		local sell = card(left, "SELL", 1)
+		switch(sell, "Auto Sell All Fish", "sell", "Sells at Sell When Fish Count. Uses the filters below when any are ticked")
+		switch(sell, "Auto Sell When Inventory Full", "sellFull")
+		seq(makeSlider(sell, "Sell When Fish Count", "sellAt", 5, 500, 5, " fish"))
+		multi(sell, "Sell Rarities", "sellRarities", STATE.rarityOptions)
+		multi(sell, "Sell Mutations", "sellMutations", STATE.mutationOptions)
+		choice(sell, "Rarity + Mutation Match", "sellMatch", { "Either", "Both" })
+		button(sell, "Sell Filtered Fish", false, function()
+			STATE.sellNow(true)
+		end)
+		button(sell, "Sell All Fish", true, function()
+			STATE.sellNow(false)
+		end)
+
+		local favorite = card(left, "FAVORITE", 2)
+		switch(favorite, "Auto Favorite Fish", "autoFavorite", "Favorites matching fish so nothing sells them")
+		multi(favorite, "Favorite Rarities", "favRarities", STATE.rarityOptions)
+		multi(favorite, "Favorite Mutations", "favMutations", STATE.mutationOptions)
+		choice(favorite, "Rarity + Mutation Match", "favMatch", { "Either", "Both" })
+		choice(favorite, "Game Auto Favorite", "gameAutoFavorite", STATE.favoriteOptions)
+
+		local shop = card(right, "SHOP", 1)
+		switch(shop, "Auto Buy Best Bait", "autoBuyBait", "Buys the luckiest bait you can afford when you run out")
+		button(shop, "Buy Best Bait Now", false, function()
+			if not STATE.buyBestBait(1) then
+				toast("No bait you can afford here")
+			end
+		end)
+		switch(shop, "Auto Buy Best Rod", "rod", "Buys and equips the strongest rod you can afford")
+		button(shop, "Buy Best Rod Now", false, function()
+			afterCast(function()
+				STATE.watchFeature("Auto Rod", function()
+					local was = STATE.rod
+					STATE.rod = true
+					stepRod()
+					STATE.rod = was
+				end)
+			end)
+		end)
+		switch(shop, "Auto Buy Upgrades", "upgrade", "Buys the cheapest ticked upgrade. None ticked buys any")
+		multi(shop, "Upgrades", "upgradeList", STATE.upgradeOptions, "All")
+
+		local bait = card(right, "BAIT", 2)
+		switch(bait, "Auto Use Best Bait", "autoBestBait", "Puts on your luckiest bait whenever none is on")
+		button(bait, "Use Best Bait Now", false, function()
+			if not STATE.useBestBait() then
+				toast("You have no bait")
+			end
+		end)
+		switch(bait, "Auto Use Bait", "autoUseBait", "Puts on the bait picked below whenever none is on")
+		local baitNames = {}
+		for name, info in pairs(AF.Content.Item.Bait.Items or {}) do
+			if type(info) == "table" then
+				baitNames[#baitNames + 1] = name
+			end
+		end
+		table.sort(baitNames, function(a, b)
+			local infoA, infoB = AF.Content.Item.Bait.Items[a], AF.Content.Item.Bait.Items[b]
+			return (infoA.LayoutOrder or 0) < (infoB.LayoutOrder or 0)
+		end)
+		choice(bait, "Use Bait", "useBait", baitNames)
+		button(bait, "Use Bait Now", false, function()
+			if not STATE.useChosenBait() then
+				toast("You have no " .. tostring(STATE.useBait))
+			end
+		end)
+	end
+
+	-- ENCHANT
+	do
+		local left, right = pageColumns(enchantPage)
+		local enchant = card(left, "AUTO ENCHANT", 1)
+		switch(enchant, "Auto Enchant", "autoEnchant", "Holds the stone at the shrine and rolls until a ticked enchant lands")
+		local enchantPool = STATE.enchantOptions()
+		choice(enchant, "Stone", "enchantStone", STATE.stoneOptions, function()
+			table.clear(enchantPool)
+			for _, name in ipairs(STATE.enchantOptions()) do
+				enchantPool[#enchantPool + 1] = name
+			end
+			STATE.enchantTargets = {}
+			saveConfig()
+		end)
+		multi(enchant, "Stop On Enchants", "enchantTargets", enchantPool)
+		seq(makeSlider(enchant, "Delay Between Rolls", "enchantDelay", 0.2, 5, 0.1, "s"))
+		statusLine(enchant, function()
+			return STATE.enchantStatus or "Idle"
+		end)
+
+		local reroll = card(right, "AUTO MUTATION REROLL", 1)
+		switch(reroll, "Auto Reroll Held Fish", "autoReroll", "Spins the fish in your hand at the Mutation Dealer")
+		local stops = {}
+		for _, name in ipairs(STATE.mutationOptions) do
+			if name ~= "None" then
+				stops[#stops + 1] = name
+			end
+		end
+		multi(reroll, "Stop On Mutations", "rerollStops", stops)
+		switch(reroll, "Use Ultra Scrolls", "useUltra")
+		switch(reroll, "Skip Animation", "skipAnim")
+		statusLine(reroll, function()
+			return STATE.rerollStatus or "Idle"
+		end)
+	end
+
+	-- WEBHOOKS
+	do
+		local left, right = pageColumns(webhookPage)
+		local hook = card(left, "WEBHOOK", 1)
+		switch(hook, "Webhook Alerts", "webhookOn")
+		seq(makeInput(hook, "Webhook URL", "webhook", "https://discord.com/api/webhooks/..."))
+		local result = nil
+		button(hook, "Test Webhook", false, function()
+			STATE.hookStatus = "Sending..."
+			task.spawn(function()
+				local _, message = STATE.testWebhook()
+				STATE.hookStatus = message
+			end)
+		end)
+		result = statusLine(hook, function()
+			return STATE.hookStatus or ""
+		end)
+
+		local alerts = card(right, "ALERTS", 1)
+		multi(alerts, "Catch Rarities", "hookRarities", STATE.rarityOptions)
+		multi(alerts, "Catch Mutations", "hookMutations", STATE.mutationOptions)
+		switch(alerts, "Post Sells", "hookSells")
+		switch(alerts, "Hourly Report", "hookReports")
+	end
+
+	-- PLAYER
+	do
+		local left, right = pageColumns(playerPage)
+		local movement = card(left, "MOVEMENT", 1)
+		switch(movement, "WalkSpeed", "walkSpeedOn")
+		seq(makeSlider(movement, "Speed", "walkSpeed", 16, 150, 1))
+		switch(movement, "Jump Power", "jumpOn")
+		seq(makeSlider(movement, "Power", "jumpPower", 50, 250, 5))
+		switch(movement, "Infinite Jump", "infJump")
+		switch(movement, "Noclip", "noclip")
+
+		local travel = card(right, "TELEPORT", 1)
+		seq(makeDropdown(travel, "Teleport To", function()
+			return "Pick a place"
+		end, STATE.teleportSpots, function(option)
+			STATE.teleportTo(option)
+		end, true))
+		seq(makeDropdown(travel, "Travel To World", function()
+			return "Pick a world"
+		end, STATE.worldOptions(), function(option)
+			STATE.travelTo(option)
+		end, true))
+	end
 
 	local function statChip(parentFrame, title, order)
 		local chip = Instance.new("Frame")
@@ -2909,7 +4666,7 @@ local function installHub()
 	end
 
 	local note = card(homePage, "HOW IT WORKS", 7)
-	local noteBody = label(note, "Stand at the water with your rod out. Auto Fish casts and reels in, Auto Sell empties the bag at the sell NPC once it reaches Sell At, and the cash goes on upgrades and better rods.", 13, ink, Enum.Font.Gotham, 56)
+	local noteBody = label(note, "Stand at the water with your rod out. Fishing grabs the fish you tick, Economy sells and favorites by rarity and mutation, and the cash goes on bait, upgrades and better rods. Anything that walks you away waits for the cast to finish and brings you back.", 13, ink, Enum.Font.Gotham, 70)
 	noteBody.LayoutOrder = 1
 
 	local activityCard = card(homePage, "ACTIVITY", 8)
@@ -2931,6 +4688,13 @@ local function installHub()
 			activityBody.Text = text
 		end
 		activityBody.TextColor3 = STATE.hubThemeDef().ink
+		for _, entry in ipairs(STATE.statusLines or {}) do
+			local ok, value = pcall(entry.get)
+			local textNow = ok and tostring(value or "") or ""
+			if entry.label.Text ~= textNow then
+				entry.label.Text = textNow
+			end
+		end
 	end
 	STATE.refreshActivity = refreshActivity
 
@@ -2953,51 +4717,25 @@ local function installHub()
 	discordMotion.Parent = discordSlot
 	local discordBlurb = label(discordMotion, "Your toggles save on their own and load next time. Right Ctrl opens and closes the hub.", 14, muted, Enum.Font.Gotham, 48)
 	discordBlurb.LayoutOrder = 1
-	local function actionButton(parentFrame, text, order, filled, callback)
-		local button = Instance.new("TextButton")
-		button.AutoButtonColor = false
-		button.Font = Enum.Font.GothamBold
-		button.Text = text
-		button.TextSize = 14
-		button.TextColor3 = filled and inkDark or ink
-		button.BackgroundColor3 = filled and accent or panel
-		button.BackgroundTransparency = filled and 0 or cardFade
-		role(button, filled and "accentFill" or "card")
-		button:SetAttribute("ZinoosTextRole", filled and "inkDark" or "ink")
-		button.LayoutOrder = order
-		button.Size = UDim2.new(1, 0, 0, 34)
-		button.ZIndex = 6
-		button.Parent = parentFrame
-		local buttonCorner = Instance.new("UICorner")
-		buttonCorner.CornerRadius = UDim.new(0, 8)
-		buttonCorner.Parent = button
-		if not filled then
-			local buttonStroke = Instance.new("UIStroke")
-			buttonStroke.Color = accent
-			buttonStroke.Transparency = 0.5
-			buttonStroke.Thickness = 1
-			buttonStroke.Parent = button
-		end
-		bindPress(button)
-		button.MouseEnter:Connect(function()
-			local themeNow = STATE.hubThemeDef()
-			local base = filled and themeNow.accent or themeNow.card
-			playMotion(button, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
-		end)
-		button.MouseLeave:Connect(function()
-			local themeNow = STATE.hubThemeDef()
-			playMotion(button, { BackgroundColor3 = filled and themeNow.accent or themeNow.card }, tweenInfo.hover)
-		end)
-		onActivate(button, callback)
-		remember(button, parentFrame, text)
-		return button
-	end
 
 	local hubCard = card(discordPage, "HUB", 2)
-	actionButton(hubCard, "Sell Now", 1, false, function()
-		STATE.sellNow()
-	end)
-	actionButton(hubCard, "Unload", 2, true, function()
+	makeDropdown(hubCard, "Hub Size", function()
+		return STATE.hubSize or "Compact"
+	end, { "Compact", "Normal", "Large" }, function(option)
+		if STATE.hubSizes[option] then
+			STATE.hubSize = option
+		end
+		saveConfig()
+		fitScale()
+		task.defer(function()
+			if typeof(STATE.clampHub) == "function" then
+				pcall(STATE.clampHub)
+			end
+		end)
+	end, true)
+	makeSwitch(hubCard, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
+	makeSwitch(hubCard, "Auto-load on Rejoin", "autoReload", "Loads the newest hub again by itself after a rejoin or server hop")
+	actionButton(hubCard, "Unload", 10, true, function()
 		task.defer(unloadHub)
 	end)
 
@@ -3019,27 +4757,14 @@ local function installHub()
 		if query == "" then
 			return
 		end
-		local current = "Main"
-		if homePage.Visible then
-			current = "Home"
-		elseif discordPage.Visible then
-			current = "Settings"
-		end
-		if pages[current] then
+		if pages[currentPage] then
 			return
 		end
-		if pages.Home and not pages.Main and not pages.Discord then
-			showPage("Home")
-		elseif pages.Main and not pages.Home and not pages.Discord then
-			showPage("Main")
-		elseif pages.Discord and not pages.Home and not pages.Main then
-			showPage("Settings")
-		elseif pages.Home then
-			showPage("Home")
-		elseif pages.Main then
-			showPage("Main")
-		elseif pages.Discord then
-			showPage("Settings")
+		for _, name in ipairs(PAGE_ORDER) do
+			if pages[name] then
+				showPage(name)
+				return
+			end
 		end
 	end
 	trackConnection(search:GetPropertyChangedSignal("Text"):Connect(applySearch))
@@ -3268,11 +4993,13 @@ local function installHub()
 		brand.Visible = not compact
 		brandSub.Visible = not compact
 		profile.Visible = not compact
-		columnLayout.FillDirection = narrow and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
 		local columnSize = narrow and UDim2.new(1, 0, 0, 0) or UDim2.new(0.5, -6, 0, 0)
-		leftColumn.Size = columnSize
-		rightColumn.Size = columnSize
-		for index, name in ipairs({ "Home", "Main", "Settings" }) do
+		for _, set in ipairs(columnSets) do
+			set.layout.FillDirection = narrow and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
+			set.left.Size = columnSize
+			set.right.Size = columnSize
+		end
+		for index, name in ipairs(PAGE_ORDER) do
 			local button = navButtons[name]
 			if button then
 				local label = button:FindFirstChild("Label")
@@ -3502,7 +5229,7 @@ local function installHub()
 	end)
 
 	local keyConn = trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or search:IsFocused() then
+		if processed or search:IsFocused() or UserInputService:GetFocusedTextBox() then
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.RightControl then
@@ -3569,6 +5296,44 @@ task.spawn(function()
 			break
 		end
 		STATE.watchFeature("Auto Upgrade", stepUpgrade)
+		task.wait(1)
+	end
+end)
+
+task.spawn(function()
+	while running() do
+		STATE.watchFeature("Game Double Speed", stepDoubleSpeed)
+		STATE.watchFeature("Auto Favorite", stepFavorite)
+		STATE.watchFeature("Bait", stepBait)
+		STATE.watchFeature("Free Rewards", stepRewards)
+		STATE.watchFeature("Webhooks", stepReport)
+		task.wait(2)
+	end
+end)
+
+-- Trips that take you away from the water run one at a time, between casts.
+task.spawn(function()
+	while running() do
+		local ok, err = pcall(stepEnchant)
+		if not ok then
+			STATE.busyTask = nil
+			STATE.noteFault("Auto Enchant", false, err)
+		end
+		ok, err = pcall(stepReroll)
+		if not ok then
+			STATE.busyTask = nil
+			STATE.noteFault("Auto Reroll", false, err)
+		end
+		ok, err = pcall(stepBigFish)
+		if not ok then
+			STATE.busyTask = nil
+			STATE.noteFault("Big Mouth", false, err)
+		end
+		ok, err = pcall(stepBigFishReward)
+		if not ok then
+			STATE.busyTask = nil
+			STATE.noteFault("Big Fish", false, err)
+		end
 		task.wait(1)
 	end
 end)

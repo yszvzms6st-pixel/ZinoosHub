@@ -27,16 +27,37 @@ Commits from before the loader existed kept the Lift Rock hub in `ZinoosHub.luau
 
 ## Deep Fishing
 
-Fishes for you, sells when the bag fills up, and spends the cash on upgrades and rods.
+Uses the same window as the Lift Rock hub. Pages: Home, Fishing, Economy, Enchant, Webhooks, Player and Settings. Anything that walks you away from the water waits for the current cast to finish and brings you back.
 
-- **Auto Fish** turns on the game's own auto fishing, including below its Level 5 unlock. It casts, steers the bait to fish and reels them in. If you leave the water it puts you back at your fishing spot.
-- **Perfect Casts** casts the way the AutoBoost enchant does: shorter waits between casts and about three Perfect throws in four, the rest Good.
-- **Auto Sell** waits for the current cast to finish, goes to the sell NPC, sells every fish and comes straight back. **Sell At** picks the bag size that triggers it: 30, 60, 100 or 200 fish. Settings has a **Sell Now** button.
-- **Auto Upgrade** buys the cheapest of Capacity, Strength, Weight and Bounce whenever you can afford it.
-- **Auto Rod** buys and equips the strongest rod you can afford. It skips event rods and the Maze, Cave and Volcano rods.
-- **Anti AFK** keeps the session in the game while you are idle.
+**Fishing**
 
-A fresh save turns all of these on, with Sell At 60. Toggles and the menu position save to `Rayfield/Configurations/ZinoosHub/DeepFishing.rfld`. Home shows cash, level, fish in the bag, your rod, and this session's casts, catches and sales. Right Control opens and closes the menu, and Unload is on the Settings page.
+- **Auto Fish** turns on the game's own auto fishing, including below its Level 5 unlock. If you leave the water it puts you back at your fishing spot.
+- **Auto Perfect Fishing** lands Perfect throws at the **Perfect Chance** you set, with the shorter waits of the AutoBoost enchant.
+- **Fast Reel Animation** skips the rare catch showcase. **Game Double Speed** turns on the game's own 1.5x speed, which needs the group. **Fast Win Rare Fights** clicks fights at the game's 12 clicks a second cap.
+- **Auto Collect Fish** grabs fish straight from the school while the hook window is open, up to your hook capacity. **Collect Rarities** and **Collect Mutations** pick which ones; nothing ticked takes everything. **Auto Stop When Empty** reels in once nothing you want is left.
+- **Auto Collect Finds** grabs finds in the water, filtered by **Find Types**.
+- **Auto Claim Big Fish** walks to the Next Day Reward and claims the big fish once it reads Claim!. **Auto Claim Free Rewards** claims the playtime gift, daily rewards, the daily free claim, the group reward and achievements. **Auto Feed Big Mouth** feeds it your cheapest plain fish until it is full, and is off by default because it uses those fish up.
+- **Redeem All Codes** tries every known code you have not redeemed, plus any **Extra Codes**. **Code** redeems one.
+
+**Economy**
+
+- **Auto Sell All Fish** sells at **Sell When Fish Count**, and **Auto Sell When Inventory Full** sells when the bag is capped. With **Sell Rarities** or **Sell Mutations** ticked it sells only matching fish, one at a time by id, so a fish you keep is never sent. **Rarity + Mutation Match** is Either or Both. **Sell Filtered Fish** and **Sell All Fish** run it now. Favorited fish are never sold.
+- **Auto Favorite Fish** favorites fish matching **Favorite Rarities** and **Favorite Mutations**, a few at a time, since the game drops big bursts. **Game Auto Favorite** sets the game's own setting.
+- **Auto Buy Best Bait** buys the luckiest bait you can afford here when you run out. **Auto Buy Best Rod** buys and equips the strongest rod you can afford, skipping event, Maze, Cave and Volcano rods. **Auto Buy Upgrades** buys the cheapest ticked upgrade; nothing ticked buys any.
+- **Auto Use Best Bait** and **Auto Use Bait** put bait on whenever none is on. Each has a Now button.
+
+**Enchant**
+
+- **Auto Enchant** holds the picked **Stone** at the Enchant Shrine and rolls, waiting **Delay Between Rolls**, until one of the **Stop On Enchants** lands or the stones run out. The shrine is not in World 1.
+- **Auto Reroll Held Fish** spins the fish you are holding at the Mutation Dealer until one of the **Stop On Mutations** lands or the scrolls run out. **Use Ultra Scrolls** and **Skip Animation** work like the dealer's own buttons. Fishing waits while this is on.
+
+**Webhooks** posts catches that match **Catch Rarities** or **Catch Mutations** to a Discord webhook, and optionally each sale and an hourly report.
+
+**Player** has WalkSpeed, Jump Power, Infinite Jump, Noclip, **Teleport To** for the NPCs in this world, and **Travel To World** for worlds you have unlocked.
+
+**Settings** has Hub Size, Anti AFK, Auto-load on Rejoin and Unload.
+
+Settings save per account to `Rayfield/Configurations/ZinoosHub/DeepFishing_<UserId>.rfld`. Right Control opens and closes the menu.
 
 ## Lift Rock For Eggs
 
