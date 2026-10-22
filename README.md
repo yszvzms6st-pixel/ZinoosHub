@@ -69,8 +69,8 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
 - **Auto Solve** types the right key for every move during a race. It asks the game's own guide for the next move and turns the cube through the game's own input, so each move reaches the server as a normal key press. **Moves Per Second** sets the speed; around 20 to 25 beats most players. **Humanize** adds small random gaps between moves. Zero Assist rounds are left to you.
 - **Auto Ready** presses Ready as soon as the cube is shown, readies the modifier vote, and confirms the powerup intro.
 - **Auto Sit** takes a free seat through the seat's own Sit prompt and stands up from a seat the server already freed. **Prefer Tables With A Player** picks a table where someone is waiting. **Table Type** picks Normal or Pro tables. **Auto Skip Replay** skips the replay after each game.
-- **Auto Bot If No Players** asks for the picked **Bot** when nobody sits down within **Wait Before Bot**.
-- **Auto Modifiers** votes your **Gameplay** and **Modifier** picks and chooses your **Powerup**.
+- **Auto Bot If No Players** asks for the picked **Bot** when nobody sits down within **Wait Before Bot**. The ladder only unlocks a bot once you beat the one before it, so until your pick is unlocked it asks for the highest bot you have unlocked.
+- **Auto Modifiers** votes your **Gameplay**, **Modifier** and **Powerup** picks before it readies up, since voting closes once both sides are ready. The game locks modifier cards against ladder bots you haven't beaten, on a first game and when a player is new; those picks are skipped and the activity log says why.
 - **Auto Buy Chairs** buys chairs from today's shop that you don't own. **Auto Buy Crates** keeps buying the picked **Crate** while you have the coins. **Open Bought Crates** opens them. These spend coins and are off by default.
 - **Hub Size** is Compact, Normal or Large.
 

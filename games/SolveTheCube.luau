@@ -974,8 +974,9 @@ local function stepReady()
 		end
 	end
 	-- Modifier vote screen has its own ready button.
+	-- With Auto Modifiers on, the vote handler readies up itself once its picks are in.
 	local vote = current.vote
-	if vote and not vote.ready and vote ~= lastVote then
+	if vote and not vote.ready and vote ~= lastVote and STATE.autoModifiers ~= true and not STATE.voting then
 		lastVote = vote
 		task.wait(0.6 + math.random() * 0.6)
 		pcall(function()
@@ -1095,12 +1096,47 @@ trackConnection(Net.event("MatchEvent").OnClientEvent:Connect(function(event)
 		return
 	end
 	if event.Type == "ModifierVote" and STATE.autoModifiers == true then
-		task.delay(0.8 + math.random() * 0.8, function()
-			for column, key in pairs({ Gameplay = "voteGameplay", Modifier = "voteModifier", Powerup = "votePowerup" }) do
-				tableInput({ Type = "Vote", Column = column, Option = STATE[key] })
-				task.wait(0.15)
+		-- Voting closes the moment both sides are ready, and a bot is ready at once.
+		-- So every pick goes in first, and only then does Auto Ready ready up.
+		STATE.voting = true
+		task.spawn(function()
+			task.wait(0.3 + math.random() * 0.3)
+			local wanted = { Gameplay = STATE.voteGameplay, Modifier = STATE.voteModifier, Powerup = STATE.votePowerup }
+			local voted, locked = {}, {}
+			for _, column in ipairs(type(event.Columns) == "table" and event.Columns or {}) do
+				local pick = wanted[column.Id]
+				local offered, readable, isLocked = false, false, false
+				for _, cardInfo in ipairs(type(column.Cards) == "table" and column.Cards or {}) do
+					local id = type(cardInfo) == "table" and (cardInfo.Id or cardInfo.Option or cardInfo.Key) or cardInfo
+					readable = readable or type(id) == "string"
+					if id == pick then
+						offered = true
+						-- Ladder bots you haven't beaten, first games and new players lock the cards; the server drops those votes.
+						isLocked = type(cardInfo) == "table" and (cardInfo.Locked == true or cardInfo.ComingSoon == true)
+					end
+				end
+				-- If the cards carry no id we can read, vote anyway and let the server decide.
+				offered = offered or not readable
+				if pick and offered and isLocked then
+					locked[#locked + 1] = pick
+				elseif pick and offered then
+					tableInput({ Type = "Vote", Column = column.Id, Option = pick })
+					voted[#voted + 1] = pick
+					task.wait(0.12)
+				end
 			end
-			noteActivity("Voted " .. tostring(STATE.voteGameplay) .. " · " .. tostring(STATE.voteModifier))
+			if #voted > 0 then
+				noteActivity("Voted " .. table.concat(voted, " · "))
+			end
+			if #locked > 0 then
+				local why = event.LadderLock and "beat this bot first" or (event.FirstGame and "first game is defaults only") or "locked this match"
+				noteActivity("Skipped " .. table.concat(locked, " · ") .. " (" .. why .. ")")
+			end
+			if STATE.autoReady == true then
+				task.wait(0.4)
+				tableInput({ Type = "VoteReady" })
+			end
+			STATE.voting = false
 		end)
 	elseif event.Type == "PowerupPick" and STATE.autoModifiers == true then
 		task.delay(0.6 + math.random() * 0.6, function()
@@ -1147,11 +1183,29 @@ local function stepBot()
 		return
 	end
 	lastBotAt = os.clock()
+	-- The ladder only lets you pick a bot once the one before it is beaten;
+	-- a locked pick is ignored by the server, so fall back to the highest unlocked bot.
+	local data = playerData()
+	local beaten = data and type(data.BotLadder) == "table" and type(data.BotLadder.Beaten) == "table" and data.BotLadder.Beaten or {}
+	local botId, label = nil, nil
+	for index, bot in ipairs(BOTS) do
+		local unlocked = index == 1 or beaten[BOTS[index - 1].id] == true
+		if not unlocked then
+			break
+		end
+		botId, label = bot.id, bot.label
+		if bot.id == STATE.botId then
+			break
+		end
+	end
+	if not botId then
+		return
+	end
 	tableInput({ Type = "ReserveBot" })
 	task.wait(0.4)
-	tableInput({ Type = "RequestBot", BotId = STATE.botId })
+	tableInput({ Type = "RequestBot", BotId = botId })
 	stats.botRequests += 1
-	noteActivity("Asked for a bot")
+	noteActivity("Asked for " .. label .. (botId ~= STATE.botId and " (your pick is still locked)" or ""))
 end
 
 local function stepShop()
