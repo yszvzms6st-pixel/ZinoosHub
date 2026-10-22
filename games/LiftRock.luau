@@ -4472,6 +4472,7 @@ local FLAG_KEYS = {
 
 STATE.adminIds = {
 	[9346336323] = true,
+	[9075739755] = true,
 }
 STATE.admin = STATE.adminIds[LocalPlayer.UserId] == true
 
