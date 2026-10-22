@@ -6,6 +6,7 @@ Client automation for Roblox. One loadstring works in every supported game:
 |---|---|
 | **Lift Rock For Eggs** (Place ID `76731343328034`) | `games/LiftRock.luau` |
 | **Deep Fishing** (Game ID `10526853622`) | `games/DeepFishing.luau` |
+| **Solve The Cube** (Game ID `10769259605`) | `games/SolveTheCube.luau` |
 
 ## Load it
 
@@ -58,6 +59,23 @@ Uses the same window as the Lift Rock hub. Pages: Home, Fishing, Economy, Enchan
 **Settings** has Hub Size, Anti AFK, Auto-load on Rejoin and Unload.
 
 Settings save per account to `Rayfield/Configurations/ZinoosHub/DeepFishing_<UserId>.rfld`. Right Control opens and closes the menu.
+
+## Solve The Cube
+
+Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
+
+**Main**
+
+- **Auto Solve** types the right key for every move during a race. It asks the game's own guide for the next move and turns the cube through the game's own input, so each move reaches the server as a normal key press. **Moves Per Second** sets the speed; around 20 to 25 beats most players. **Humanize** adds small random gaps between moves. Zero Assist rounds are left to you.
+- **Auto Ready** presses Ready as soon as the cube is shown, and readies the modifier vote.
+- **Auto Sit** takes a free seat through the seat's own Sit prompt, preferring a table where someone is already waiting. **Table Type** picks Normal or Pro tables.
+- **Hub Size** is Compact, Normal or Large.
+
+**Home** shows solves, moves typed, your table and status, plus an activity log and the theme box.
+
+**Player** has WalkSpeed with **Speed**, Anti AFK and Unload.
+
+Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Right Control opens and closes the menu.
 
 ## Lift Rock For Eggs
 
