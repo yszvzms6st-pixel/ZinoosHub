@@ -38,6 +38,30 @@ local STATE = {
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
+	preferWaiting = true,
+	autoSkipReplay = true,
+	autoBot = false,
+	botWait = 10,
+	botId = "Doom",
+	autoModifiers = false,
+	voteGameplay = "Default",
+	voteModifier = "SuddenDeath",
+	votePowerup = "Freeze",
+	autoBuyChairs = false,
+	autoBuyCrates = false,
+	crateId = "Golden",
+	autoOpenCrates = false,
+	infiniteJump = false,
+	noclip = false,
+	instantPrompts = false,
+	fly = false,
+	flySpeed = 60,
+	noPausePopup = true,
+	autoReconnect = true,
+	disable3d = false,
+	fpsBoost = false,
+	hideOnStart = false,
+	toggleKey = "RightControl",
 	toggleControls = {},
 	themeSwitches = {},
 }
@@ -95,7 +119,64 @@ local FLAG_KEYS = {
 	AutoSit = "autoSit",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
+	PreferWaiting = "preferWaiting",
+	AutoSkipReplay = "autoSkipReplay",
+	AutoBot = "autoBot",
+	AutoModifiers = "autoModifiers",
+	AutoBuyChairs = "autoBuyChairs",
+	AutoBuyCrates = "autoBuyCrates",
+	AutoOpenCrates = "autoOpenCrates",
+	InfiniteJump = "infiniteJump",
+	Noclip = "noclip",
+	InstantPrompts = "instantPrompts",
+	Fly = "fly",
+	NoPausePopup = "noPausePopup",
+	AutoReconnect = "autoReconnect",
+	Disable3d = "disable3d",
+	FpsBoost = "fpsBoost",
+	HideOnStart = "hideOnStart",
 }
+
+-- Choices saved by name. Each value must be one of its options to load.
+local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local BOTS, BOT_LABELS = {}, {}
+for _, bot in ipairs(Config.BotLadder and Config.BotLadder.Bots or {}) do
+	local text = string.format("%s (%d)", tostring(bot.Name), tonumber(bot.Rating) or 0)
+	BOTS[#BOTS + 1] = { id = bot.Id, label = text }
+	BOT_LABELS[#BOT_LABELS + 1] = text
+end
+local CRATES, CRATE_LABELS = {}, {}
+for _, crate in ipairs(Config.Crates or {}) do
+	local text = string.format("%s (%s)", tostring(crate.Name), tostring(crate.Price))
+	CRATES[#CRATES + 1] = { id = crate.Id, price = crate.Price, label = text }
+	CRATE_LABELS[#CRATE_LABELS + 1] = text
+end
+local function columnOptions(name, extra)
+	local list = extra and { extra } or {}
+	for _, column in ipairs(Config.Modifiers and Config.Modifiers.Columns or {}) do
+		if column.Id == name or column.Name == name then
+			for _, option in ipairs(column.Options or {}) do
+				list[#list + 1] = type(option) == "table" and tostring(option.Id or option.Name) or tostring(option)
+			end
+		end
+	end
+	return list
+end
+local GAMEPLAY_OPTIONS = columnOptions("Gameplay", "Default")
+local MODIFIER_OPTIONS = columnOptions("Modifier")
+local POWERUP_OPTIONS = columnOptions("Powerup")
+local BOT_WAIT_OPTIONS = { "5", "10", "15", "20", "30", "60" }
+local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
+local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
+local CHOICES = {
+	BotId = { key = "botId" },
+	CrateId = { key = "crateId" },
+	VoteGameplay = { key = "voteGameplay", options = GAMEPLAY_OPTIONS },
+	VoteModifier = { key = "voteModifier", options = MODIFIER_OPTIONS },
+	VotePowerup = { key = "votePowerup", options = POWERUP_OPTIONS },
+	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
+}
+local NUMBERS = { BotWait = { "botWait", 1, 120 }, FlySpeed = { "flySpeed", 10, 300 } }
 STATE.defaultTheme = {
 	blush = 1,
 	Kind = "theme",
@@ -699,6 +780,17 @@ local function loadSaved()
 	if table.find(TABLE_TYPES, saved.TableType) then
 		STATE.tableType = saved.TableType
 	end
+	for flag, choice in pairs(CHOICES) do
+		local value = saved[flag]
+		if type(value) == "string" and (not choice.options or table.find(choice.options, value)) then
+			STATE[choice.key] = value
+		end
+	end
+	for flag, spec in pairs(NUMBERS) do
+		if type(saved[flag]) == "number" then
+			STATE[spec[1]] = math.clamp(saved[flag], spec[2], spec[3])
+		end
+	end
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
 	end
@@ -743,6 +835,12 @@ local function saveConfig()
 	for flag, key in pairs(FLAG_KEYS) do
 		payload[flag] = STATE[key] == true
 	end
+	for flag, choice in pairs(CHOICES) do
+		payload[flag] = STATE[choice.key]
+	end
+	for flag, spec in pairs(NUMBERS) do
+		payload[flag] = STATE[spec[1]]
+	end
 	local ok, encoded = pcall(function()
 		return game:GetService("HttpService"):JSONEncode(payload)
 	end)
@@ -780,9 +878,27 @@ local function humanoid()
 	return character and character:FindFirstChildOfClass("Humanoid")
 end
 
+-- After a match the server can free the seat while the client still holds SeatPart.
+-- Only a seat whose Occupant is us counts.
 local function seated()
 	local hum = humanoid()
-	return hum ~= nil and hum.SeatPart ~= nil
+	local seat = hum and hum.SeatPart
+	return seat ~= nil and seat.Occupant == hum
+end
+
+local function leaveGhostSeat()
+	local hum = humanoid()
+	local seat = hum and hum.SeatPart
+	if seat and seat.Occupant ~= hum then
+		for _, weld in ipairs(seat:GetChildren()) do
+			if weld:IsA("Weld") and weld.Part1 and weld.Part1:IsDescendantOf(hum.Parent) then
+				weld:Destroy()
+			end
+		end
+		hum.Sit = false
+		hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+		task.wait(0.3)
+	end
 end
 
 -- The key the player would have pressed for this move, so the server sees a normal key tag.
@@ -886,7 +1002,7 @@ local function freeSeat()
 				if open and seat.Occupant == nil and (attrs["P" .. slot .. "UserId"] or 0) == 0 then
 					-- Prefer a table where someone is already waiting.
 					local other = attrs["P" .. (3 - slot) .. "UserId"] or 0
-					local score = (other ~= 0 and 10 or 0) + (attrs.State == "Idle" and 1 or 0)
+					local score = ((STATE.preferWaiting and other ~= 0) and 10 or 0) + (attrs.State == "Idle" and 1 or 0)
 					if score > bestScore then
 						best, bestScore = seat, score
 					end
@@ -901,6 +1017,7 @@ local function stepSit()
 	if STATE.autoSit ~= true or seated() or Match.InMatch then
 		return
 	end
+	leaveGhostSeat()
 	local seat = freeSeat()
 	local hum = humanoid()
 	local root = hum and hum.RootPart
@@ -940,6 +1057,366 @@ local pulseAntiAfk = function()
 	STATE.antiAfkOperational = ok
 	return ok
 end
+local State = require(Client:WaitForChild("State"))
+local ReplayController = Client.Controllers:FindFirstChild("ReplayController")
+ReplayController = ReplayController and select(2, pcall(require, ReplayController))
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
+
+stats.botRequests = 0
+stats.chairs = 0
+stats.crates = 0
+stats.opened = 0
+
+local function tableInput(payload)
+	pcall(function()
+		Net.event("TableInput"):FireServer(payload)
+	end)
+end
+
+local function playerData()
+	local ok, data = pcall(function()
+		return State.Data
+	end)
+	return ok and type(data) == "table" and data or nil
+end
+
+function STATE.coins()
+	local data = playerData()
+	return data and tonumber(data.Coins) or 0
+end
+
+-- Votes and powerup picks answer the match events the game sends.
+trackConnection(Net.event("MatchEvent").OnClientEvent:Connect(function(event)
+	if type(event) ~= "table" or not running() then
+		return
+	end
+	if event.Type == "ModifierVote" and STATE.autoModifiers == true then
+		task.delay(0.8 + math.random() * 0.8, function()
+			for column, key in pairs({ Gameplay = "voteGameplay", Modifier = "voteModifier", Powerup = "votePowerup" }) do
+				tableInput({ Type = "Vote", Column = column, Option = STATE[key] })
+				task.wait(0.15)
+			end
+			noteActivity("Voted " .. tostring(STATE.voteGameplay) .. " · " .. tostring(STATE.voteModifier))
+		end)
+	elseif event.Type == "PowerupPick" and STATE.autoModifiers == true then
+		task.delay(0.6 + math.random() * 0.6, function()
+			tableInput({ Type = "PickPowerup", Id = STATE.votePowerup })
+		end)
+	elseif event.Type == "PowerupIntro" and STATE.autoReady == true then
+		task.delay(0.8, function()
+			tableInput({ Type = "PowerupIntroOk" })
+		end)
+	end
+end))
+
+local function stepReplay()
+	if STATE.autoSkipReplay ~= true or type(ReplayController) ~= "table" then
+		return
+	end
+	local ok, playing = pcall(ReplayController.IsPlaying)
+	if ok and playing then
+		pcall(ReplayController.Skip)
+	end
+end
+
+local waitingSince, lastBotAt = nil, 0
+local function stepBot()
+	local slot = Match.CurrentSlot
+	local tableId = Match.CurrentTableId
+	if STATE.autoBot ~= true or not seated() or Match.InMatch or not slot or not tableId then
+		waitingSince = nil
+		return
+	end
+	local tbl
+	for _, candidate in ipairs(workspace.Tables:GetChildren()) do
+		if candidate:GetAttribute("TableId") == tableId then
+			tbl = candidate
+		end
+	end
+	local other = tbl and tbl:GetAttribute("P" .. (3 - slot) .. "UserId") or 0
+	if other ~= 0 or (tbl and tbl:GetAttribute("CubeSize") == 2) then
+		waitingSince = nil
+		return
+	end
+	waitingSince = waitingSince or os.clock()
+	if os.clock() - waitingSince < STATE.botWait or os.clock() - lastBotAt < 15 then
+		return
+	end
+	lastBotAt = os.clock()
+	tableInput({ Type = "ReserveBot" })
+	task.wait(0.4)
+	tableInput({ Type = "RequestBot", BotId = STATE.botId })
+	stats.botRequests += 1
+	noteActivity("Asked for a bot")
+end
+
+local function stepShop()
+	local data = playerData()
+	if not data then
+		return
+	end
+	if STATE.autoBuyChairs == true and type(data.ChairShop) == "table" and type(data.ChairShop.Items) == "table" then
+		for _, item in ipairs(data.ChairShop.Items) do
+			local owned = type(data.Chairs) == "table" and data.Chairs[item.ChairId]
+			if not owned and tonumber(item.Price) and STATE.coins() >= item.Price then
+				local ok, result = pcall(function()
+					return Net.func("BuyWithCoins"):InvokeServer("Chair:" .. tostring(item.ChairId))
+				end)
+				if ok and type(result) == "table" and result.Ok then
+					stats.chairs += 1
+					noteActivity("Bought " .. tostring(item.ChairId))
+				end
+				task.wait(1)
+			end
+		end
+	end
+	if STATE.autoBuyCrates == true then
+		for _, crate in ipairs(CRATES) do
+			if crate.id == STATE.crateId and STATE.coins() >= (tonumber(crate.price) or math.huge) then
+				local ok, result = pcall(function()
+					return Net.func("OpenCrate"):InvokeServer(crate.id, "Buy")
+				end)
+				if ok and type(result) == "table" and result.Ok then
+					stats.crates += 1
+					noteActivity("Bought a " .. crate.label)
+				end
+			end
+		end
+	end
+	if STATE.autoOpenCrates == true and type(data.CrateInv) == "table" then
+		for crateId, count in pairs(data.CrateInv) do
+			if (tonumber(count) or 0) > 0 then
+				local ok, result = pcall(function()
+					return Net.func("OpenCrate"):InvokeServer(crateId)
+				end)
+				if ok and type(result) == "table" and result.Ok then
+					stats.opened += 1
+					noteActivity("Opened a " .. tostring(crateId) .. " crate")
+				end
+				task.wait(1.5)
+				break
+			end
+		end
+	end
+end
+
+-- Movement helpers.
+trackConnection(UserInputService.JumpRequest:Connect(function()
+	local hum = humanoid()
+	if STATE.infiniteJump == true and hum and not seated() then
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+end))
+
+local noclipParts = {}
+trackConnection(RunService.Stepped:Connect(function()
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	if STATE.noclip == true then
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") and part.CanCollide then
+				noclipParts[part] = true
+				part.CanCollide = false
+			end
+		end
+	elseif next(noclipParts) then
+		for part in pairs(noclipParts) do
+			if part.Parent then
+				part.CanCollide = true
+			end
+		end
+		table.clear(noclipParts)
+	end
+end))
+
+trackConnection(ProximityPromptService.PromptShown:Connect(function(prompt)
+	if STATE.instantPrompts == true then
+		prompt.HoldDuration = 0
+	end
+end))
+
+local flyMover = nil
+local function stopFly()
+	if flyMover then
+		flyMover:Destroy()
+		flyMover = nil
+	end
+	local hum = humanoid()
+	if hum then
+		hum.PlatformStand = false
+	end
+end
+hubCleanup(stopFly)
+trackConnection(RunService.RenderStepped:Connect(function()
+	local hum = humanoid()
+	local root = hum and hum.RootPart
+	if STATE.fly ~= true or not root or seated() then
+		if flyMover then
+			stopFly()
+		end
+		return
+	end
+	if not flyMover or flyMover.Parent ~= root then
+		stopFly()
+		flyMover = Instance.new("BodyVelocity")
+		flyMover.Name = "ZinoosFly"
+		flyMover.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+		flyMover.Parent = root
+	end
+	hum.PlatformStand = true
+	local camera = workspace.CurrentCamera
+	local look = camera and camera.CFrame or root.CFrame
+	local move = Vector3.zero
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+		move += look.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+		move -= look.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+		move += look.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+		move -= look.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+		move += Vector3.yAxis
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+		move -= Vector3.yAxis
+	end
+	if hum.MoveDirection.Magnitude > 0 and move.Magnitude == 0 then
+		move = hum.MoveDirection
+	end
+	flyMover.Velocity = move.Magnitude > 0 and move.Unit * STATE.flySpeed or Vector3.zero
+end))
+
+-- Client helpers.
+local function hidePausePopup()
+	if STATE.noPausePopup ~= true then
+		return
+	end
+	local robloxGui = CoreGui:FindFirstChild("RobloxGui")
+	local pause = robloxGui and robloxGui:FindFirstChild("CoreScripts/NetworkPause")
+	if pause then
+		pcall(function()
+			if pause:IsA("ScreenGui") then
+				pause.Enabled = false
+			else
+				pause.Visible = false
+			end
+		end)
+	end
+end
+
+trackConnection(GuiService.ErrorMessageChanged:Connect(function(message)
+	if STATE.autoReconnect == true and type(message) == "string" and message ~= "" then
+		task.wait(2)
+		pcall(function()
+			TeleportService:Teleport(game.PlaceId, LocalPlayer)
+		end)
+	end
+end))
+
+function STATE.apply3d()
+	pcall(function()
+		RunService:Set3dRenderingEnabled(STATE.disable3d ~= true)
+	end)
+end
+hubCleanup(function()
+	pcall(function()
+		RunService:Set3dRenderingEnabled(true)
+	end)
+end)
+
+local graphicsBefore = nil
+function STATE.applyFpsBoost()
+	if STATE.fpsBoost == true then
+		graphicsBefore = graphicsBefore or { shadows = Lighting.GlobalShadows, effects = {} }
+		pcall(function()
+			graphicsBefore.quality = graphicsBefore.quality or settings().Rendering.QualityLevel
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+		end)
+		Lighting.GlobalShadows = false
+		for _, effect in ipairs(Lighting:GetChildren()) do
+			if effect:IsA("PostEffect") and effect.Enabled then
+				graphicsBefore.effects[effect] = true
+				effect.Enabled = false
+			end
+		end
+	elseif graphicsBefore then
+		Lighting.GlobalShadows = graphicsBefore.shadows
+		pcall(function()
+			if graphicsBefore.quality then
+				settings().Rendering.QualityLevel = graphicsBefore.quality
+			end
+		end)
+		for effect in pairs(graphicsBefore.effects) do
+			if effect.Parent then
+				effect.Enabled = true
+			end
+		end
+		graphicsBefore = nil
+	end
+end
+hubCleanup(function()
+	STATE.fpsBoost = false
+	STATE.applyFpsBoost()
+end)
+
+-- Server helpers.
+function STATE.rejoin()
+	pcall(function()
+		TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+	end)
+end
+
+local function publicServers()
+	local ok, body = pcall(function()
+		return game:HttpGet("https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100")
+	end)
+	local decoded = ok and select(2, pcall(HttpService.JSONDecode, HttpService, body))
+	local list = {}
+	for _, server in ipairs(type(decoded) == "table" and decoded.data or {}) do
+		if server.id ~= game.JobId and (tonumber(server.playing) or 0) < (tonumber(server.maxPlayers) or 0) then
+			list[#list + 1] = server
+		end
+	end
+	return list
+end
+
+function STATE.hop(lowest)
+	local list = publicServers()
+	if #list == 0 then
+		return false
+	end
+	local pick = list[math.random(1, #list)]
+	if lowest then
+		table.sort(list, function(a, b)
+			return (tonumber(a.playing) or 0) < (tonumber(b.playing) or 0)
+		end)
+		pick = list[1]
+	end
+	pcall(function()
+		TeleportService:TeleportToPlaceInstance(game.PlaceId, pick.id, LocalPlayer)
+	end)
+	return true
+end
+
+function STATE.copyJobId()
+	if typeof(setclipboard) == "function" then
+		pcall(setclipboard, game.JobId)
+		return true
+	end
+	return false
+end
+
 trackConnection(LocalPlayer.Idled:Connect(function()
 	pulseAntiAfk()
 end))
@@ -1813,6 +2290,10 @@ local function installHub()
 		STATE[key] = on
 		if key == "antiAfk" and on and pulseAntiAfk then
 			task.defer(pulseAntiAfk)
+		elseif key == "disable3d" then
+			STATE.apply3d()
+		elseif key == "fpsBoost" then
+			STATE.applyFpsBoost()
 		elseif key == "walkSpeed" and not on then
 			local hum = humanoid()
 			if hum then
@@ -2206,8 +2687,74 @@ local function installHub()
 		STATE.tableType = option
 		saveConfig()
 	end)
+	makeSwitch(matchCard, "Prefer Tables With A Player", "preferWaiting")
+	makeSwitch(matchCard, "Auto Skip Replay", "autoSkipReplay", "Skips the replay after each game")
 
-	local screenCard = card(rightColumn, "SCREEN", 2)
+	local function labelFor(list, id)
+		for _, entry in ipairs(list) do
+			if entry.id == id then
+				return entry.label
+			end
+		end
+		return tostring(id)
+	end
+	local function idFor(list, text)
+		for _, entry in ipairs(list) do
+			if entry.label == text then
+				return entry.id
+			end
+		end
+		return nil
+	end
+
+	local botCard = card(leftColumn, "BOT", 2)
+	makeSwitch(botCard, "Auto Bot If No Players", "autoBot", "Asks for a bot when nobody sits down in time")
+	makeDropdown(botCard, "Wait Before Bot (s)", function()
+		return tostring(STATE.botWait)
+	end, BOT_WAIT_OPTIONS, function(option)
+		STATE.botWait = tonumber(option) or STATE.botWait
+		saveConfig()
+	end)
+	makeDropdown(botCard, "Bot", function()
+		return labelFor(BOTS, STATE.botId)
+	end, BOT_LABELS, function(option)
+		STATE.botId = idFor(BOTS, option) or STATE.botId
+		saveConfig()
+	end, true)
+
+	local modCard = card(leftColumn, "MODIFIERS", 3)
+	makeSwitch(modCard, "Auto Modifiers", "autoModifiers", "Votes your picks and chooses your powerup")
+	makeDropdown(modCard, "Gameplay", function()
+		return STATE.voteGameplay
+	end, GAMEPLAY_OPTIONS, function(option)
+		STATE.voteGameplay = option
+		saveConfig()
+	end)
+	makeDropdown(modCard, "Modifier", function()
+		return STATE.voteModifier
+	end, MODIFIER_OPTIONS, function(option)
+		STATE.voteModifier = option
+		saveConfig()
+	end)
+	makeDropdown(modCard, "Powerup", function()
+		return STATE.votePowerup
+	end, POWERUP_OPTIONS, function(option)
+		STATE.votePowerup = option
+		saveConfig()
+	end)
+
+	local shopCard = card(rightColumn, "SHOP", 2)
+	makeSwitch(shopCard, "Auto Buy Chairs", "autoBuyChairs", "Buys chairs from today's shop you don't own yet")
+	makeSwitch(shopCard, "Auto Buy Crates", "autoBuyCrates", "Keeps buying the crate below while you have the coins")
+	makeDropdown(shopCard, "Crate", function()
+		return labelFor(CRATES, STATE.crateId)
+	end, CRATE_LABELS, function(option)
+		STATE.crateId = idFor(CRATES, option) or STATE.crateId
+		saveConfig()
+	end, true)
+	makeSwitch(shopCard, "Open Bought Crates", "autoOpenCrates")
+
+	local screenCard = card(rightColumn, "SCREEN", 3)
 	makeDropdown(screenCard, "Hub Size", function()
 		return STATE.hubSize or "Compact"
 	end, { "Compact", "Normal", "Large" }, function(option)
@@ -2382,13 +2929,13 @@ local function installHub()
 	statGrid.BackgroundTransparency = 1
 	statGrid.Size = UDim2.new(1, 0, 0, 128)
 	statGrid.Parent = statSlot
-	local solvesText = statChip(statGrid, "Solves", 1)
+	local solvesText = statChip(statGrid, "Coins", 1)
 	solvesText.Parent.Position = UDim2.fromOffset(0, 0)
-	local movesText = statChip(statGrid, "Moves Typed", 2)
+	local movesText = statChip(statGrid, "Solves", 2)
 	movesText.Parent.Position = UDim2.new(0.5, 5, 0, 0)
 	local tableText = statChip(statGrid, "Table", 3)
 	tableText.Parent.Position = UDim2.fromOffset(0, 68)
-	local statusText = statChip(statGrid, "Status", 4)
+	local statusText = statChip(statGrid, "Phase", 4)
 	statusText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
 	statusText.TextSize = 14
 	statusText.TextTruncate = Enum.TextTruncate.AtEnd
@@ -2407,7 +2954,11 @@ local function installHub()
 	activityBody.TextWrapped = true
 	remember(activityBody, activityCard, "activity status solves")
 	local function refreshActivity()
-		local lines = { "Status · " .. tostring(STATE.status) }
+		local lines = {
+			"Status · " .. tostring(STATE.status),
+			string.format("Session · %d solves, %d moves, %d bot requests", stats.solves, stats.moves, stats.botRequests),
+			string.format("Bought · %d chairs, %d crates, %d opened", stats.chairs, stats.crates, stats.opened),
+		}
 		if STATE.antiAfk == true then
 			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK working through VirtualUser" or "Anti AFK waiting for idle"
 		end
@@ -2486,10 +3037,53 @@ local function installHub()
 		STATE.speed = tonumber(option) or STATE.speed
 		saveConfig()
 	end)
+	makeSwitch(movement, "Infinite Jump", "infiniteJump")
+	makeSwitch(movement, "Noclip", "noclip")
+	makeSwitch(movement, "Instant ProximityPrompt", "instantPrompts", "Prompts fire without holding the key")
 
-	local clientCard = card(playerPage, "CLIENT", 3)
+	local flyCard = card(playerPage, "FLY", 3)
+	makeSwitch(flyCard, "Fly", "fly", "WASD to move, Space up, Left Ctrl down")
+	makeDropdown(flyCard, "Fly Speed", function()
+		return tostring(STATE.flySpeed)
+	end, FLY_SPEED_OPTIONS, function(option)
+		STATE.flySpeed = tonumber(option) or STATE.flySpeed
+		saveConfig()
+	end)
+
+	local clientCard = card(playerPage, "CLIENT", 4)
 	makeSwitch(clientCard, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
-	actionButton(clientCard, "Unload", 7, true, function()
+	makeSwitch(clientCard, "No Gameplay Paused", "noPausePopup", "Hides the Gameplay Paused popup")
+	makeSwitch(clientCard, "Auto Reconnect on Kick", "autoReconnect", "Rejoins the game when you get disconnected")
+	makeSwitch(clientCard, "Disable 3D Rendering", "disable3d", "Big FPS saver while you AFK")
+	makeSwitch(clientCard, "FPS Boost", "fpsBoost", "Lowest graphics, no shadows or effects")
+	makeSwitch(clientCard, "Hide UI On Start", "hideOnStart", "Starts hidden. Press the toggle key to show it")
+	makeDropdown(clientCard, "Toggle Key", function()
+		return STATE.toggleKey
+	end, KEY_OPTIONS, function(option)
+		STATE.toggleKey = option
+		saveConfig()
+	end)
+
+	local serverCard = card(playerPage, "SERVER", 5)
+	local serverNote = label(serverCard, "Job " .. string.sub(game.JobId, 1, 8) .. "...  ·  Place " .. tostring(game.PlaceId), 12, muted, Enum.Font.Gotham, 16)
+	serverNote.LayoutOrder = 1
+	actionButton(serverCard, "Rejoin", 2, false, function()
+		STATE.rejoin()
+	end)
+	actionButton(serverCard, "Server Hop", 3, false, function()
+		if not STATE.hop(false) then
+			serverNote.Text = "No other server found"
+		end
+	end)
+	actionButton(serverCard, "Lowest Server", 4, false, function()
+		if not STATE.hop(true) then
+			serverNote.Text = "No other server found"
+		end
+	end)
+	actionButton(serverCard, "Copy Job ID", 5, false, function()
+		serverNote.Text = STATE.copyJobId() and "Job ID copied" or "Copy is not available"
+	end)
+	actionButton(serverCard, "Unload", 6, true, function()
 		task.defer(unloadHub)
 	end)
 
@@ -2536,11 +3130,13 @@ local function installHub()
 	end
 	trackConnection(search:GetPropertyChangedSignal("Text"):Connect(applySearch))
 	local function refreshHome()
-		solvesText.Text = tostring(stats.solves)
-		movesText.Text = tostring(stats.moves)
+		local coins = STATE.coins()
+		solvesText.Text = coins >= 1000 and string.format("%.2fK", coins / 1000) or tostring(coins)
+		movesText.Text = tostring(stats.solves)
 		local tableId = Match.CurrentTableId
 		tableText.Text = tableId and ("Table " .. tostring(tableId)) or "Not seated"
-		statusText.Text = tostring(STATE.status)
+		local stage = screen() and screen().Stage
+		statusText.Text = stage and stage.phase and stage.phase ~= "Hidden" and tostring(stage.phase) or "Idle"
 	end
 	refreshHome()
 	refreshActivity()
@@ -2979,7 +3575,7 @@ local function installHub()
 		if processed or search:IsFocused() then
 			return
 		end
-		if input.KeyCode == Enum.KeyCode.RightControl then
+		if input.KeyCode.Name == STATE.toggleKey then
 			setOpen(not holder.Visible)
 		end
 	end))
@@ -3001,7 +3597,8 @@ local function installHub()
 	pageWrap.GroupTransparency = 1
 	holder.Visible = false
 	shadow.Visible = false
-	launcher.Visible = true
+	launcher.Visible = STATE.hideOnStart ~= true
+	dockHint.Text = "Click or press " .. tostring(STATE.toggleKey) .. " to open"
 
 	STATE.hubWindow = {
 		Unload = function()
@@ -3036,6 +3633,8 @@ task.spawn(function()
 	while running() do
 		pcall(stepReady)
 		pcall(stepSpeed)
+		pcall(stepReplay)
+		pcall(hidePausePopup)
 		if STATE.status ~= "Solving" then
 			if Match.InMatch then
 				STATE.status = "In match"
@@ -3052,9 +3651,20 @@ end)
 task.spawn(function()
 	while running() do
 		pcall(stepSit)
-		task.wait(2)
+		pcall(stepBot)
+		task.wait(1)
 	end
 end)
+
+task.spawn(function()
+	while running() do
+		task.wait(5)
+		pcall(stepShop)
+	end
+end)
+
+pcall(STATE.apply3d)
+pcall(STATE.applyFpsBoost)
 
 task.spawn(function()
 	while running() do

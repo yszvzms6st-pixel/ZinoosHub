@@ -67,15 +67,18 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
 **Main**
 
 - **Auto Solve** types the right key for every move during a race. It asks the game's own guide for the next move and turns the cube through the game's own input, so each move reaches the server as a normal key press. **Moves Per Second** sets the speed; around 20 to 25 beats most players. **Humanize** adds small random gaps between moves. Zero Assist rounds are left to you.
-- **Auto Ready** presses Ready as soon as the cube is shown, and readies the modifier vote.
-- **Auto Sit** takes a free seat through the seat's own Sit prompt, preferring a table where someone is already waiting. **Table Type** picks Normal or Pro tables.
+- **Auto Ready** presses Ready as soon as the cube is shown, readies the modifier vote, and confirms the powerup intro.
+- **Auto Sit** takes a free seat through the seat's own Sit prompt and stands up from a seat the server already freed. **Prefer Tables With A Player** picks a table where someone is waiting. **Table Type** picks Normal or Pro tables. **Auto Skip Replay** skips the replay after each game.
+- **Auto Bot If No Players** asks for the picked **Bot** when nobody sits down within **Wait Before Bot**.
+- **Auto Modifiers** votes your **Gameplay** and **Modifier** picks and chooses your **Powerup**.
+- **Auto Buy Chairs** buys chairs from today's shop that you don't own. **Auto Buy Crates** keeps buying the picked **Crate** while you have the coins. **Open Bought Crates** opens them. These spend coins and are off by default.
 - **Hub Size** is Compact, Normal or Large.
 
-**Home** shows solves, moves typed, your table and status, plus an activity log and the theme box.
+**Home** shows coins, solves, your table and the match phase, plus an activity log with session solves, bot requests and what was bought, and the theme box.
 
-**Player** has WalkSpeed with **Speed**, Anti AFK and Unload.
+**Player** has WalkSpeed with **Speed**, Infinite Jump, Noclip, Instant ProximityPrompt, **Fly** with **Fly Speed**, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
 
-Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Right Control opens and closes the menu.
+Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Right Control opens and closes the menu unless you pick another Toggle Key.
 
 ## Lift Rock For Eggs
 
