@@ -51,6 +51,9 @@ local STATE = {
 	autoBuyCrates = false,
 	crateId = "Golden",
 	autoOpenCrates = false,
+	autoDaily = true,
+	autoQuests = true,
+	autoAchievements = true,
 	infiniteJump = false,
 	noclip = false,
 	instantPrompts = false,
@@ -126,6 +129,9 @@ local FLAG_KEYS = {
 	AutoBuyChairs = "autoBuyChairs",
 	AutoBuyCrates = "autoBuyCrates",
 	AutoOpenCrates = "autoOpenCrates",
+	AutoDaily = "autoDaily",
+	AutoQuests = "autoQuests",
+	AutoAchievements = "autoAchievements",
 	InfiniteJump = "infiniteJump",
 	Noclip = "noclip",
 	InstantPrompts = "instantPrompts",
@@ -1071,6 +1077,7 @@ stats.botRequests = 0
 stats.chairs = 0
 stats.crates = 0
 stats.opened = 0
+stats.claims = 0
 
 local function tableInput(payload)
 	pcall(function()
@@ -1253,6 +1260,76 @@ local function stepShop()
 				end
 				task.wait(1.5)
 				break
+			end
+		end
+	end
+end
+
+-- Rewards: claim only what the game's own data says is ready, the same checks its menus use.
+local function invoke(name, ...)
+	local args = table.pack(...)
+	local ok, result = pcall(function()
+		return Net.func(name):InvokeServer(table.unpack(args, 1, args.n))
+	end)
+	return ok and type(result) == "table" and result.Ok == true, result
+end
+
+local questTargets = {}
+for _, quest in ipairs(type(Config.Quests) == "table" and type(Config.Quests.Pool) == "table" and Config.Quests.Pool or {}) do
+	if type(quest) == "table" and quest.Id then
+		questTargets[quest.Id] = tonumber(quest.Target)
+	end
+end
+
+local lastClaimScan = 0
+local function stepRewards()
+	if os.clock() - lastClaimScan < 10 then
+		return
+	end
+	lastClaimScan = os.clock()
+	local data = playerData()
+	if not data then
+		return
+	end
+	local daily = type(data.Daily) == "table" and data.Daily
+	if STATE.autoDaily == true and daily then
+		local due = daily.CanClaim == true or (tonumber(daily.NextClaimAt) and workspace:GetServerTimeNow() >= daily.NextClaimAt)
+		if due then
+			local ok, result = invoke("ClaimDaily")
+			if ok then
+				local reward = type(result.Reward) == "table" and result.Reward or {}
+				stats.claims += 1
+				noteActivity("Claimed daily reward" .. (reward.Day and (" (day " .. tostring(reward.Day) .. ")") or ""))
+			end
+		end
+	end
+	local quests = type(data.Quests) == "table" and type(data.Quests.Items) == "table" and data.Quests.Items or {}
+	if STATE.autoQuests == true then
+		-- ClaimQuest takes the quest's slot number, not its Id.
+		for slot, quest in ipairs(quests) do
+			local target = questTargets[quest.Id]
+			if not quest.Claimed and target and (tonumber(quest.Progress) or 0) >= target then
+				if invoke("ClaimQuest", slot) then
+					stats.claims += 1
+					noteActivity("Claimed quest " .. tostring(quest.Id))
+				end
+				task.wait(0.5)
+			end
+		end
+	end
+	if STATE.autoAchievements == true then
+		local claimed = type(data.AchClaimed) == "table" and data.AchClaimed or {}
+		for _, achievement in ipairs(type(Config.Achievements) == "table" and Config.Achievements or {}) do
+			local value = tonumber(data[achievement.Stat])
+			if value == nil and achievement.Stat == "QuestsClaimed" and type(data.Quests) == "table" then
+				value = tonumber(data.Quests.Total)
+			end
+			if not claimed[achievement.Id] and value and value >= (tonumber(achievement.Target) or math.huge) then
+				if invoke("ClaimAchievement", achievement.Id) then
+					stats.claims += 1
+					noteActivity("Claimed achievement " .. tostring(achievement.Id))
+				end
+				task.wait(0.5)
 			end
 		end
 	end
@@ -2808,7 +2885,12 @@ local function installHub()
 	end, true)
 	makeSwitch(shopCard, "Open Bought Crates", "autoOpenCrates")
 
-	local screenCard = card(rightColumn, "SCREEN", 3)
+	local rewardsCard = card(rightColumn, "REWARDS", 3)
+	makeSwitch(rewardsCard, "Auto Claim Daily", "autoDaily", "Claims the daily login reward when it's ready")
+	makeSwitch(rewardsCard, "Auto Claim Quests", "autoQuests", "Claims daily quests once they're complete")
+	makeSwitch(rewardsCard, "Auto Claim Achievements", "autoAchievements", "Claims achievements once you reach them")
+
+	local screenCard = card(rightColumn, "SCREEN", 4)
 	makeDropdown(screenCard, "Hub Size", function()
 		return STATE.hubSize or "Compact"
 	end, { "Compact", "Normal", "Large" }, function(option)
@@ -3012,6 +3094,7 @@ local function installHub()
 			"Status · " .. tostring(STATE.status),
 			string.format("Session · %d solves, %d moves, %d bot requests", stats.solves, stats.moves, stats.botRequests),
 			string.format("Bought · %d chairs, %d crates, %d opened", stats.chairs, stats.crates, stats.opened),
+			string.format("Rewards · %d claimed", stats.claims),
 		}
 		if STATE.antiAfk == true then
 			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK working through VirtualUser" or "Anti AFK waiting for idle"
@@ -3714,6 +3797,7 @@ task.spawn(function()
 	while running() do
 		task.wait(5)
 		pcall(stepShop)
+		pcall(stepRewards)
 	end
 end)
 

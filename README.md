@@ -72,6 +72,7 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
 - **Auto Bot If No Players** asks for the picked **Bot** when nobody sits down within **Wait Before Bot**. The ladder only unlocks a bot once you beat the one before it, so until your pick is unlocked it asks for the highest bot you have unlocked.
 - **Auto Modifiers** votes your **Gameplay**, **Modifier** and **Powerup** picks before it readies up, since voting closes once both sides are ready. The game locks modifier cards against ladder bots you haven't beaten, on a first game and when a player is new; those picks are skipped and the activity log says why.
 - **Auto Buy Chairs** buys chairs from today's shop that you don't own. **Auto Buy Crates** keeps buying the picked **Crate** while you have the coins. **Open Bought Crates** opens them. These spend coins and are off by default.
+- **Auto Claim Daily**, **Auto Claim Quests** and **Auto Claim Achievements** claim the daily login reward, finished daily quests and reached achievements, using the same checks as the game's own menus. They are on by default.
 - **Hub Size** is Compact, Normal or Large.
 
 **Home** shows coins, solves, your table and the match phase, plus an activity log with session solves, bot requests and what was bought, and the theme box.
