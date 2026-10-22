@@ -58,7 +58,7 @@ Uses the same window as the Lift Rock hub. Pages: Home, Fishing, Economy, Enchan
 
 **Settings** has Hub Size, Anti AFK, Auto-load on Rejoin and Unload.
 
-Settings save per account to `Rayfield/Configurations/ZinoosHub/DeepFishing_<UserId>.rfld`. Right Control opens and closes the menu.
+Settings save per account to `Rayfield/Configurations/ZinoosHub/DeepFishing_<UserId>.rfld`. Right Control opens and closes the menu; Left Control hides or restores the whole hub.
 
 ## Solve The Cube
 
@@ -79,7 +79,7 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
 
 **Player** has WalkSpeed with **Speed**, Infinite Jump, Noclip, Instant ProximityPrompt, **Fly** with **Fly Speed**, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
 
-Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Right Control opens and closes the menu unless you pick another Toggle Key.
+Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Your Toggle Key opens and closes the menu; Left Control hides or restores the whole hub.
 
 ## Lift Rock For Eggs
 
@@ -103,7 +103,7 @@ Running it again replaces the hub that is already open. The new run stops the pr
 
 A fresh save turns these on: Auto Train, Anti AFK, Auto Rebirth, Auto Upgrade, Auto Trails, Auto Steal, Auto Trench, Trench Shop, Auto Open, Equip Best, Auto Daily, Auto Index, Free Stash, Lite Pets, Egg ESP, Inventory ESP, Low End, and Webhook Alerts. An existing configuration file is loaded once at startup and kept. Saved toggles, the webhook URL, menu position, and rarity stay as they were. A missing zone, or an old automatic Prehistoric zone, becomes Meadow until you choose a zone. Auto Sell stays off.
 
-Press **Right Control** to open or close the menu. Drag the top bar or the sidebar to move the window. The Zinoos button can be dragged too.
+Press **Right Control** to open or close the menu, or **Left Control** to hide or restore the whole hub. Drag the top bar or the sidebar to move the window. The Zinoos button can be dragged too.
 
 ### Saved configuration
 

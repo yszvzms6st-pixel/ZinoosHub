@@ -4296,6 +4296,10 @@ local function installHub()
 		if processed or search:IsFocused() then
 			return
 		end
+		if input.KeyCode == Enum.KeyCode.LeftControl then
+			gui.Enabled = not gui.Enabled
+			return
+		end
 		if input.KeyCode.Name == STATE.toggleKey then
 			setOpen(not holder.Visible)
 		end

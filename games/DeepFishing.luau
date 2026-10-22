@@ -5233,6 +5233,10 @@ local function installHub()
 		if processed or search:IsFocused() or UserInputService:GetFocusedTextBox() then
 			return
 		end
+		if input.KeyCode == Enum.KeyCode.LeftControl then
+			gui.Enabled = not gui.Enabled
+			return
+		end
 		if input.KeyCode == Enum.KeyCode.RightControl then
 			setOpen(not holder.Visible)
 		end
