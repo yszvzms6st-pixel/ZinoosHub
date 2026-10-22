@@ -74,6 +74,12 @@ local STATE = {
 }
 genv.ZinoosCubeState = STATE
 
+-- This account is the hub owner; the menu shows an Admin tag only for them.
+STATE.adminIds = {
+	[9346336323] = true,
+}
+STATE.admin = STATE.adminIds[LocalPlayer.UserId] == true
+
 local runtime = { connections = {}, cleanups = {} }
 local function trackConnection(connection)
 	table.insert(runtime.connections, connection)
