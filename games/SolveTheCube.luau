@@ -9,7 +9,7 @@ local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
-if game.GameId ~= 10769259605 then
+if game.PlaceId ~= 104488514364885 then
 	warn("[Zinoos hub] This only runs in Solve The Cube.")
 	return
 end
@@ -30,8 +30,10 @@ end
 local STATE = {
 	_gen = token,
 	autoSolve = true,
-	tps = 12,
-	humanize = true,
+	autoZeroAssist = true,
+	zaTps = 12,
+	tps = 20,
+	humanize = false,
 	autoReady = true,
 	autoSit = false,
 	tableType = "Normal",
@@ -60,7 +62,9 @@ local STATE = {
 	fly = false,
 	flySpeed = 60,
 	noPausePopup = true,
-	autoReconnect = true,
+	-- Keep the current server after a match or a transient game message. Rejoining
+	-- wipes the loaded hub and made the first verification impossible.
+	autoReconnect = false,
 	disable3d = false,
 	fpsBoost = false,
 	hideOnStart = false,
@@ -117,6 +121,7 @@ local SPEED_OPTIONS = { "16", "24", "32", "50", "75", "100" }
 
 local FLAG_KEYS = {
 	AutoSolve = "autoSolve",
+	AutoZeroAssist = "autoZeroAssist",
 	Humanize = "humanize",
 	AutoReady = "autoReady",
 	AutoSit = "autoSit",
@@ -182,7 +187,8 @@ local CHOICES = {
 	VotePowerup = { key = "votePowerup", options = POWERUP_OPTIONS },
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 }
-local NUMBERS = { BotWait = { "botWait", 1, 120 }, FlySpeed = { "flySpeed", 10, 300 } }
+local NUMBERS = { BotWait = { "botWait", 1, 120 }, FlySpeed = { "flySpeed", 10, 300 }, ZaTps = { "zaTps", 1, 20 } }
+local ZA_TPS_OPTIONS = { "2", "3", "4", "5", "6", "8", "10", "12", "15", "20" }
 STATE.defaultTheme = {
 	blush = 1,
 	Kind = "theme",
@@ -960,6 +966,82 @@ local function stepSolve()
 	end
 end
 
+-- Zero Assist has no guide: read the real cube, solve it, and turn it through the same input path.
+-- The solver itself is defined further down.
+local CubeSolver
+
+local function zeroAssistRacing(stage)
+	return stage
+		and stage.mode == "Free"
+		and not stage.two
+		and stage.phase == "Racing"
+		and not stage.solved
+		and stage.inputEnabled
+		and not stage.frozen
+end
+
+local function stepZeroAssist()
+	if STATE.autoZeroAssist ~= true or type(CubeSolver) ~= "table" then
+		return
+	end
+	local current = screen()
+	local stage = current and current.Stage
+	if not zeroAssistRacing(stage) then
+		return
+	end
+	if not CubeSolver.ready() then
+		STATE.status = "Zero Assist solver still loading"
+		return
+	end
+	STATE.status = "Solving Zero Assist"
+	-- A short look at the cube first, like a person would.
+	task.wait(1.2 + math.random() * 1.3)
+	local typed = 0
+	for _ = 1, 3 do
+		if not running() or STATE.autoZeroAssist ~= true or not zeroAssistRacing(stage) then
+			break
+		end
+		local ok, state = pcall(function()
+			return stage.Cube:GetState()
+		end)
+		local solvedOk, moves, solveErr = false, nil, nil
+		if ok and type(state) == "string" then
+			solvedOk, moves = pcall(CubeSolver.solve, state)
+		else
+			solveErr = ok and "cube state was not a string" or state
+		end
+		if not solvedOk or type(moves) ~= "table" then
+			noteActivity("Zero Assist solver error: " .. tostring(solveErr or moves or "no solution"))
+			break
+		end
+		for _, move in ipairs(moves) do
+			if not running() or STATE.autoZeroAssist ~= true or not zeroAssistRacing(stage) then
+				break
+			end
+			stage.inputTag = keyTag(move) or "Tap"
+			pcall(stage.TwistLayer, stage, move)
+			typed += 1
+			stats.moves += 1
+			local gap = 1 / math.max(STATE.zaTps, 1)
+			if STATE.humanize then
+				gap *= 0.6 + math.random() * 0.8
+				if math.random() < 0.08 then
+					gap += 0.4 + math.random() * 0.8
+				end
+			end
+			task.wait(gap)
+		end
+		if stage.solved then
+			break
+		end
+	end
+	if stage.solved then
+		stats.solves += 1
+		STATE.status = "Solved"
+		noteActivity(string.format("Solved Zero Assist in %d moves", typed))
+	end
+end
+
 local lastVote = nil
 local function stepReady()
 	if STATE.autoReady ~= true then
@@ -1007,7 +1089,6 @@ local function freeSeat()
 				local prompt = seat and seat:FindFirstChild("SitPrompt")
 				local open = prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled
 				if open and seat.Occupant == nil and (attrs["P" .. slot .. "UserId"] or 0) == 0 then
-					-- Prefer a table where someone is already waiting.
 					local other = attrs["P" .. (3 - slot) .. "UserId"] or 0
 					local score = ((STATE.preferWaiting and other ~= 0) and 10 or 0) + (attrs.State == "Idle" and 1 or 0)
 					if score > bestScore then
@@ -1064,6 +1145,495 @@ local pulseAntiAfk = function()
 	STATE.antiAfkOperational = ok
 	return ok
 end
+
+-- Zero Assist: a two-phase solver, inlined so the hub stays one file.
+CubeSolver = (function()
+-- Two-phase (Kociemba) 3x3 solver for facelet strings in URFDLB order.
+-- Tables are built once and kept in getgenv().ZinoosCubeSolverTables.
+-- Returns a list of quarter turns ("R", "R'"), since Zero Assist has no half-turn key.
+
+local Solver = {}
+
+local FACES = { "U", "R", "F", "D", "L", "B" }
+local N_TWIST, N_FLIP, N_SLICE = 2187, 2048, 495
+local N_PERM8, N_PERM4 = 40320, 24
+local PHASE2_MOVES = { 0, 1, 2, 9, 10, 11, 4, 13, 7, 16 } -- U U2 U' D D2 D' R2 L2 F2 B2
+
+-- Corner and edge stickers, by facelet index (0-based) and the colour each piece carries.
+local CORNER_FACELET = {
+	{ 8, 9, 20 }, { 6, 18, 38 }, { 0, 36, 47 }, { 2, 45, 11 },
+	{ 29, 26, 15 }, { 27, 44, 24 }, { 33, 53, 42 }, { 35, 17, 51 },
+}
+local CORNER_COLOR = {
+	{ "U", "R", "F" }, { "U", "F", "L" }, { "U", "L", "B" }, { "U", "B", "R" },
+	{ "D", "F", "R" }, { "D", "L", "F" }, { "D", "B", "L" }, { "D", "R", "B" },
+}
+local EDGE_FACELET = {
+	{ 5, 10 }, { 7, 19 }, { 3, 37 }, { 1, 46 }, { 32, 16 }, { 28, 25 },
+	{ 30, 43 }, { 34, 52 }, { 23, 12 }, { 21, 41 }, { 50, 39 }, { 48, 14 },
+}
+local EDGE_COLOR = {
+	{ "U", "R" }, { "U", "F" }, { "U", "L" }, { "U", "B" }, { "D", "R" }, { "D", "F" },
+	{ "D", "L" }, { "D", "B" }, { "F", "R" }, { "F", "L" }, { "B", "L" }, { "B", "R" },
+}
+
+-- Basic face turns as cubie permutations (0-based values, 1-based Lua arrays).
+local BASIC = {
+	{ cp = { 3, 0, 1, 2, 4, 5, 6, 7 }, co = { 0, 0, 0, 0, 0, 0, 0, 0 }, ep = { 3, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11 }, eo = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+	{ cp = { 4, 1, 2, 0, 7, 5, 6, 3 }, co = { 2, 0, 0, 1, 1, 0, 0, 2 }, ep = { 8, 1, 2, 3, 11, 5, 6, 7, 4, 9, 10, 0 }, eo = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+	{ cp = { 1, 5, 2, 3, 0, 4, 6, 7 }, co = { 1, 2, 0, 0, 2, 1, 0, 0 }, ep = { 0, 9, 2, 3, 4, 8, 6, 7, 1, 5, 10, 11 }, eo = { 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0 } },
+	{ cp = { 0, 1, 2, 3, 5, 6, 7, 4 }, co = { 0, 0, 0, 0, 0, 0, 0, 0 }, ep = { 0, 1, 2, 3, 5, 6, 7, 4, 8, 9, 10, 11 }, eo = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+	{ cp = { 0, 2, 6, 3, 4, 1, 5, 7 }, co = { 0, 1, 2, 0, 0, 2, 1, 0 }, ep = { 0, 1, 10, 3, 4, 5, 9, 7, 8, 2, 6, 11 }, eo = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+	{ cp = { 0, 1, 3, 7, 4, 5, 2, 6 }, co = { 0, 0, 1, 2, 0, 0, 2, 1 }, ep = { 0, 1, 2, 11, 4, 5, 6, 10, 8, 9, 3, 7 }, eo = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1 } },
+}
+
+local function identity()
+	return { cp = { 0, 1, 2, 3, 4, 5, 6, 7 }, co = { 0, 0, 0, 0, 0, 0, 0, 0 }, ep = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, eo = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+end
+
+-- a * b: apply b after a.
+local function multiply(a, b)
+	local r = { cp = {}, co = {}, ep = {}, eo = {} }
+	for i = 1, 8 do
+		local from = b.cp[i] + 1
+		r.cp[i] = a.cp[from]
+		r.co[i] = (a.co[from] + b.co[i]) % 3
+	end
+	for i = 1, 12 do
+		local from = b.ep[i] + 1
+		r.ep[i] = a.ep[from]
+		r.eo[i] = (a.eo[from] + b.eo[i]) % 2
+	end
+	return r
+end
+
+-- MOVES[m + 1] for m = face * 3 + power - 1 (power 1, 2, 3).
+local MOVES = {}
+for face = 1, 6 do
+	local c = identity()
+	for power = 1, 3 do
+		c = multiply(c, BASIC[face])
+		MOVES[(face - 1) * 3 + power] = c
+	end
+end
+
+local function choose(n, k)
+	if k < 0 or k > n then
+		return 0
+	end
+	local r = 1
+	for i = 1, k do
+		r = r * (n - k + i) / i
+	end
+	return math.floor(r + 0.5)
+end
+
+local function rankPerm(p, n)
+	local idx = 0
+	for i = 1, n do
+		local smaller = 0
+		for j = i + 1, n do
+			if p[j] < p[i] then
+				smaller += 1
+			end
+		end
+		idx = idx * (n - i + 1) + smaller
+	end
+	return idx
+end
+
+local function unrankPerm(idx, n)
+	local digits = table.create(n, 0)
+	for i = n, 1, -1 do
+		local base = n - i + 1
+		digits[i] = idx % base
+		idx = idx // base
+	end
+	local pool = {}
+	for v = 0, n - 1 do
+		pool[#pool + 1] = v
+	end
+	local p = table.create(n, 0)
+	for i = 1, n do
+		p[i] = table.remove(pool, digits[i] + 1)
+	end
+	return p
+end
+
+local function twistOf(co)
+	local t = 0
+	for i = 1, 7 do
+		t = t * 3 + co[i]
+	end
+	return t
+end
+
+local function flipOf(eo)
+	local f = 0
+	for i = 1, 11 do
+		f = f * 2 + eo[i]
+	end
+	return f
+end
+
+-- Which 4 of the 12 edge positions hold the E-slice edges (FR FL BL BR).
+local function sliceOf(occupied)
+	local a, x = 0, 0
+	for j = 12, 1, -1 do
+		if occupied[j] then
+			a += choose(12 - j, x + 1)
+			x += 1
+		end
+	end
+	return a
+end
+
+local function buildTables(yield)
+	local t = {}
+	local work = 0
+	local function tick()
+		work += 1
+		if yield and work % 20000 == 0 then
+			task.wait()
+		end
+	end
+
+	t.twistMove = table.create(N_TWIST * 18, 0)
+	for tw = 0, N_TWIST - 1 do
+		local co = table.create(8, 0)
+		local v, sum = tw, 0
+		for i = 7, 1, -1 do
+			co[i] = v % 3
+			sum += co[i]
+			v = v // 3
+		end
+		co[8] = (3 - sum % 3) % 3
+		for m = 1, 18 do
+			local mv = MOVES[m]
+			local nco = table.create(8, 0)
+			for i = 1, 8 do
+				nco[i] = (co[mv.cp[i] + 1] + mv.co[i]) % 3
+			end
+			t.twistMove[tw * 18 + m] = twistOf(nco)
+		end
+		tick()
+	end
+
+	t.flipMove = table.create(N_FLIP * 18, 0)
+	for fl = 0, N_FLIP - 1 do
+		local eo = table.create(12, 0)
+		local v, sum = fl, 0
+		for i = 11, 1, -1 do
+			eo[i] = v % 2
+			sum += eo[i]
+			v = v // 2
+		end
+		eo[12] = sum % 2
+		for m = 1, 18 do
+			local mv = MOVES[m]
+			local neo = table.create(12, 0)
+			for i = 1, 12 do
+				neo[i] = (eo[mv.ep[i] + 1] + mv.eo[i]) % 2
+			end
+			t.flipMove[fl * 18 + m] = flipOf(neo)
+		end
+		tick()
+	end
+
+	local sliceMask = {}
+	for mask = 0, 4095 do
+		local count, occ = 0, {}
+		for i = 1, 12 do
+			occ[i] = bit32.btest(mask, bit32.lshift(1, i - 1))
+			if occ[i] then
+				count += 1
+			end
+		end
+		if count == 4 then
+			sliceMask[sliceOf(occ)] = occ
+		end
+	end
+	t.sliceMove = table.create(N_SLICE * 18, 0)
+	for s = 0, N_SLICE - 1 do
+		local occ = sliceMask[s]
+		for m = 1, 18 do
+			local mv = MOVES[m]
+			local nocc = {}
+			for i = 1, 12 do
+				nocc[i] = occ[mv.ep[i] + 1]
+			end
+			t.sliceMove[s * 18 + m] = sliceOf(nocc)
+		end
+	end
+
+	-- Phase 2 tables use only the ten moves that keep the cube in <U, D, R2, L2, F2, B2>.
+	t.cpMove = buffer.create(N_PERM8 * 10 * 2)
+	t.epMove = buffer.create(N_PERM8 * 10 * 2)
+	for r = 0, N_PERM8 - 1 do
+		local p = unrankPerm(r, 8)
+		for k, m in ipairs(PHASE2_MOVES) do
+			local mv = MOVES[m + 1]
+			local nc, ne = table.create(8, 0), table.create(8, 0)
+			for i = 1, 8 do
+				nc[i] = p[mv.cp[i] + 1]
+				ne[i] = p[mv.ep[i] + 1]
+			end
+			buffer.writeu16(t.cpMove, (r * 10 + k - 1) * 2, rankPerm(nc, 8))
+			buffer.writeu16(t.epMove, (r * 10 + k - 1) * 2, rankPerm(ne, 8))
+		end
+		tick()
+	end
+	t.spMove = table.create(N_PERM4 * 10, 0)
+	for r = 0, N_PERM4 - 1 do
+		local p = unrankPerm(r, 4)
+		for k, m in ipairs(PHASE2_MOVES) do
+			local mv = MOVES[m + 1]
+			local ns = table.create(4, 0)
+			for i = 1, 4 do
+				ns[i] = p[mv.ep[i + 8] + 1 - 8]
+			end
+			t.spMove[r * 10 + k] = rankPerm(ns, 4)
+		end
+	end
+
+	-- Breadth-first pruning tables, one byte per entry (255 = not reached yet).
+	local function prune(size, width, nMoves, step)
+		local depthOf = buffer.create(size)
+		buffer.fill(depthOf, 0, 255)
+		local queue = buffer.create(size * 4)
+		local head, tail = 0, 1
+		buffer.writeu8(depthOf, 0, 0)
+		buffer.writeu32(queue, 0, 0)
+		while head < tail do
+			local idx = buffer.readu32(queue, head * 4)
+			head += 1
+			local d = buffer.readu8(depthOf, idx)
+			local a, b = idx // width, idx % width
+			for k = 1, nMoves do
+				local n = step(a, b, k)
+				if buffer.readu8(depthOf, n) == 255 then
+					buffer.writeu8(depthOf, n, d + 1)
+					buffer.writeu32(queue, tail * 4, n)
+					tail += 1
+				end
+			end
+			tick()
+		end
+		return depthOf
+	end
+	local twistMove, flipMove, sliceMove = t.twistMove, t.flipMove, t.sliceMove
+	t.pruneTwist = prune(N_SLICE * N_TWIST, N_TWIST, 18, function(s, tw, m)
+		return sliceMove[s * 18 + m] * N_TWIST + twistMove[tw * 18 + m]
+	end)
+	t.pruneFlip = prune(N_SLICE * N_FLIP, N_FLIP, 18, function(s, fl, m)
+		return sliceMove[s * 18 + m] * N_FLIP + flipMove[fl * 18 + m]
+	end)
+	local cpMove, epMove, spMove = t.cpMove, t.epMove, t.spMove
+	t.pruneCp = prune(N_PERM4 * N_PERM8, N_PERM8, 10, function(sp, cp, k)
+		return spMove[sp * 10 + k] * N_PERM8 + buffer.readu16(cpMove, (cp * 10 + k - 1) * 2)
+	end)
+	t.pruneEp = prune(N_PERM4 * N_PERM8, N_PERM8, 10, function(sp, ep, k)
+		return spMove[sp * 10 + k] * N_PERM8 + buffer.readu16(epMove, (ep * 10 + k - 1) * 2)
+	end)
+	return t
+end
+
+function Solver.ready()
+	return type(getgenv().ZinoosCubeSolverTables) == "table"
+end
+
+function Solver.prepare(yield)
+	local genv = getgenv()
+	if type(genv.ZinoosCubeSolverTables) ~= "table" then
+		genv.ZinoosCubeSolverTables = buildTables(yield)
+	end
+	return genv.ZinoosCubeSolverTables
+end
+
+-- The colour on each centre tells us which face each letter belongs to right now.
+local CENTER = { U = 4, R = 13, F = 22, D = 31, L = 40, B = 49 }
+local function toCubie(facelets)
+	local relabel = {}
+	for face, index in pairs(CENTER) do
+		relabel[string.sub(facelets, index + 1, index + 1)] = face
+	end
+	local f = {}
+	for i = 1, 54 do
+		f[i - 1] = relabel[string.sub(facelets, i, i)]
+		if not f[i - 1] then
+			return nil, "bad sticker"
+		end
+	end
+	local c = identity()
+	for i = 1, 8 do
+		local ori = 0
+		for o = 0, 2 do
+			local col = f[CORNER_FACELET[i][o + 1]]
+			if col == "U" or col == "D" then
+				ori = o
+				break
+			end
+		end
+		local c1 = f[CORNER_FACELET[i][(ori + 1) % 3 + 1]]
+		local c2 = f[CORNER_FACELET[i][(ori + 2) % 3 + 1]]
+		local found = false
+		for j = 1, 8 do
+			if CORNER_COLOR[j][2] == c1 and CORNER_COLOR[j][3] == c2 then
+				c.cp[i], c.co[i], found = j - 1, ori, true
+			end
+		end
+		if not found then
+			return nil, "bad corner"
+		end
+	end
+	for i = 1, 12 do
+		local a, b = f[EDGE_FACELET[i][1]], f[EDGE_FACELET[i][2]]
+		local found = false
+		for j = 1, 12 do
+			if EDGE_COLOR[j][1] == a and EDGE_COLOR[j][2] == b then
+				c.ep[i], c.eo[i], found = j - 1, 0, true
+			elseif EDGE_COLOR[j][1] == b and EDGE_COLOR[j][2] == a then
+				c.ep[i], c.eo[i], found = j - 1, 1, true
+			end
+		end
+		if not found then
+			return nil, "bad edge"
+		end
+	end
+	return c
+end
+
+local function isPhase2Move(m)
+	local face, power = m // 3, m % 3
+	return face == 0 or face == 3 or power == 1
+end
+
+local function allowed(face, lastFace)
+	if lastFace == nil then
+		return true
+	end
+	return face ~= lastFace and face ~= lastFace - 3
+end
+
+function Solver.solve(facelets, maxPhase2)
+	local t = Solver.prepare(false)
+	local cube, err = toCubie(facelets)
+	if not cube then
+		return nil, err
+	end
+	local twistMove, flipMove, sliceMove = t.twistMove, t.flipMove, t.sliceMove
+	local pruneTwist, pruneFlip = t.pruneTwist, t.pruneFlip
+	local cpMove, epMove, spMove = t.cpMove, t.epMove, t.spMove
+	local pruneCp, pruneEp = t.pruneCp, t.pruneEp
+	maxPhase2 = maxPhase2 or 18
+
+	local occ = {}
+	for i = 1, 12 do
+		occ[i] = cube.ep[i] >= 8
+	end
+	local tw0, fl0, sl0 = twistOf(cube.co), flipOf(cube.eo), sliceOf(occ)
+	local path1, path2 = {}, {}
+	local solution = nil
+
+	local function phase2(cp, ep, sp, depth, lastFace)
+		if depth == 0 then
+			return cp == 0 and ep == 0 and sp == 0
+		end
+		local h = math.max(buffer.readu8(pruneCp, sp * N_PERM8 + cp), buffer.readu8(pruneEp, sp * N_PERM8 + ep))
+		if h > depth then
+			return false
+		end
+		for k, m in ipairs(PHASE2_MOVES) do
+			local face = m // 3
+			if allowed(face, lastFace) then
+				local base = (k - 1) * 2
+				path2[#path2 + 1] = m
+				if phase2(buffer.readu16(cpMove, cp * 20 + base), buffer.readu16(epMove, ep * 20 + base), spMove[sp * 10 + k], depth - 1, face) then
+					return true
+				end
+				path2[#path2] = nil
+			end
+		end
+		return false
+	end
+
+	local function startPhase2()
+		local c = cube
+		for _, m in ipairs(path1) do
+			c = multiply(c, MOVES[m + 1])
+		end
+		local cp = rankPerm(c.cp, 8)
+		local e8, s4 = table.create(8, 0), table.create(4, 0)
+		for i = 1, 8 do
+			e8[i] = c.ep[i]
+		end
+		for i = 1, 4 do
+			s4[i] = c.ep[i + 8] - 8
+		end
+		local ep, sp = rankPerm(e8, 8), rankPerm(s4, 4)
+		local lastFace = #path1 > 0 and path1[#path1] // 3 or nil
+		for depth = 0, maxPhase2 do
+			table.clear(path2)
+			if phase2(cp, ep, sp, depth, lastFace) then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function phase1(tw, fl, sl, depth, lastFace)
+		if depth == 0 then
+			if tw == 0 and fl == 0 and sl == 0 then
+				local last = path1[#path1]
+				if last == nil or not isPhase2Move(last) then
+					return startPhase2()
+				end
+			end
+			return false
+		end
+		local h = math.max(buffer.readu8(pruneTwist, sl * N_TWIST + tw), buffer.readu8(pruneFlip, sl * N_FLIP + fl))
+		if h > depth then
+			return false
+		end
+		for m = 0, 17 do
+			local face = m // 3
+			if allowed(face, lastFace) then
+				path1[#path1 + 1] = m
+				if phase1(twistMove[tw * 18 + m + 1], flipMove[fl * 18 + m + 1], sliceMove[sl * 18 + m + 1], depth - 1, face) then
+					return true
+				end
+				path1[#path1] = nil
+			end
+		end
+		return false
+	end
+
+	for depth = 0, 14 do
+		table.clear(path1)
+		if phase1(tw0, fl0, sl0, depth, nil) then
+			local quarter = {}
+			for _, list in ipairs({ path1, path2 }) do
+				for _, m in ipairs(list) do
+					local face, power = FACES[m // 3 + 1], m % 3 + 1
+					if power == 1 then
+						quarter[#quarter + 1] = face
+					elseif power == 2 then
+						quarter[#quarter + 1] = face
+						quarter[#quarter + 1] = face
+					else
+						quarter[#quarter + 1] = face .. "'"
+					end
+				end
+			end
+			return quarter
+		end
+	end
+	return nil, "no solution found"
+end
+
+return Solver
+end)()
+
 local State = require(Client:WaitForChild("State"))
 local ReplayController = Client.Controllers:FindFirstChild("ReplayController")
 ReplayController = ReplayController and select(2, pcall(require, ReplayController))
@@ -2808,6 +3378,13 @@ local function installHub()
 		saveConfig()
 	end)
 	makeSwitch(solveCard, "Humanize", "humanize", "Small random gaps between moves")
+	makeSwitch(solveCard, "Auto Solve Zero Assist", "autoZeroAssist", "Reads the real 3x3 and solves it. Not 2x2 yet")
+	makeDropdown(solveCard, "Zero Assist Speed", function()
+		return tostring(STATE.zaTps)
+	end, ZA_TPS_OPTIONS, function(option)
+		STATE.zaTps = tonumber(option) or STATE.zaTps
+		saveConfig()
+	end)
 
 	local matchCard = card(rightColumn, "MATCHES", 1)
 	makeSwitch(matchCard, "Auto Ready", "autoReady", "Presses Ready as soon as the cube is shown")
@@ -3762,7 +4339,16 @@ end)
 task.spawn(function()
 	while running() do
 		pcall(stepSolve)
+		pcall(stepZeroAssist)
 		task.wait(0.05)
+	end
+end)
+
+-- The solver's tables take a few seconds to build, so do it in the background, once per session.
+task.spawn(function()
+	if STATE.autoZeroAssist == true and type(CubeSolver) == "table" and not CubeSolver.ready() then
+		local ok = pcall(CubeSolver.prepare, true)
+		noteActivity(ok and "Zero Assist solver ready" or "Zero Assist solver failed to load")
 	end
 end)
 
