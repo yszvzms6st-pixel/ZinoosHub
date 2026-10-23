@@ -77,7 +77,6 @@ genv.ZinoosCubeState = STATE
 -- This account is the hub owner; the menu shows an Admin tag only for them.
 STATE.adminIds = {
 	[9346336323] = true,
-	[9075739755] = true,
 }
 STATE.admin = STATE.adminIds[LocalPlayer.UserId] == true
 
