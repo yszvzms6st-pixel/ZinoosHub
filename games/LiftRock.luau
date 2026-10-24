@@ -8736,6 +8736,14 @@ local CRYPT_SECTIONS = {
 	Hard = "CryptHard",
 }
 
+trackConnection(LocalPlayer:GetAttributeChangedSignal("InCrypt"):Connect(function()
+	if LocalPlayer:GetAttribute("InCrypt") == true then
+		-- The server moves the character into the arena. Never let the old portal
+		-- target pull them back before the streamed coffin appears.
+		STATE.cryptGoal = nil
+	end
+end))
+
 function STATE.cryptPart(root, preferred)
 	if not root then
 		return nil
@@ -8881,23 +8889,59 @@ function STATE.stepCrypt()
 		end
 		return
 	end
-	local sectionId = CRYPT_SECTIONS[STATE.cryptDifficulty] or "CryptHard"
 	local cryptWorld = workspace:FindFirstChild("Crypt")
+	if LocalPlayer:GetAttribute("CryptCoffinOpen") == true then
+		local returnPortal = cryptWorld and cryptWorld:FindFirstChild("ReturnPortal")
+		local returnZone = STATE.cryptPart(returnPortal, { "ReturnZone", "Portal", "Pad" })
+		if not returnZone then
+			local arena = typeof(Crypt.ArenaCenter) == "Vector3" and Crypt.ArenaCenter or Vector3.new(-1300, 0, 940)
+			local half = typeof(Crypt.ArenaHalfSize) == "Vector3" and Crypt.ArenaHalfSize or Vector3.new(125, 140, 695)
+			local loadAt = arena + Vector3.new(0, 8, math.max(20, half.Z - 53))
+			STATE.cryptGoal = CFrame.new(loadAt)
+			STATE.cryptStatus = "Loading Crypt exit"
+			if os.clock() >= (STATE.nextCryptStream or 0) then
+				STATE.nextCryptStream = os.clock() + 2.5
+				task.spawn(function()
+					pcall(function()
+						LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
+					end)
+				end)
+			end
+			return
+		end
+		STATE.cryptGoal = CFrame.new(returnZone.Position + Vector3.new(0, 3, 0))
+		STATE.cryptStatus = string.format("%s coffin opened - heading to exit", STATE.cryptDifficulty or "Hard")
+		if (hrp.Position - returnZone.Position).Magnitude <= math.max(4, (tonumber(Crypt.EnterPad) or 12) - 1) and os.clock() >= (STATE.nextCryptLeave or 0) then
+			STATE.nextCryptLeave = os.clock() + 1.5
+			Net:FireServer("CryptLeave")
+		end
+		return
+	end
+	local sectionId = CRYPT_SECTIONS[STATE.cryptDifficulty] or "CryptHard"
 	local sections = cryptWorld and cryptWorld:FindFirstChild("Sections")
 	local section = sections and sections:FindFirstChild(sectionId)
 	local coffin = STATE.cryptPart(section and section:FindFirstChild("Coffin"), { "CoffinBase", "Base", "Handle" })
 	if not coffin then
-		STATE.cryptStatus = "Selected Crypt coffin not found"
+		local arena = typeof(Crypt.ArenaCenter) == "Vector3" and Crypt.ArenaCenter or Vector3.new(-1300, 0, 940)
+		local loadAt = arena + Vector3.new(0, 8, 0)
+		STATE.cryptGoal = CFrame.new(loadAt)
+		STATE.cryptStatus = "Loading Crypt arena"
+		if os.clock() >= (STATE.nextCryptStream or 0) then
+			STATE.nextCryptStream = os.clock() + 2.5
+			task.spawn(function()
+				pcall(function()
+					LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
+				end)
+			end)
+		end
 		return
 	end
 	STATE.cryptGoal = CFrame.new(coffin.Position + Vector3.new(0, 3, 3.5))
 	local range = tonumber(Crypt.CoffinRange) or 14
-	if (hrp.Position - coffin.Position).Magnitude <= range and LocalPlayer:GetAttribute("CryptCoffinOpen") ~= true and os.clock() >= (STATE.nextCryptRep or 0) then
+	if (hrp.Position - coffin.Position).Magnitude <= range and os.clock() >= (STATE.nextCryptRep or 0) then
 		STATE.nextCryptRep = os.clock() + 0.45
 		Net:FireServer("CryptCoffinRep", sectionId)
 		STATE.cryptStatus = string.format("Opening %s coffin", STATE.cryptDifficulty or "Hard")
-	elseif LocalPlayer:GetAttribute("CryptCoffinOpen") == true then
-		STATE.cryptStatus = string.format("%s coffin opened", STATE.cryptDifficulty or "Hard")
 	end
 end
 
