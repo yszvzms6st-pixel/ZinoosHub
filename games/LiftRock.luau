@@ -7181,12 +7181,16 @@ local function installHub()
 		if type(state) ~= "string" then
 			state = "idle"
 		end
+		local trenchWarning = state == "warning"
+		local trenchSeal = state == "seal"
+		local trenchOpen = state == "open"
+		local trenchFight = state == "fight"
 		local inArena = LocalPlayer:GetAttribute("InTrenchArena") == true
 		if STATE.autoTrench ~= true then
 			lines[1] = "Trench off"
 		elseif state == "ending" or (inArena and state == "idle") then
 			lines[1] = "Trench ended"
-		elseif inArena and state ~= "fight" then
+		elseif inArena and not trenchFight then
 			lines[1] = "Trench · pulled in, fight starts soon"
 		elseif inArena then
 			local lifting = STATE.trenchLift
@@ -7197,13 +7201,13 @@ local function installHub()
 			else
 				lines[1] = "Trench · in the fight"
 			end
-		elseif STATE.trenchBusy == true and state == "warning" then
+		elseif STATE.trenchBusy == true and trenchWarning then
 			local endsAt = workspace:GetAttribute("TrenchEndsAt")
 			local remain = type(endsAt) == "number" and math.max(0, endsAt - workspace:GetServerTimeNow()) or 0
 			lines[1] = string.format("Trench · at the rift, opens in %d:%02d", math.floor(remain / 60), math.floor(remain % 60))
-		elseif STATE.trenchBusy == true and state == "seal" then
+		elseif STATE.trenchBusy == true and trenchSeal then
 			lines[1] = "Trench · lifting the seal"
-		elseif STATE.trenchBusy == true and (state == "open" or state == "fight") then
+		elseif STATE.trenchBusy == true and (trenchOpen or trenchFight) then
 			lines[1] = "Trench · waiting for the pull"
 		elseif STATE.trenchBusy == true then
 			lines[1] = "Trench · " .. state
@@ -9192,6 +9196,7 @@ function STATE.stepTrench()
 	local nearArena = hrp ~= nil and hrp:IsA("BasePart") and STATE.nearTrenchArena(hrp.Position)
 	local joining = state == "warning" or state == "seal" or state == "open"
 	local waitingPull = state == "fight" and not inArena and (now < (STATE.trenchOpenUntil or 0) or pulling or nearArena)
+	local pinAtRift = state == "warning" or state == "seal"
 	local eventOn = inArena or joining or waitingPull
 	local phase = inArena and "in" or state
 	if STATE.trenchPhase ~= phase then
@@ -9289,7 +9294,7 @@ function STATE.stepTrench()
 		STATE.trenchGoal = CFrame.new(stand)
 		local offset = hrp.Position - stand
 		local flat = Vector3.new(offset.X, 0, offset.Z).Magnitude
-		STATE.trenchPin = state == "warning" or state == "seal" or flat > 12
+		STATE.trenchPin = pinAtRift or flat > 12
 	else
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
