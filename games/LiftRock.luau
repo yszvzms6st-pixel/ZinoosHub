@@ -8735,6 +8735,16 @@ local CRYPT_SECTIONS = {
 	Medium = "CryptMedium",
 	Hard = "CryptHard",
 }
+local CRYPT_REWARD_KEYS = {
+	Easy = { ["3701"] = true, ["3702"] = true, ["3703"] = true },
+	Medium = { ["3704"] = true, ["3705"] = true, ["3706"] = true },
+	Hard = { ["3707"] = true, ["3708"] = true },
+}
+local CRYPT_STREAM_OFFSETS = {
+	Easy = 330,
+	Medium = -70,
+	Hard = -410,
+}
 
 trackConnection(LocalPlayer:GetAttributeChangedSignal("InCrypt"):Connect(function()
 	if LocalPlayer:GetAttribute("InCrypt") == true then
@@ -8818,6 +8828,49 @@ function STATE.cryptTool(uid)
 	return nil
 end
 
+function STATE.cryptRewardSnapshot(data)
+	local seen = {}
+	local bag = type(data) == "table" and data.backpack or nil
+	for _, pet in pairs(type(bag) == "table" and bag or {}) do
+		if type(pet) == "table" and type(pet.uid) == "string" then
+			for _, keys in pairs(CRYPT_REWARD_KEYS) do
+				if keys[tostring(pet.key)] then
+					seen[pet.uid] = true
+					break
+				end
+			end
+		end
+	end
+	return seen
+end
+
+function STATE.newCryptReward(data)
+	local expected = CRYPT_REWARD_KEYS[STATE.cryptDifficulty] or CRYPT_REWARD_KEYS.Hard
+	local before = type(STATE.cryptRewardBefore) == "table" and STATE.cryptRewardBefore or {}
+	local bag = type(data) == "table" and data.backpack or nil
+	for _, pet in pairs(type(bag) == "table" and bag or {}) do
+		if type(pet) == "table" and type(pet.uid) == "string" and expected[tostring(pet.key)] and before[pet.uid] ~= true then
+			local spec = petSpec(tostring(pet.key))
+			return pet.uid, spec and (spec.DisplayName or spec.Name) or tostring(pet.key)
+		end
+	end
+	return nil, nil
+end
+
+function STATE.cryptWorldReward(sectionId)
+	local live = workspace:FindFirstChild("Live")
+	local friends = live and live:FindFirstChild("Friends")
+	for _, model in ipairs(friends and friends:GetChildren() or {}) do
+		if model:IsA("Model") and model:GetAttribute("SpawnZone") == sectionId then
+			local prompt = model:FindFirstChild("StealPrompt", true)
+			if prompt and prompt:IsA("ProximityPrompt") then
+				return model, prompt
+			end
+		end
+	end
+	return nil, nil
+end
+
 function STATE.stepCrypt()
 	if not running() or STATE.autoCrypt ~= true or typeof(Crypt) ~= "table" or Crypt.Enabled ~= true then
 		STATE.cryptBusy = false
@@ -8839,7 +8892,14 @@ function STATE.stepCrypt()
 	STATE.cryptBusy = inCrypt or progress >= goal or STATE.cryptSacrifice == true
 	if not STATE.cryptBusy then
 		STATE.cryptGoal = nil
-		STATE.cryptStatus = string.format("Cauldron %d/%d - sacrifice is off", progress, goal)
+		local rewardUid, rewardName = STATE.newCryptReward(data)
+		if type(rewardUid) == "string" and STATE.cryptRewardUid ~= rewardUid then
+			STATE.cryptRewardUid = rewardUid
+			STATE.cryptStatus = "Got " .. tostring(rewardName)
+			STATE.noteActivity(STATE.cryptStatus)
+		else
+			STATE.cryptStatus = string.format("Cauldron %d/%d - sacrifice is off", progress, goal)
+		end
 		return
 	end
 	if not inCrypt and progress < goal then
@@ -8884,13 +8944,55 @@ function STATE.stepCrypt()
 		STATE.cryptGoal = CFrame.new(enter.Position + Vector3.new(0, 3, 0))
 		if (hrp.Position - enter.Position).Magnitude <= (tonumber(Crypt.EnterPad) or 12) and os.clock() >= (STATE.nextCryptEnter or 0) then
 			STATE.nextCryptEnter = os.clock() + 1.5
+			STATE.cryptRewardBefore = STATE.cryptRewardSnapshot(data)
+			STATE.cryptRewardUid = nil
+			STATE.cryptAwaitReset = true
 			Net:FireServer("CryptEnter")
 			STATE.cryptStatus = "Entering the Crypt"
 		end
 		return
 	end
 	local cryptWorld = workspace:FindFirstChild("Crypt")
+	if STATE.cryptAwaitReset == true then
+		if LocalPlayer:GetAttribute("CryptCoffinOpen") == true then
+			local arena = typeof(Crypt.ArenaCenter) == "Vector3" and Crypt.ArenaCenter or Vector3.new(-1300, 0, 940)
+			STATE.cryptGoal = CFrame.new(arena + Vector3.new(0, 8, 0))
+			STATE.cryptStatus = "Waiting for new Crypt run"
+			return
+		end
+		STATE.cryptAwaitReset = false
+	end
 	if LocalPlayer:GetAttribute("CryptCoffinOpen") == true then
+		local sectionId = CRYPT_SECTIONS[STATE.cryptDifficulty] or "CryptHard"
+		if LocalPlayer:GetAttribute("holdingFriend") ~= true then
+			local reward, prompt = STATE.cryptWorldReward(sectionId)
+			if not reward then
+				local arena = typeof(Crypt.ArenaCenter) == "Vector3" and Crypt.ArenaCenter or Vector3.new(-1300, 0, 940)
+				local loadAt = arena + Vector3.new(0, 8, CRYPT_STREAM_OFFSETS[STATE.cryptDifficulty] or CRYPT_STREAM_OFFSETS.Hard)
+				STATE.cryptGoal = CFrame.new(loadAt)
+				STATE.cryptStatus = string.format("Waiting for %s reward egg", STATE.cryptDifficulty or "Hard")
+				if os.clock() >= (STATE.nextCryptStream or 0) then
+					STATE.nextCryptStream = os.clock() + 2.5
+					pcall(function()
+						LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
+					end)
+				end
+				return
+			end
+			local rewardPos = reward:GetPivot().Position
+			STATE.cryptGoal = CFrame.new(rewardPos + Vector3.new(0, 4, 0))
+			STATE.cryptStatus = "Picking up " .. tostring(reward.Name)
+			if (hrp.Position - rewardPos).Magnitude <= 30 and os.clock() >= (STATE.nextCryptPickup or 0) and typeof(fireproximityprompt) == "function" then
+				STATE.nextCryptPickup = os.clock() + 0.15
+				prompt.HoldDuration = 0
+				prompt.RequiresLineOfSight = false
+				if prompt.MaxActivationDistance < 30 then
+					prompt.MaxActivationDistance = 30
+				end
+				pcall(fireproximityprompt, prompt)
+			end
+			return
+		end
 		local returnPortal = cryptWorld and cryptWorld:FindFirstChild("ReturnPortal")
 		local returnZone = STATE.cryptPart(returnPortal, { "ReturnZone", "Portal", "Pad" })
 		if not returnZone then
@@ -8901,16 +9003,14 @@ function STATE.stepCrypt()
 			STATE.cryptStatus = "Loading Crypt exit"
 			if os.clock() >= (STATE.nextCryptStream or 0) then
 				STATE.nextCryptStream = os.clock() + 2.5
-				task.spawn(function()
-					pcall(function()
-						LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
-					end)
+				pcall(function()
+					LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
 				end)
 			end
 			return
 		end
 		STATE.cryptGoal = CFrame.new(returnZone.Position + Vector3.new(0, 3, 0))
-		STATE.cryptStatus = string.format("%s coffin opened - heading to exit", STATE.cryptDifficulty or "Hard")
+		STATE.cryptStatus = string.format("Carrying %s reward to exit", STATE.cryptDifficulty or "Hard")
 		if (hrp.Position - returnZone.Position).Magnitude <= math.max(4, (tonumber(Crypt.EnterPad) or 12) - 1) and os.clock() >= (STATE.nextCryptLeave or 0) then
 			STATE.nextCryptLeave = os.clock() + 1.5
 			Net:FireServer("CryptLeave")
@@ -8923,15 +9023,13 @@ function STATE.stepCrypt()
 	local coffin = STATE.cryptPart(section and section:FindFirstChild("Coffin"), { "CoffinBase", "Base", "Handle" })
 	if not coffin then
 		local arena = typeof(Crypt.ArenaCenter) == "Vector3" and Crypt.ArenaCenter or Vector3.new(-1300, 0, 940)
-		local loadAt = arena + Vector3.new(0, 8, 0)
+		local loadAt = arena + Vector3.new(0, 8, CRYPT_STREAM_OFFSETS[STATE.cryptDifficulty] or CRYPT_STREAM_OFFSETS.Hard)
 		STATE.cryptGoal = CFrame.new(loadAt)
 		STATE.cryptStatus = "Loading Crypt arena"
 		if os.clock() >= (STATE.nextCryptStream or 0) then
 			STATE.nextCryptStream = os.clock() + 2.5
-			task.spawn(function()
-				pcall(function()
-					LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
-				end)
+			pcall(function()
+				LocalPlayer:RequestStreamAroundAsync(loadAt, 4)
 			end)
 		end
 		return
