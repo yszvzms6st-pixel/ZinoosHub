@@ -499,7 +499,7 @@ fireWrapper = function(self, remoteName, ...)
 			return
 		end
 	end
-	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true or STATE.placeBusy == true or STATE.fuseBusy == true) then
+	if remoteName == "StartBench" and (STATE.liftSteal == true or STATE.trenchBusy == true or STATE.cryptBusy == true or STATE.placeBusy == true or STATE.fuseBusy == true) then
 		return
 	end
 	return netFireServer(self, remoteName, ...)
@@ -522,6 +522,7 @@ local Rarities = configModule("Rarities")
 local Wild = configModule("Wild")
 local Zones = configModule("Zones")
 local DailyRewards = configModule("DailyRewards")
+local Crypt = configModule("Crypt")
 local Format = Shared and loadModule("Shared.Format", function()
 	return require(Shared.Format)
 end)
@@ -815,6 +816,20 @@ end
 if STATE.autoTrench == nil then
 	STATE.autoTrench = true
 end
+if STATE.autoCrypt == nil then
+	STATE.autoCrypt = true
+end
+if STATE.cryptSacrifice == nil then
+	STATE.cryptSacrifice = false
+end
+if STATE.cryptDifficulty ~= "Easy" and STATE.cryptDifficulty ~= "Medium" and STATE.cryptDifficulty ~= "Hard" then
+	STATE.cryptDifficulty = "Hard"
+end
+if rarityRank[STATE.cryptMaxRarity] == nil then
+	STATE.cryptMaxRarity = "Common"
+end
+STATE.cryptBusy = false
+STATE.cryptGoal = nil
 if STATE.trenchShop == nil then
 	STATE.trenchShop = true
 end
@@ -1136,6 +1151,8 @@ hubCleanup(function()
 	STATE.placeBusy = false
 	STATE.fuseBusy = false
 	STATE.fuseGoal = nil
+	STATE.cryptBusy = false
+	STATE.cryptGoal = nil
 end)
 
 local function pinGoal(part, goal)
@@ -1147,6 +1164,19 @@ local function pinGoal(part, goal)
 end
 
 local function stepTrain()
+	if STATE.cryptBusy == true then
+		local character = LocalPlayer.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if releaseGym() and hrp and typeof(STATE.cryptGoal) == "CFrame" then
+			if humanoid then
+				humanoid.Sit = false
+				humanoid.PlatformStand = false
+			end
+			pinGoal(hrp, STATE.cryptGoal)
+		end
+		return
+	end
 	if STATE.trenchBusy == true and os.clock() >= (STATE.trenchDeliverUntil or 0) then
 		local character = LocalPlayer.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
@@ -2157,6 +2187,9 @@ function STATE.stepAutoPlace()
 	if not running() or STATE.autoPlace ~= true or not featureReady("Auto Place") then
 		return
 	end
+	if STATE.cryptBusy == true or LocalPlayer:GetAttribute("InCrypt") == true then
+		return
+	end
 	if os.clock() < (STATE.nextAutoPlace or 0) then
 		return
 	end
@@ -2927,6 +2960,11 @@ end
 
 local function runStealTrip()
 	local trenchDelivery = false
+	if STATE.cryptBusy == true and not pendingDelivery() then
+		STATE.liftSteal = false
+		activeGoal = nil
+		return nil
+	end
 	if STATE.trenchBusy == true then
 		local early = workspace:GetAttribute("TrenchState") == "warning" and LocalPlayer:GetAttribute("InTrenchArena") ~= true
 		if not early or not pendingDelivery() then
@@ -4449,6 +4487,8 @@ local FLAG_KEYS = {
 	AutoTrails = "trails",
 	AutoSteal = "autoSteal",
 	AutoTrench = "autoTrench",
+	AutoCrypt = "autoCrypt",
+	CryptSacrifice = "cryptSacrifice",
 	TrenchShop = "trenchShop",
 	PowerPearls = "powerPearls",
 	AutoInk = "autoInk",
@@ -4695,6 +4735,7 @@ STATE.dashFeatures = {
 	{ label = "Steal", key = "autoSteal", fault = "Auto Steal", busy = "liftSteal" },
 	{ label = "Place", key = "autoPlace", fault = "Auto Place", busy = "placeBusy" },
 	{ label = "Trench", key = "autoTrench", busy = "trenchBusy" },
+	{ label = "Crypt", key = "autoCrypt", busy = "cryptBusy" },
 	{ label = "Ink", key = "autoInk" },
 	{ label = "Fuse", key = "autoFuse", fault = "Auto Fuse", busy = "fuseBusy" },
 	{ label = "Equip", key = "equipBest", fault = "Equip Best" },
@@ -4999,6 +5040,12 @@ local function loadSaved()
 	if type(saved.PowerPearlAt) == "number" then
 		STATE.powerPearlAt = saved.PowerPearlAt
 	end
+	if saved.CryptDifficulty == "Easy" or saved.CryptDifficulty == "Medium" or saved.CryptDifficulty == "Hard" then
+		STATE.cryptDifficulty = saved.CryptDifficulty
+	end
+	if type(saved.CryptMaxRarity) == "string" and rarityRank[saved.CryptMaxRarity] then
+		STATE.cryptMaxRarity = saved.CryptMaxRarity
+	end
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
 	end
@@ -5138,6 +5185,8 @@ local function saveConfig()
 		PlacementPriority = STATE.placementChoice(STATE.placementPriority),
 		PhoneGame = STATE.phoneChoice or "Critter Merge",
 		PowerPearlAt = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or nil,
+		CryptDifficulty = STATE.cryptDifficulty or "Hard",
+		CryptMaxRarity = STATE.cryptMaxRarity or "Common",
 		HubSize = STATE.hubSize or "Compact",
 		WebhookUrl = type(STATE.webhook) == "string" and STATE.webhook or "",
 		MenuX = STATE.menuX,
@@ -6753,6 +6802,22 @@ local function installHub()
 	local eggs = card(leftColumn, "EGGS", 1)
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
 	makeSwitch(eggs, "Auto Trench", "autoTrench", "Joins the free Trench fight and lifts the tentacles")
+	makeSwitch(eggs, "Auto Crypt", "autoCrypt", "Enters the Halloween Crypt when the cauldron is full and opens your chosen coffin")
+	makeSwitch(eggs, "Crypt Sacrifice", "cryptSacrifice", "Feeds only spare plain bag pets at or below your limit. Never eggs, mutations, event mutations, plot pets, or your last 3 copies")
+	makeDropdown(eggs, "Crypt Coffin", function()
+		return STATE.cryptDifficulty or "Hard"
+	end, { "Hard", "Medium", "Easy" }, function(option)
+		STATE.cryptDifficulty = option
+		saveConfig()
+	end, true)
+	makeDropdown(eggs, "Sacrifice Limit", function()
+		return STATE.cryptMaxRarity or "Common"
+	end, rarityOptions, function(option)
+		if rarityRank[option] then
+			STATE.cryptMaxRarity = option
+			saveConfig()
+		end
+	end, true)
 	makeSwitch(eggs, "Trench Shop", "trenchShop", "Spends pearls on Trench Eggs. Never buys Robux")
 	makeSwitch(eggs, "Power Pearls", "powerPearls", "Spends spare pearls on +10m Power, keeping 450 for a Trench Egg when Trench Shop is on. Never buys Robux")
 	makeSwitch(eggs, "Auto Ink", "autoInk", "Uses Kraken Ink (free first, then 900 pearls) on the plot pet it boosts most. Never buys Robux")
@@ -8547,7 +8612,7 @@ function STATE.stepFuse()
 	if STATE.autoFuse ~= true or not running() or os.clock() < (STATE.nextFuse or 0) then
 		return
 	end
-	if STATE.trenchBusy == true or STATE.placeBusy == true or STATE.liftSteal == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
+	if STATE.trenchBusy == true or STATE.cryptBusy == true or STATE.placeBusy == true or STATE.liftSteal == true or LocalPlayer:GetAttribute("InTrenchArena") == true or LocalPlayer:GetAttribute("InCrypt") == true then
 		return
 	end
 	local trenchState = workspace:GetAttribute("TrenchState")
@@ -8665,6 +8730,192 @@ function STATE.powerLeft()
 	return math.max(0, 600 - (os.time() - at))
 end
 
+local CRYPT_SECTIONS = {
+	Easy = "CryptEasy",
+	Medium = "CryptMedium",
+	Hard = "CryptHard",
+}
+
+function STATE.cryptPart(root, preferred)
+	if not root then
+		return nil
+	end
+	for _, name in ipairs(preferred) do
+		local item = root:FindFirstChild(name, true)
+		if item then
+			if item:IsA("BasePart") then
+				return item
+			end
+			local part = item:FindFirstChildWhichIsA("BasePart", true)
+			if part then
+				return part
+			end
+		end
+	end
+	return root:IsA("BasePart") and root or root:FindFirstChildWhichIsA("BasePart", true)
+end
+
+function STATE.cryptFeedPlan(data)
+	local bag = type(data) == "table" and data.backpack or nil
+	if type(bag) ~= "table" or typeof(Crypt) ~= "table" or type(Crypt.RarityPoints) ~= "table" then
+		return nil
+	end
+	local counts = {}
+	for _, pet in pairs(bag) do
+		if type(pet) == "table" and type(pet.key) == "string" then
+			counts[pet.key] = (counts[pet.key] or 0) + 1
+		end
+	end
+	local limit = rarityRank[STATE.cryptMaxRarity] or rarityRank.Common or 1
+	local choices = {}
+	for _, pet in pairs(bag) do
+		local spec = type(pet) == "table" and petSpec(pet.key)
+		local rank = spec and rarityRank[spec.Rarity] or math.huge
+		local events = type(pet) == "table" and pet.eventMutations or nil
+		local hasEvent = type(events) == "table" and next(events) ~= nil
+		if spec and not spec.IsEgg and pet.hatchAt == nil and type(pet.uid) == "string"
+			and (pet.mutation == nil or pet.mutation == "None") and not hasEvent
+			and rank <= limit and (counts[pet.key] or 0) > 3 then
+			choices[#choices + 1] = {
+				uid = pet.uid,
+				key = pet.key,
+				name = spec.DisplayName or spec.Name or tostring(pet.key),
+				rank = rank,
+				points = Crypt.RarityPoints[spec.Rarity] or 0,
+			}
+		end
+	end
+	table.sort(choices, function(a, b)
+		if a.rank ~= b.rank then
+			return a.rank < b.rank
+		end
+		if a.points ~= b.points then
+			return a.points < b.points
+		end
+		return a.uid < b.uid
+	end)
+	return choices[1]
+end
+
+function STATE.cryptTool(uid)
+	for _, container in ipairs({ LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack") }) do
+		if container then
+			for _, tool in ipairs(container:GetChildren()) do
+				if tool:IsA("Tool") and tool:GetAttribute("petUID") == uid and tool:GetAttribute("isEgg") ~= true then
+					return tool
+				end
+			end
+		end
+	end
+	return nil
+end
+
+function STATE.stepCrypt()
+	if not running() or STATE.autoCrypt ~= true or typeof(Crypt) ~= "table" or Crypt.Enabled ~= true then
+		STATE.cryptBusy = false
+		STATE.cryptGoal = nil
+		return
+	end
+	if STATE.trenchBusy == true or STATE.liftSteal == true or STATE.placeBusy == true or STATE.fuseBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
+		return
+	end
+	local data = readData()
+	local progress = type(data) == "table" and type(data.crypt) == "table" and tonumber(data.crypt.fed) or 0
+	local goal = tonumber(Crypt.Goal) or 100
+	local inCrypt = LocalPlayer:GetAttribute("InCrypt") == true
+	local character = LocalPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not (hrp and hrp:IsA("BasePart")) then
+		return
+	end
+	STATE.cryptBusy = inCrypt or progress >= goal or STATE.cryptSacrifice == true
+	if not STATE.cryptBusy then
+		STATE.cryptGoal = nil
+		STATE.cryptStatus = string.format("Cauldron %d/%d - sacrifice is off", progress, goal)
+		return
+	end
+	if not inCrypt and progress < goal then
+		local plan = STATE.cryptFeedPlan(data)
+		if not plan then
+			STATE.cryptBusy = false
+			STATE.cryptGoal = nil
+			STATE.cryptStatus = string.format("Cauldron %d/%d - no safe spare pets", progress, goal)
+			return
+		end
+		local map = workspace:FindFirstChild("Map")
+		local cauldron = map and map:FindFirstChild("CryptCauldron")
+		local feed = STATE.cryptPart(cauldron, { "FeedZone", "Feed", "Cauldron" })
+		if not feed then
+			STATE.cryptStatus = "Crypt cauldron not found"
+			return
+		end
+		STATE.cryptGoal = CFrame.new(feed.Position + Vector3.new(0, 3, 7))
+		if (hrp.Position - feed.Position).Magnitude <= (tonumber(Crypt.FeedRange) or 14) and os.clock() >= (STATE.nextCryptFeed or 0) then
+			local tool = STATE.cryptTool(plan.uid)
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			if tool and humanoid then
+				humanoid:EquipTool(tool)
+				task.wait(0.15)
+				if tool.Parent == character and tool:GetAttribute("petUID") == plan.uid then
+					STATE.nextCryptFeed = os.clock() + math.max(0.5, tonumber(Crypt.FeedCooldown) or 0.35)
+					Net:FireServer("CryptFeed")
+					STATE.cryptStatus = string.format("Fed %s (+%d), cauldron %d/%d", plan.name, plan.points, progress, goal)
+				end
+			end
+		end
+		return
+	end
+	if not inCrypt then
+		local map = workspace:FindFirstChild("Map")
+		local portal = map and map:FindFirstChild("HauntedPortal")
+		local enter = STATE.cryptPart(portal, { "EnterZone", "Portal", "Pad" })
+		if not enter then
+			STATE.cryptStatus = "Crypt portal not found"
+			return
+		end
+		STATE.cryptGoal = CFrame.new(enter.Position + Vector3.new(0, 3, 0))
+		if (hrp.Position - enter.Position).Magnitude <= (tonumber(Crypt.EnterPad) or 12) and os.clock() >= (STATE.nextCryptEnter or 0) then
+			STATE.nextCryptEnter = os.clock() + 1.5
+			Net:FireServer("CryptEnter")
+			STATE.cryptStatus = "Entering the Crypt"
+		end
+		return
+	end
+	local sectionId = CRYPT_SECTIONS[STATE.cryptDifficulty] or "CryptHard"
+	local cryptWorld = workspace:FindFirstChild("Crypt")
+	local sections = cryptWorld and cryptWorld:FindFirstChild("Sections")
+	local section = sections and sections:FindFirstChild(sectionId)
+	local coffin = STATE.cryptPart(section and section:FindFirstChild("Coffin"), { "CoffinBase", "Base", "Handle" })
+	if not coffin then
+		STATE.cryptStatus = "Selected Crypt coffin not found"
+		return
+	end
+	STATE.cryptGoal = CFrame.new(coffin.Position + Vector3.new(0, 3, 3.5))
+	local range = tonumber(Crypt.CoffinRange) or 14
+	if (hrp.Position - coffin.Position).Magnitude <= range and LocalPlayer:GetAttribute("CryptCoffinOpen") ~= true and os.clock() >= (STATE.nextCryptRep or 0) then
+		STATE.nextCryptRep = os.clock() + 0.45
+		Net:FireServer("CryptCoffinRep", sectionId)
+		STATE.cryptStatus = string.format("Opening %s coffin", STATE.cryptDifficulty or "Hard")
+	elseif LocalPlayer:GetAttribute("CryptCoffinOpen") == true then
+		STATE.cryptStatus = string.format("%s coffin opened", STATE.cryptDifficulty or "Hard")
+	end
+end
+
+task.spawn(function()
+	while running() do
+		local ok, err = pcall(STATE.stepCrypt)
+		if not ok then
+			STATE.cryptBusy = false
+			STATE.cryptGoal = nil
+			STATE.cryptStatus = "Crypt error: " .. tostring(err)
+			warn("[Zinoos hub] crypt " .. tostring(err))
+			task.wait(2)
+		else
+			task.wait(0.4)
+		end
+	end
+end)
+
 function STATE.buyTrenchEgg(now)
 	if now < (STATE.nextTrenchBuy or 0) or STATE.trenchBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
 		return
@@ -8774,6 +9025,12 @@ function STATE.stepTrench()
 		STATE.trenchGoal = nil
 		STATE.trenchPin = false
 		STATE.buyTrenchEgg(os.clock())
+		return
+	end
+	if STATE.cryptBusy == true or LocalPlayer:GetAttribute("InCrypt") == true then
+		STATE.trenchBusy = false
+		STATE.trenchGoal = nil
+		STATE.trenchPin = false
 		return
 	end
 	local now = os.clock()
