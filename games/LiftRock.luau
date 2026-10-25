@@ -4128,6 +4128,28 @@ local function cashNow(data)
 	return cash
 end
 
+function STATE.petIncomeAtCash(pet, cash)
+	if type(pet) ~= "table" or typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
+		return nil
+	end
+	local ok, base = pcall(Pets.IncomeFor, pet)
+	if not ok or type(base) ~= "number" then
+		return nil
+	end
+	local level, grade = 1, 1
+	if typeof(Plot) == "table" and typeof(Plot.PetLevelMultiplier) == "function" then
+		pcall(function()
+			level = Plot.PetLevelMultiplier(pet.level) or 1
+		end)
+	end
+	if typeof(Grades) == "table" and typeof(Grades.Multiplier) == "function" then
+		pcall(function()
+			grade = Grades.Multiplier(pet.grade) or 1
+		end)
+	end
+	return base * level * grade * (type(cash) == "number" and cash or 1)
+end
+
 local function rememberPet(pet, cash)
 	local uid = pet.uid
 	if type(uid) ~= "string" then
@@ -4151,23 +4173,7 @@ local function rememberPet(pet, cash)
 	if cached and cached.sig == sig then
 		return cached.amount
 	end
-	if typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
-		return 0
-	end
-	local ok, base = pcall(Pets.IncomeFor, pet)
-	base = ok and type(base) == "number" and base or 0
-	local level, grade = 1, 1
-	if typeof(Plot) == "table" and typeof(Plot.PetLevelMultiplier) == "function" then
-		pcall(function()
-			level = Plot.PetLevelMultiplier(pet.level) or 1
-		end)
-	end
-	if typeof(Grades) == "table" and typeof(Grades.Multiplier) == "function" then
-		pcall(function()
-			grade = Grades.Multiplier(pet.grade) or 1
-		end)
-	end
-	local amount = base * level * grade * cash
+	local amount = STATE.petIncomeAtCash(pet, cash) or 0
 	incomeByUid[uid] = {
 		sig = sig,
 		amount = amount,
@@ -6803,7 +6809,7 @@ local function installHub()
 	makeSwitch(eggs, "Auto Steal", "autoSteal", "Grabs an egg of a ticked rarity, then comes back")
 	makeSwitch(eggs, "Auto Trench", "autoTrench", "Joins the free Trench fight and lifts the tentacles")
 	makeSwitch(eggs, "Auto Crypt", "autoCrypt", "Enters the Halloween Crypt when the cauldron is full and opens your chosen coffin")
-	makeSwitch(eggs, "Crypt Sacrifice", "cryptSacrifice", "Feeds only spare plain bag pets at or below your limit. Never eggs, mutations, event mutations, plot pets, or your last 3 copies")
+	makeSwitch(eggs, "Crypt Sacrifice", "cryptSacrifice", "Feeds bag pets at or below your rarity limit only when removing them cannot reduce your best possible plot income. Never feeds eggs or plot pets")
 	makeDropdown(eggs, "Crypt Coffin", function()
 		return STATE.cryptDifficulty or "Hard"
 	end, { "Hard", "Medium", "Easy" }, function(option)
@@ -8777,42 +8783,108 @@ function STATE.cryptPart(root, preferred)
 	return root:IsA("BasePart") and root or root:FindFirstChildWhichIsA("BasePart", true)
 end
 
+function STATE.cryptIncomeAudit(data)
+	if type(data) ~= "table" then
+		return nil
+	end
+	local room = STATE.plotRoom(data)
+	if not room or type(room.activeSlots) ~= "number" then
+		return nil
+	end
+	local cash = cashNow(data)
+	local pool = {}
+	local function addPet(pet, fallbackUid, inBag)
+		if type(pet) ~= "table" then
+			return true
+		end
+		local spec = petSpec(pet.key)
+		if not spec or spec.IsEgg or pet.hatchAt ~= nil then
+			return true
+		end
+		local income = STATE.petIncomeAtCash(pet, cash)
+		if type(income) ~= "number" then
+			return false
+		end
+		local uid = type(pet.uid) == "string" and pet.uid or (type(fallbackUid) == "string" and fallbackUid or nil)
+		pool[#pool + 1] = {
+			pet = pet,
+			uid = uid,
+			income = income,
+			inBag = inBag == true,
+		}
+		return true
+	end
+	for uid, pet in pairs(type(data.plotPets) == "table" and data.plotPets or {}) do
+		if not addPet(pet, uid, false) then
+			return nil
+		end
+	end
+	for uid, pet in pairs(type(data.backpack) == "table" and data.backpack or {}) do
+		if not addPet(pet, uid, true) then
+			return nil
+		end
+	end
+	table.sort(pool, function(a, b)
+		if a.income ~= b.income then
+			return a.income > b.income
+		end
+		if a.inBag ~= b.inBag then
+			return a.inBag == false
+		end
+		return tostring(a.uid or "") < tostring(b.uid or "")
+	end)
+	local protected = {}
+	local bestIncome = 0
+	for index = 1, math.min(room.activeSlots, #pool) do
+		local item = pool[index]
+		bestIncome += item.income
+		if item.inBag and type(item.uid) == "string" then
+			protected[item.uid] = true
+		end
+	end
+	return bestIncome, protected, cash
+end
+
 function STATE.cryptFeedPlan(data)
 	local bag = type(data) == "table" and data.backpack or nil
 	if type(bag) ~= "table" or typeof(Crypt) ~= "table" or type(Crypt.RarityPoints) ~= "table" then
 		return nil
 	end
-	local counts = {}
-	for _, pet in pairs(bag) do
-		if type(pet) == "table" and type(pet.key) == "string" then
-			counts[pet.key] = (counts[pet.key] or 0) + 1
-		end
+	local bestIncome, protected, cash = STATE.cryptIncomeAudit(data)
+	if type(bestIncome) ~= "number" or type(protected) ~= "table" or type(cash) ~= "number" then
+		return nil
 	end
 	local limit = rarityRank[STATE.cryptMaxRarity] or rarityRank.Common or 1
 	local choices = {}
-	for _, pet in pairs(bag) do
+	for uid, pet in pairs(bag) do
 		local spec = type(pet) == "table" and petSpec(pet.key)
 		local rank = spec and rarityRank[spec.Rarity] or math.huge
-		local events = type(pet) == "table" and pet.eventMutations or nil
-		local hasEvent = type(events) == "table" and next(events) ~= nil
-		if spec and not spec.IsEgg and pet.hatchAt == nil and type(pet.uid) == "string"
-			and (pet.mutation == nil or pet.mutation == "None") and not hasEvent
-			and rank <= limit and (counts[pet.key] or 0) > 3 then
+		local petUid = type(pet) == "table" and (type(pet.uid) == "string" and pet.uid or (type(uid) == "string" and uid or nil)) or nil
+		local income = type(pet) == "table" and STATE.petIncomeAtCash(pet, cash) or nil
+		local points = spec and Crypt.RarityPoints[spec.Rarity] or nil
+		if spec and not spec.IsEgg and pet.hatchAt == nil and type(petUid) == "string"
+			and not protected[petUid] and rank <= limit and type(income) == "number"
+			and type(points) == "number" and points > 0 then
 			choices[#choices + 1] = {
-				uid = pet.uid,
+				uid = petUid,
 				key = pet.key,
 				name = spec.DisplayName or spec.Name or tostring(pet.key),
 				rank = rank,
-				points = Crypt.RarityPoints[spec.Rarity] or 0,
+				points = points,
+				income = income,
+				bestIncome = bestIncome,
 			}
 		end
 	end
 	table.sort(choices, function(a, b)
-		if a.rank ~= b.rank then
-			return a.rank < b.rank
+		if a.income ~= b.income then
+			return a.income < b.income
 		end
 		if a.points ~= b.points then
 			return a.points < b.points
+		end
+		if a.rank ~= b.rank then
+			return a.rank < b.rank
 		end
 		return a.uid < b.uid
 	end)
@@ -8882,6 +8954,13 @@ function STATE.stepCrypt()
 		return
 	end
 	if STATE.trenchBusy == true or STATE.liftSteal == true or STATE.placeBusy == true or STATE.fuseBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
+		if STATE.cryptSacrifice == true then
+			if STATE.trenchBusy == true or LocalPlayer:GetAttribute("InTrenchArena") == true then
+				STATE.cryptStatus = "Waiting for Trench to finish"
+			else
+				STATE.cryptStatus = "Waiting for other automation to finish"
+			end
+		end
 		return
 	end
 	local data = readData()
@@ -8911,7 +8990,7 @@ function STATE.stepCrypt()
 		if not plan then
 			STATE.cryptBusy = false
 			STATE.cryptGoal = nil
-			STATE.cryptStatus = string.format("Cauldron %d/%d - no safe spare pets", progress, goal)
+			STATE.cryptStatus = string.format("Cauldron %d/%d - no income-safe pets", progress, goal)
 			return
 		end
 		local map = workspace:FindFirstChild("Map")
@@ -9441,27 +9520,7 @@ end
 
 
 local function shownIncome(pet)
-	if typeof(Pets) ~= "table" or typeof(Pets.IncomeFor) ~= "function" then
-		return 0
-	end
-	local ok, base = pcall(Pets.IncomeFor, pet)
-	base = ok and type(base) == "number" and base or 0
-	local level = 1
-	local grade = 1
-	pcall(function()
-		level = Plot.PetLevelMultiplier(pet.level) or 1
-	end)
-	pcall(function()
-		grade = Grades.Multiplier(pet.grade) or 1
-	end)
-	local data = readData()
-	local rebirths = data and data.rebirths or 0
-	local row = typeof(Rebirths) == "table" and Rebirths[rebirths] or nil
-	local cash = type(row) == "table" and row.CashMulti or 1
-	if type(cash) ~= "number" then
-		cash = 1
-	end
-	return base * level * grade * cash
+	return STATE.petIncomeAtCash(pet, cashNow(readData())) or 0
 end
 
 function STATE.plotEggText(pet)
