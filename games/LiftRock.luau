@@ -1,6 +1,6 @@
 -- Zinoos hub for Lift Rock For Eggs.
 -- The bench grants strength. The treadmill grants speed.
--- Strength only, until rebirth is maxed. After that, the treadmill only.
+-- Auto training defaults to strength until rebirth is maxed, then treadmill. The user can override either mode.
 -- Rebirth, gym/floor/basement upgrades, and the best affordable trail use the game's own remotes.
 
 local Players = game:GetService("Players")
@@ -798,6 +798,9 @@ setmetatable(STATE, {
 if STATE.autoTrain == nil then
 	STATE.autoTrain = true
 end
+if STATE.trainMode ~= "Auto" and STATE.trainMode ~= "Strength" and STATE.trainMode ~= "Treadmill" then
+	STATE.trainMode = "Auto"
+end
 if STATE.rebirth == nil then
 	STATE.rebirth = true
 end
@@ -1116,6 +1119,14 @@ local function dismountTreadmill()
 end
 
 local function updateFocus()
+	if STATE.trainMode == "Strength" then
+		STATE.trainFocus = "strength"
+		return
+	end
+	if STATE.trainMode == "Treadmill" then
+		STATE.trainFocus = "speed"
+		return
+	end
 	if typeof(Rebirths) ~= "table" then
 		STATE.trainFocus = "strength"
 		return
@@ -2560,7 +2571,7 @@ function prehistoricEggs()
 end
 
 allowLeaveBench = function()
-	if STATE.autoTrain ~= true or STATE.trenchBusy == true or STATE.placeBusy == true or STATE.fuseBusy == true then
+	if STATE.autoTrain ~= true or STATE.trenchBusy == true or STATE.cryptBusy == true or STATE.placeBusy == true or STATE.fuseBusy == true or LocalPlayer:GetAttribute("InCrypt") == true then
 		return true
 	end
 	if STATE.trainFocus == "speed" then
@@ -5049,6 +5060,9 @@ local function loadSaved()
 	if saved.CryptDifficulty == "Easy" or saved.CryptDifficulty == "Medium" or saved.CryptDifficulty == "Hard" then
 		STATE.cryptDifficulty = saved.CryptDifficulty
 	end
+	if saved.TrainingMode == "Auto" or saved.TrainingMode == "Strength" or saved.TrainingMode == "Treadmill" then
+		STATE.trainMode = saved.TrainingMode
+	end
 	if type(saved.CryptMaxRarity) == "string" and rarityRank[saved.CryptMaxRarity] then
 		STATE.cryptMaxRarity = saved.CryptMaxRarity
 	end
@@ -5190,6 +5204,7 @@ local function saveConfig()
 		PlaceRarities = STATE.placeRarities,
 		PlacementPriority = STATE.placementChoice(STATE.placementPriority),
 		PhoneGame = STATE.phoneChoice or "Critter Merge",
+		TrainingMode = STATE.trainMode or "Auto",
 		PowerPearlAt = type(STATE.powerPearlAt) == "number" and STATE.powerPearlAt or nil,
 		CryptDifficulty = STATE.cryptDifficulty or "Hard",
 		CryptMaxRarity = STATE.cryptMaxRarity or "Common",
@@ -6917,6 +6932,16 @@ local function installHub()
 
 	local training = card(rightColumn, "TRAINING", 1)
 	makeSwitch(training, "Auto Train", "autoTrain")
+	makeDropdown(training, "Train What", function()
+		return STATE.trainMode or "Auto"
+	end, { "Auto", "Strength", "Treadmill" }, function(option)
+		if option == "Auto" or option == "Strength" or option == "Treadmill" then
+			STATE.trainMode = option
+			lastSwitchAt = 0
+			updateFocus()
+			saveConfig()
+		end
+	end, true)
 	makeSwitch(training, "Phone Games", "phoneGames", "Plays the bench phone game you picked for a high score. Bubbles pause while the phone is open.")
 	makeDropdown(training, "Phone Game", function()
 		return STATE.phoneChoice or "Critter Merge"
