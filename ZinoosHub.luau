@@ -7,6 +7,7 @@ local GAMES = {
 	{ name = "Lift Rock For Eggs", file = "LiftRock.luau", placeId = 76731343328034 },
 	{ name = "Deep Fishing", file = "DeepFishing.luau", gameId = 10526853622 },
 	{ name = "Solve The Cube", file = "SolveTheCube.luau", gameId = 10769259605 },
+	{ name = "Climb For Animals Eggs", file = "ClimbAnimals.luau", gameId = 10765490774 },
 }
 
 local entry = nil

@@ -7,6 +7,7 @@ Client automation for Roblox. One loadstring works in every supported game:
 | **Lift Rock For Eggs** (Place ID `76731343328034`) | `games/LiftRock.luau` |
 | **Deep Fishing** (Game ID `10526853622`) | `games/DeepFishing.luau` |
 | **Solve The Cube** (Game ID `10769259605`) | `games/SolveTheCube.luau` |
+| **Climb For Animals Eggs** (Game ID `10765490774`) | `games/ClimbAnimals.luau` |
 
 ## Load it
 
@@ -80,6 +81,25 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
 **Player** has WalkSpeed with **Speed**, Infinite Jump, Noclip, Instant ProximityPrompt, **Fly** with **Fly Speed**, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
 
 Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Your Toggle Key opens and closes the menu; Left Control hides or restores the whole hub.
+
+## Climb For Animals Eggs
+
+Uses the same window as the Lift Rock hub. Pages: Home, Main and Player. Everything is judged against your weakest equipped animal.
+
+**Main**
+
+- **Auto Egg Farm** grabs the best world egg in any biome and carries it home. With **Only Upgrades** on, it only takes eggs that earn more than your weakest equipped animal. It skips the night and the last seconds before it. **Guard Protection** stops guards stunning you while you carry an egg.
+- **Treadmill When Idle** trains speed on your own treadmill whenever no egg is worth taking, and claims the treadmill bonus multipliers as they show up.
+- **Auto Place** places an inventory egg only when it beats your weakest animal or fills an empty team slot, and waits for the server to confirm each one. **Auto Hatch** runs the game's own auto hatch. **Auto Equip Best** re-equips your best animals whenever your inventory changes.
+- **Safe Auto Fuse** puts three matching animals in the Mutate Machine only when the result beats your weakest animal and you can afford it, then collects it. It leaves the machine alone if you filled it yourself.
+- **Auto Rebirth** rebirths once every requirement is met. **Auto Base Upgrade** buys the next base level when you can afford it, and is off by default.
+- **Auto Sell Junk** sells, every **Sell Every (min)**, the items that earn less than your weakest animal. Equipped and placed animals, fuse inputs, mutated items, and any stack that could fuse into a team upgrade are kept.
+
+**Home** shows cash, speed, rebirths and what the hub is doing, an activity log, **Sell Junk Now** and **Equip Best Now**, and the theme box.
+
+**Player** has WalkSpeed, Infinite Jump, Noclip, Instant ProximityPrompt, Fly, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
+
+Settings save per account to `Rayfield/Configurations/ZinoosHub/ClimbAnimals_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Your Toggle Key opens and closes the menu; Left Control hides or restores the whole hub.
 
 ## Lift Rock For Eggs
 
