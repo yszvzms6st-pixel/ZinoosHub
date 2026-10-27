@@ -72,6 +72,7 @@ local STATE = {
 	hatchRarities = {},
 	hatchEggs = {},
 	autoStamina = true,
+	autoTreadmillUpgrade = true,
 	toggleKey = "RightControl",
 	toggleControls = {},
 	themeSwitches = {},
@@ -157,6 +158,7 @@ local FLAG_KEYS = {
 	FarmSpecialOnly = "farmSpecialOnly",
 	PlaceBeatsOnly = "placeBeatsOnly",
 	AutoStamina = "autoStamina",
+	AutoTreadmillUpgrade = "autoTreadmillUpgrade",
 }
 
 local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
@@ -1581,8 +1583,23 @@ local function climbWall(targetY, foot, island, keepGoing)
 		end
 		root.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(-1, 0, 0))
 	end
+	-- Night sends everyone on the wall back to the lobby, and one day is too short to climb the whole
+	-- tower. The server still lets you return to the highest point you reached in this server, so carry
+	-- on from there instead of starting at the bottom again.
+	local resumeY = math.min(climbedTo(halloween), targetY) - 6
+	if resumeY > root.Position.Y + 50 then
+		STATE.status = string.format("Going back to %s on the wall", shortNumber(resumeY))
+		pivotTo(CFrame.lookAt(Vector3.new(foot.X - 1, resumeY, foot.Z - 0.5), Vector3.new(foot.X - 2, resumeY, foot.Z - 0.5)))
+		task.wait(0.4)
+	end
 	local lastY, movedAt = root.Position.Y, os.clock()
-	local deadline = os.clock() + 240
+	-- Stop just before night instead of being thrown back mid-climb.
+	local deadline = os.clock() + 600
+	local nowServer = Workspace:GetServerTimeNow()
+	if not dayCycle.IsNight(nowServer) then
+		deadline = math.min(deadline, os.clock() + dayCycle.GetPhaseTimeLeft(nowServer) - 1)
+	end
+	STATE.climbEndedByNight = false
 	while running() and STATE[keepGoing] == true and root.Parent and root.Position.Y < targetY and os.clock() < deadline do
 		hum:MoveTo(Vector3.new(foot.X - 13, root.Position.Y, foot.Z))
 		STATE.status = string.format("Climbing the wall (%s / %s)", shortNumber(root.Position.Y), shortNumber(targetY))
@@ -1596,6 +1613,8 @@ local function climbWall(targetY, foot, island, keepGoing)
 	end
 	noteClimbed(root.Position.Y, halloween)
 	if root.Position.Y < targetY - 5 then
+		local serverNow = Workspace:GetServerTimeNow()
+		STATE.climbEndedByNight = os.clock() >= deadline - 0.5 or dayCycle.IsNight(serverNow) or dayCycle.GetPhaseTimeLeft(serverNow) < 3
 		return false
 	end
 	-- The server only counts a biome once you stand in it, so climb over the top onto the island.
@@ -1883,8 +1902,14 @@ local function stepFarm()
 			local climbTarget = reachTop >= CLIMB_TOP - 20 and CLIMB_TOP or math.min(CLIMB_TOP, math.max(target.part.Position.Y + 8, reachTop))
 			noteActivity(string.format("%s (%s/s) is in %s, climbing to %s", target.name, shortNumber(target.income), target.biome, shortNumber(climbTarget)))
 			if not climbWall(climbTarget) then
-				climbFailedUntil = os.clock() + CLIMB_RETRY_SECONDS
-				noteActivity("The climb stalled, trying again in 5 minutes")
+				if STATE.climbEndedByNight then
+					-- Progress is kept, so carry on from the same height once night is over.
+					climbFailedUntil = os.clock() + 12
+					noteActivity(string.format("Night stopped the climb at %s, carrying on after it", shortNumber(climbedTo())))
+				else
+					climbFailedUntil = os.clock() + CLIMB_RETRY_SECONDS
+					noteActivity("The climb stalled, trying again in 5 minutes")
+				end
 				goHome()
 				return 1
 			end
@@ -2080,6 +2105,34 @@ function STATE.stepStamina()
 			local now = tonumber(DataController:GetValue("StaminaLevel")) or 0
 			if now > level then
 				noteActivity(string.format("Bought stamina level %d (%s)", now, shortNumber(price)))
+			end
+		end)
+	end
+end
+
+-- The treadmill level sets how fast Speed trains, which rebirths need.
+STATE.treadmillRetryAt = 0
+function STATE.stepTreadmillUpgrade()
+	if STATE.autoTreadmillUpgrade ~= true or os.clock() < STATE.treadmillRetryAt then
+		return
+	end
+	local ok, level = pcall(TreadmillController.GetLevel, TreadmillController)
+	if not ok or type(level) ~= "number" then
+		return
+	end
+	local okCost, cost = pcall(TreadmillController.GetLevelCost, TreadmillController, level + 1)
+	if not okCost or type(cost) ~= "number" then
+		return
+	end
+	if (tonumber(DataController:GetValue("Cash")) or 0) < cost then
+		return
+	end
+	STATE.treadmillRetryAt = os.clock() + 10
+	if pcall(TreadmillController.UpgradeTreadmill, TreadmillController) then
+		task.delay(3, function()
+			local okNow, now = pcall(TreadmillController.GetLevel, TreadmillController)
+			if okNow and type(now) == "number" and now > level then
+				noteActivity(string.format("Upgraded the treadmill to level %d (%s)", now, shortNumber(cost)))
 			end
 		end)
 	end
@@ -3899,6 +3952,7 @@ local function installHub()
 	makeSwitch(progressCard, "Auto Rebirth", "autoRebirth", "Rebirths as soon as every requirement is met")
 	makeSwitch(progressCard, "Auto Base Upgrade", "autoUpgrade", "Buys the next base level when you can afford it")
 	makeSwitch(progressCard, "Auto Stamina", "autoStamina", "Buys the next stamina level when you can afford it, so you can climb to higher biomes")
+	makeSwitch(progressCard, "Auto Treadmill Upgrade", "autoTreadmillUpgrade", "Buys the next treadmill level when you can afford it, so Speed trains faster")
 
 	local eventCard = card(rightColumn, "HALLOWEEN EVENT", 3)
 	makeSwitch(eventCard, "Auto Candy Farm", "candyFarm", "Goes through the portal and kills mini monsters for candy when no egg is worth grabbing")
@@ -4838,6 +4892,7 @@ task.spawn(function()
 		pcall(stepPlace)
 		pcall(stepRebirth)
 		pcall(STATE.stepStamina)
+		pcall(STATE.stepTreadmillUpgrade)
 		pcall(stepUpgrade)
 		task.wait(1.5)
 	end
