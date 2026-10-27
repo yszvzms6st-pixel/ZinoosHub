@@ -1012,7 +1012,7 @@ GuardController.requestCapture = function(self, ...)
 	if
 		STATE.guardSafe == true
 		and STATE.eggFarm == true
-		and (farmMode == "moving-to-egg" or farmMode == "delivering" or LocalPlayer:GetAttribute("CarryingEgg") ~= nil)
+		and (farmMode == "moving-to-egg" or farmMode == "delivering" or farmMode == "climbing" or LocalPlayer:GetAttribute("CarryingEgg") ~= nil)
 	then
 		stats.guardBlocks += 1
 		return nil
@@ -1036,11 +1036,51 @@ hubCleanup(function()
 end)
 
 -- Egg farm and treadmill.
--- The server pulls you back from biomes high up the climb and refuses the pickup, so a biome
--- that throws you out is skipped for a while instead of costing treadmill time every few seconds.
+-- The server only lets you teleport up to the highest point you have climbed in this server, and
+-- refuses the pickup above it. So when an egg worth taking is higher than that, the farm walks to
+-- the climbing wall and climbs to the top once; after that every biome on the tower is reachable.
+-- Anything that still pulls you out (the Halloween dimension has its own ladder) is skipped for a while.
+local goHome
 local failedEggs = {}
+local biomeFailures = {}
 local blockedBiomes = {}
 local BIOME_BLOCK_SECONDS = 600
+local CLIMB_TOP = 12170
+local TOP_ISLAND = Vector3.new(2163, 0, -751)
+local WALL_FOOT = Vector3.new(2213, 0, -754.5)
+local CLIMB_RETRY_SECONDS = 300
+local climbFailedUntil = 0
+genv.ZinoosClimbHeights = type(genv.ZinoosClimbHeights) == "table" and genv.ZinoosClimbHeights or {}
+local function climbedTo()
+	return tonumber(genv.ZinoosClimbHeights[game.JobId]) or 0
+end
+local function noteClimbed(y)
+	if y > climbedTo() then
+		genv.ZinoosClimbHeights[game.JobId] = y
+	end
+end
+STATE.climbedTo = climbedTo
+
+-- Counts climbs you do yourself too.
+do
+	local lastCheck = 0
+	trackConnection(RunService.Heartbeat:Connect(function()
+		if os.clock() - lastCheck < 0.25 then
+			return
+		end
+		lastCheck = os.clock()
+		local character = LocalPlayer.Character
+		local hum = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if hum and root and hum:GetState() == Enum.HumanoidStateType.Climbing then
+			noteClimbed(root.Position.Y)
+		end
+	end))
+end
+
+local function onTower(position)
+	return math.abs(position.Z - WALL_FOOT.Z) < 400 and math.abs(position.X - WALL_FOOT.X) < 400
+end
 
 local function characterParts()
 	local character = LocalPlayer.Character
@@ -1066,13 +1106,27 @@ local function pivotTo(cframe)
 	return true
 end
 
+-- The treadmill switches itself back on 1.25s after you step off if you are still standing on it,
+-- anchoring you in place, so hold its activation off while the farm is away from it.
+local treadmillHold = false
+trackConnection(RunService.Heartbeat:Connect(function()
+	if treadmillHold then
+		TreadmillController.DisableActivation = true
+	end
+end))
+hubCleanup(function()
+	treadmillHold = false
+	TreadmillController.DisableActivation = false
+end)
+
 local function stopTraining()
+	treadmillHold = true
 	if TreadmillController.OnTreadmill then
 		pcall(TreadmillController.DeactivateTreadmill, TreadmillController)
 		waitFor(function()
 			return not TreadmillController.OnTreadmill
 		end, 2)
-		task.wait(1.3)
+		task.wait(0.3)
 	end
 end
 STATE.stopTraining = stopTraining
@@ -1081,6 +1135,8 @@ local function startTraining()
 	if LocalPlayer:GetAttribute("CarryingEgg") ~= nil then
 		return false
 	end
+	treadmillHold = false
+	TreadmillController.DisableActivation = false
 	if TreadmillController.OnTreadmill then
 		return true
 	end
@@ -1154,9 +1210,14 @@ local function bestWorldEgg()
 			local id = egg:GetAttribute("EggId")
 			if id and egg:IsA("Model") and (failedEggs[tostring(id)] or 0) <= now then
 				local income = eggIncome(egg)
-				if income > floor and (not best or income > best.income) then
+				local part = egg.PrimaryPart or egg:FindFirstChildWhichIsA("BasePart", true)
+				local needsClimb = part ~= nil
+					and onTower(part.Position)
+					and climbedTo() < CLIMB_TOP - 10
+					and part.Position.Y > climbedTo() - 3
+				local climbable = not needsClimb or climbFailedUntil <= now
+				if climbable and income > floor and (not best or income > best.income) then
 					local prompt = egg:FindFirstChildWhichIsA("ProximityPrompt", true)
-					local part = egg.PrimaryPart or egg:FindFirstChildWhichIsA("BasePart", true)
 					if prompt and prompt.Enabled and part then
 						best = {
 							egg = egg,
@@ -1166,6 +1227,7 @@ local function bestWorldEgg()
 							income = income,
 							name = egg:GetAttribute("EggName") or egg.Name,
 							biome = biome.Name,
+							needsClimb = needsClimb,
 						}
 					end
 				end
@@ -1217,11 +1279,20 @@ local function collectEgg(target)
 	if not character then
 		return false
 	end
-	pivotTo(CFrame.new(target.part.Position + Vector3.new(0, character:GetExtentsSize().Y / 2 + 1, 0)))
+	local standOn = CFrame.new(target.part.Position + Vector3.new(0, character:GetExtentsSize().Y / 2 + 1, 0))
+	pivotTo(standOn)
 	task.wait(0.35)
-	for _ = 1, 2 do
+	for attempt = 1, 4 do
 		if not target.egg.Parent then
 			break
+		end
+		local _, _, root = characterParts()
+		if attempt > 1 and root and (root.Position - target.part.Position).Magnitude > 200 then
+			break
+		end
+		if attempt > 1 and root and (root.Position - target.part.Position).Magnitude > 8 then
+			pivotTo(standOn)
+			task.wait(0.35)
 		end
 		fireproximityprompt(target.prompt)
 		if waitFor(function()
@@ -1231,14 +1302,21 @@ local function collectEgg(target)
 		end
 	end
 	if LocalPlayer:GetAttribute("CarryingEgg") == nil then
-		failedEggs[target.id] = os.clock() + 5
+		failedEggs[target.id] = os.clock() + 60
+		biomeFailures[target.biome] = (biomeFailures[target.biome] or 0) + 1
 		local _, _, root = characterParts()
-		if root and (root.Position - target.part.Position).Magnitude > 200 then
+		if root and (root.Position - target.part.Position).Magnitude > 200 and onTower(target.part.Position) and biomeFailures[target.biome] == 1 then
+			genv.ZinoosClimbHeights[game.JobId] = 0
+			noteActivity("The game pulled you back from " .. target.biome .. ", so the farm will climb again")
+		elseif biomeFailures[target.biome] >= 3 then
+			biomeFailures[target.biome] = 0
 			blockedBiomes[target.biome] = os.clock() + BIOME_BLOCK_SECONDS
-			noteActivity("The game pulled you out of " .. target.biome .. ", skipping it for 10 minutes")
+			noteActivity("Couldn't pick up eggs in " .. target.biome .. ", skipping it for 10 minutes")
 		end
+		goHome()
 		return false
 	end
+	biomeFailures[target.biome] = 0
 	farmMode = "delivering"
 	STATE.status = "Bringing " .. target.name .. " home"
 	if not deliverEgg() then
@@ -1247,6 +1325,75 @@ local function collectEgg(target)
 	end
 	stats.eggs += 1
 	noteActivity(string.format("Took %s (%s/s) from %s", target.name, shortNumber(target.income), target.biome))
+	return true
+end
+
+local function flatDistance(a, b)
+	return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
+end
+
+function goHome()
+	local base = BaseController:GetBase()
+	local off = base and base:FindFirstChild("TreadmillOffCFrame")
+	local character, hum = characterParts()
+	if off and character then
+		hum:ChangeState(Enum.HumanoidStateType.Running)
+		pivotTo((off:IsA("Model") and off:GetPivot() or off.CFrame) * CFrame.new(0, character:GetExtentsSize().Y / 2 + 1, 0))
+	end
+end
+
+-- Walks to the foot of the wall and climbs it like a player, walking into the truss.
+local function climbWall(targetY)
+	farmMode = "climbing"
+	stopTraining()
+	local character, hum, root = characterParts()
+	if not character then
+		return false
+	end
+	if root.Position.Y < WALL_FOOT.Y + 200 or flatDistance(root.Position, WALL_FOOT) > 6 then
+		STATE.status = "Walking to the climbing wall"
+		local foot = Vector3.new(WALL_FOOT.X, root.Position.Y, WALL_FOOT.Z)
+		local deadline = os.clock() + 20
+		while running() and os.clock() < deadline and flatDistance(root.Position, foot) > 2.5 do
+			hum:MoveTo(foot)
+			task.wait(0.25)
+		end
+		if flatDistance(root.Position, foot) > 4 then
+			return false
+		end
+		root.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(-1, 0, 0))
+	end
+	local lastY, movedAt = root.Position.Y, os.clock()
+	local deadline = os.clock() + 240
+	while running() and STATE.eggFarm == true and root.Parent and root.Position.Y < targetY and os.clock() < deadline do
+		hum:MoveTo(Vector3.new(WALL_FOOT.X - 13, root.Position.Y, WALL_FOOT.Z))
+		STATE.status = string.format("Climbing the wall (%s / %s)", shortNumber(root.Position.Y), shortNumber(targetY))
+		task.wait(0.2)
+		if root.Position.Y > lastY + 5 then
+			lastY, movedAt = root.Position.Y, os.clock()
+			noteClimbed(lastY)
+		elseif os.clock() - movedAt > 6 then
+			break
+		end
+	end
+	noteClimbed(root.Position.Y)
+	if root.Position.Y < targetY - 5 then
+		return false
+	end
+	-- The server only counts a biome once you stand in it, so climb over the top onto the island.
+	STATE.status = "Stepping onto the top island"
+	local zoneBefore = ZoneController.Zone
+	local stepDeadline = os.clock() + 8
+	while running() and os.clock() < stepDeadline do
+		hum:MoveTo(Vector3.new(TOP_ISLAND.X, root.Position.Y, TOP_ISLAND.Z))
+		task.wait(0.25)
+		if hum:GetState() ~= Enum.HumanoidStateType.Climbing and flatDistance(root.Position, WALL_FOOT) > 12 then
+			break
+		end
+	end
+	task.wait(1)
+	noteClimbed(root.Position.Y)
+	noteActivity(string.format("Reached the top island (%s, was %s)", tostring(ZoneController.Zone), tostring(zoneBefore)))
 	return true
 end
 
@@ -1269,6 +1416,16 @@ local function stepFarm()
 		target, why = bestWorldEgg()
 	end
 	if target then
+		if target.needsClimb then
+			noteActivity(string.format("%s (%s/s) is in %s, climbing to the top", target.name, shortNumber(target.income), target.biome))
+			if not climbWall(CLIMB_TOP) then
+				climbFailedUntil = os.clock() + CLIMB_RETRY_SECONDS
+				noteActivity("The climb stalled, trying again in 5 minutes")
+				goHome()
+				return 1
+			end
+			noteActivity("Climbed to the top, every biome is reachable now")
+		end
 		collectEgg(target)
 		return 0.3
 	end
