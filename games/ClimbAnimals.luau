@@ -44,6 +44,7 @@ local STATE = {
 	sellMinutes = 2,
 	candyFarm = false,
 	buyCandyEgg = false,
+	godMode = true,
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -127,6 +128,7 @@ local FLAG_KEYS = {
 	AutoSell = "autoSell",
 	CandyFarm = "candyFarm",
 	BuyCandyEgg = "buyCandyEgg",
+	GodMode = "godMode",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	InfiniteJump = "infiniteJump",
@@ -1426,6 +1428,14 @@ end, 5)
 local robuxEggConfig = require(ReplicatedStorage.src.GameConfiguration.Gameplay.robuxEggConfig)
 local portalConfig = require(ReplicatedStorage.src.GameConfiguration.Gameplay.portalConfig)
 local PORTAL_TRIGGER = Vector3.new(2216, 0, -790)
+-- Monster damage is dealt by the server from distance, so it can't be blocked from the client.
+-- God Mode keeps you alive instead: it breaks off a fight and heals at the dimension's spawn,
+-- where no monsters roam, before your health gets low.
+local SAFE_SPOT = Vector3.new(2327, 80, 4552)
+local RETREAT_BELOW = 0.5
+local BAIL_BELOW = 0.35
+local HEALED_AT = 0.95
+local pulledBackFromMonster = 0
 local candyDrops = {}
 local candyFailedUntil = 0
 stats.kills = 0
@@ -1545,6 +1555,18 @@ local function stepCandy()
 	if not character then
 		return 1
 	end
+	if STATE.godMode == true and hum.Health < hum.MaxHealth * RETREAT_BELOW then
+		hum:UnequipTools()
+		farmMode = "healing"
+		pivotTo(CFrame.new(SAFE_SPOT))
+		local deadline = os.clock() + 75
+		while running() and STATE.candyFarm == true and hum.Parent and hum.Health > 0 and hum.Health < hum.MaxHealth * HEALED_AT and os.clock() < deadline do
+			STATE.status = string.format("God Mode: healing at spawn (%d%%)", math.floor(hum.Health / hum.MaxHealth * 100))
+			task.wait(0.5)
+		end
+		stats.heals = (stats.heals or 0) + 1
+		return 0.2
+	end
 	local monster = nearestMonster(root)
 	if not monster then
 		STATE.candyStatus = "No monsters up right now"
@@ -1565,11 +1587,27 @@ local function stepCandy()
 	STATE.status = "Fighting " .. tostring(monster:GetAttribute("MonsterName") or monster.Name) .. " on " .. tostring(monster:GetAttribute("Island") or "?")
 	local deadline = os.clock() + 12
 	while running() and STATE.candyFarm == true and monster.Parent and not monster:GetAttribute("Dead") and not monster:GetAttribute("Dying") and os.clock() < deadline do
+		if STATE.godMode == true and hum.Health < hum.MaxHealth * BAIL_BELOW then
+			break
+		end
 		local position = monster:GetPivot().Position
 		if (root.Position - position).Magnitude > 5 then
 			local away = Vector3.new(root.Position.X - position.X, 0, root.Position.Z - position.Z)
 			away = away.Magnitude > 0.1 and away.Unit or Vector3.new(1, 0, 0)
 			pivotTo(CFrame.lookAt(position + away * 3.5 + Vector3.new(0, 1, 0), position))
+			task.wait(0.3)
+			-- After a respawn the server can forget the climb and put you back; climb again then.
+			if (root.Position - position).Magnitude > 60 then
+				pulledBackFromMonster += 1
+				if pulledBackFromMonster >= 3 then
+					pulledBackFromMonster = 0
+					genv.ZinoosClimbHeights[heightKey(true)] = 0
+					noteActivity("The game pulled you back from the monster islands, climbing again")
+					return 0.5
+				end
+			else
+				pulledBackFromMonster = 0
+			end
 		end
 		root.CFrame = CFrame.lookAt(root.Position, Vector3.new(position.X, root.Position.Y, position.Z))
 		bat:Activate()
@@ -3550,6 +3588,7 @@ local function installHub()
 	local eventCard = card(rightColumn, "HALLOWEEN EVENT", 3)
 	makeSwitch(eventCard, "Auto Candy Farm", "candyFarm", "Goes through the portal and kills mini monsters for candy when no egg is worth grabbing")
 	makeSwitch(eventCard, "Auto Buy Halloween Egg", "buyCandyEgg", "Spends candy on Halloween eggs, 250 each")
+	makeSwitch(eventCard, "God Mode", "godMode", "Keeps you alive: breaks off fights and heals at spawn before your health gets low")
 
 	local sellCard = card(rightColumn, "SELLING", 2)
 	makeSwitch(sellCard, "Auto Sell Junk", "autoSell", "Sells items earning less than your weakest animal. Keeps mutated ones")
@@ -3766,7 +3805,7 @@ local function installHub()
 			"Fuse · " .. tostring(STATE.fuseStatus),
 			"Rebirth · " .. tostring(STATE.rebirthStatus),
 			"Selling · " .. tostring(STATE.sellStatus),
-			"Halloween · " .. tostring(STATE.candyStatus) .. (stats.candyEggs > 0 and string.format(", %d eggs bought", stats.candyEggs) or ""),
+			"Halloween · " .. tostring(STATE.candyStatus) .. (stats.candyEggs > 0 and string.format(", %d eggs bought", stats.candyEggs) or "") .. ((stats.heals or 0) > 0 and string.format(", healed %d times", stats.heals) or ""),
 			string.format("Session · %d eggs, %d placed, %d fused, %d sold ($%s), %d bonuses", stats.eggs, stats.placed, stats.fused, stats.sold, STATE.shortNumber(stats.soldCash), stats.bonuses),
 			string.format("Guards · %d stuns blocked", stats.guardBlocks),
 		}
