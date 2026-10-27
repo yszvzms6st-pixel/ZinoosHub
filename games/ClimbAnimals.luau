@@ -1036,7 +1036,11 @@ hubCleanup(function()
 end)
 
 -- Egg farm and treadmill.
+-- The server pulls you back from biomes high up the climb and refuses the pickup, so a biome
+-- that throws you out is skipped for a while instead of costing treadmill time every few seconds.
 local failedEggs = {}
+local blockedBiomes = {}
+local BIOME_BLOCK_SECONDS = 600
 
 local function characterParts()
 	local character = LocalPlayer.Character
@@ -1143,9 +1147,10 @@ local function bestWorldEgg()
 	end
 	local _, _, count, maxAnimals, weakest = teamSnapshot()
 	local floor = (STATE.onlyUpgrades == true and weakest and count >= maxAnimals) and weakest.income or 0
-	local now, best = os.clock(), nil
+	local now, best, skipped = os.clock(), nil, nil
 	for _, biome in ipairs(spawned:GetChildren()) do
-		for _, egg in ipairs(biome:GetChildren()) do
+		local blocked = (blockedBiomes[biome.Name] or 0) > now
+		for _, egg in ipairs(blocked and {} or biome:GetChildren()) do
 			local id = egg:GetAttribute("EggId")
 			if id and egg:IsA("Model") and (failedEggs[tostring(id)] or 0) <= now then
 				local income = eggIncome(egg)
@@ -1166,8 +1171,19 @@ local function bestWorldEgg()
 				end
 			end
 		end
+		if blocked and not skipped then
+			for _, egg in ipairs(biome:GetChildren()) do
+				if egg:GetAttribute("EggId") and eggIncome(egg) > floor then
+					skipped = biome.Name
+					break
+				end
+			end
+		end
 	end
-	return best, best and nil or "no egg beats your team"
+	if best then
+		return best
+	end
+	return nil, skipped and ("best egg is in " .. skipped .. ", which the game won't let you teleport to") or "no egg beats your team"
 end
 
 local function deliverEgg()
@@ -1216,6 +1232,11 @@ local function collectEgg(target)
 	end
 	if LocalPlayer:GetAttribute("CarryingEgg") == nil then
 		failedEggs[target.id] = os.clock() + 5
+		local _, _, root = characterParts()
+		if root and (root.Position - target.part.Position).Magnitude > 200 then
+			blockedBiomes[target.biome] = os.clock() + BIOME_BLOCK_SECONDS
+			noteActivity("The game pulled you out of " .. target.biome .. ", skipping it for 10 minutes")
+		end
 		return false
 	end
 	farmMode = "delivering"
