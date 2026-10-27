@@ -42,6 +42,8 @@ local STATE = {
 	autoUpgrade = false,
 	autoSell = true,
 	sellMinutes = 2,
+	candyFarm = false,
+	buyCandyEgg = false,
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -123,6 +125,8 @@ local FLAG_KEYS = {
 	AutoRebirth = "autoRebirth",
 	AutoUpgrade = "autoUpgrade",
 	AutoSell = "autoSell",
+	CandyFarm = "candyFarm",
+	BuyCandyEgg = "buyCandyEgg",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	InfiniteJump = "infiniteJump",
@@ -1050,13 +1054,23 @@ local TOP_ISLAND = Vector3.new(2163, 0, -751)
 local WALL_FOOT = Vector3.new(2213, 0, -754.5)
 local CLIMB_RETRY_SECONDS = 300
 local climbFailedUntil = 0
-genv.ZinoosClimbHeights = type(genv.ZinoosClimbHeights) == "table" and genv.ZinoosClimbHeights or {}
-local function climbedTo()
-	return tonumber(genv.ZinoosClimbHeights[game.JobId]) or 0
+-- The Halloween dimension has its own ladder, and the server keeps a separate height for it.
+local HALLOWEEN_FOOT = Vector3.new(2213, 0, 4553)
+local HALLOWEEN_TOP = 3745
+local HALLOWEEN_ISLAND = Vector3.new(2097, 0, 4551)
+local function inHalloween(position)
+	return position.Z > 3000
 end
-local function noteClimbed(y)
-	if y > climbedTo() then
-		genv.ZinoosClimbHeights[game.JobId] = y
+genv.ZinoosClimbHeights = type(genv.ZinoosClimbHeights) == "table" and genv.ZinoosClimbHeights or {}
+local function heightKey(halloween)
+	return game.JobId .. (halloween and ":halloween" or "")
+end
+local function climbedTo(halloween)
+	return tonumber(genv.ZinoosClimbHeights[heightKey(halloween)]) or 0
+end
+local function noteClimbed(y, halloween)
+	if y > climbedTo(halloween) then
+		genv.ZinoosClimbHeights[heightKey(halloween)] = y
 	end
 end
 STATE.climbedTo = climbedTo
@@ -1073,7 +1087,7 @@ do
 		local hum = character and character:FindFirstChildOfClass("Humanoid")
 		local root = character and character:FindFirstChild("HumanoidRootPart")
 		if hum and root and hum:GetState() == Enum.HumanoidStateType.Climbing then
-			noteClimbed(root.Position.Y)
+			noteClimbed(root.Position.Y, inHalloween(root.Position))
 		end
 	end))
 end
@@ -1342,41 +1356,46 @@ function goHome()
 	end
 end
 
--- Walks to the foot of the wall and climbs it like a player, walking into the truss.
-local function climbWall(targetY)
+-- Walks to the foot of a ladder and climbs it like a player, walking into the truss.
+-- keepGoing is the STATE key that must stay on for the climb to continue.
+local function climbWall(targetY, foot, island, keepGoing)
+	foot = foot or WALL_FOOT
+	island = island or TOP_ISLAND
+	keepGoing = keepGoing or "eggFarm"
+	local halloween = inHalloween(foot)
 	farmMode = "climbing"
 	stopTraining()
 	local character, hum, root = characterParts()
 	if not character then
 		return false
 	end
-	if root.Position.Y < WALL_FOOT.Y + 200 or flatDistance(root.Position, WALL_FOOT) > 6 then
+	if root.Position.Y < 200 or flatDistance(root.Position, foot) > 6 then
 		STATE.status = "Walking to the climbing wall"
-		local foot = Vector3.new(WALL_FOOT.X, root.Position.Y, WALL_FOOT.Z)
+		local goal = Vector3.new(foot.X, root.Position.Y, foot.Z)
 		local deadline = os.clock() + 20
-		while running() and os.clock() < deadline and flatDistance(root.Position, foot) > 2.5 do
-			hum:MoveTo(foot)
+		while running() and os.clock() < deadline and flatDistance(root.Position, goal) > 2.5 do
+			hum:MoveTo(goal)
 			task.wait(0.25)
 		end
-		if flatDistance(root.Position, foot) > 4 then
+		if flatDistance(root.Position, goal) > 4 then
 			return false
 		end
 		root.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(-1, 0, 0))
 	end
 	local lastY, movedAt = root.Position.Y, os.clock()
 	local deadline = os.clock() + 240
-	while running() and STATE.eggFarm == true and root.Parent and root.Position.Y < targetY and os.clock() < deadline do
-		hum:MoveTo(Vector3.new(WALL_FOOT.X - 13, root.Position.Y, WALL_FOOT.Z))
+	while running() and STATE[keepGoing] == true and root.Parent and root.Position.Y < targetY and os.clock() < deadline do
+		hum:MoveTo(Vector3.new(foot.X - 13, root.Position.Y, foot.Z))
 		STATE.status = string.format("Climbing the wall (%s / %s)", shortNumber(root.Position.Y), shortNumber(targetY))
 		task.wait(0.2)
 		if root.Position.Y > lastY + 5 then
 			lastY, movedAt = root.Position.Y, os.clock()
-			noteClimbed(lastY)
+			noteClimbed(lastY, halloween)
 		elseif os.clock() - movedAt > 6 then
 			break
 		end
 	end
-	noteClimbed(root.Position.Y)
+	noteClimbed(root.Position.Y, halloween)
 	if root.Position.Y < targetY - 5 then
 		return false
 	end
@@ -1385,20 +1404,227 @@ local function climbWall(targetY)
 	local zoneBefore = ZoneController.Zone
 	local stepDeadline = os.clock() + 8
 	while running() and os.clock() < stepDeadline do
-		hum:MoveTo(Vector3.new(TOP_ISLAND.X, root.Position.Y, TOP_ISLAND.Z))
+		hum:MoveTo(Vector3.new(island.X, root.Position.Y, island.Z))
 		task.wait(0.25)
-		if hum:GetState() ~= Enum.HumanoidStateType.Climbing and flatDistance(root.Position, WALL_FOOT) > 12 then
+		if hum:GetState() ~= Enum.HumanoidStateType.Climbing and flatDistance(root.Position, foot) > 12 then
 			break
 		end
 	end
 	task.wait(1)
-	noteClimbed(root.Position.Y)
+	noteClimbed(root.Position.Y, halloween)
 	noteActivity(string.format("Reached the top island (%s, was %s)", tostring(ZoneController.Zone), tostring(zoneBefore)))
 	return true
 end
 
+-- Halloween event: kill mini monsters with the Bat for candy, then spend it on Halloween eggs.
+local MiniMonsterService = timed(function()
+	return knit.GetService("MiniMonsterService")
+end, 5)
+local HalloweenShopService = timed(function()
+	return knit.GetService("HalloweenShopService")
+end, 5)
+local robuxEggConfig = require(ReplicatedStorage.src.GameConfiguration.Gameplay.robuxEggConfig)
+local portalConfig = require(ReplicatedStorage.src.GameConfiguration.Gameplay.portalConfig)
+local PORTAL_TRIGGER = Vector3.new(2216, 0, -790)
+local candyDrops = {}
+local candyFailedUntil = 0
+stats.kills = 0
+stats.candyEggs = 0
+STATE.candyStatus = "Off"
+if MiniMonsterService then
+	trackConnection(MiniMonsterService.CandyDropped:Connect(function(list)
+		if type(list) == "table" then
+			for _, drop in pairs(list) do
+				if type(drop) == "table" and drop.Id and typeof(drop.To) == "Vector3" then
+					candyDrops[tostring(drop.Id)] = drop
+				end
+			end
+		end
+	end))
+	trackConnection(MiniMonsterService.CandyCollected:Connect(function(list)
+		if type(list) == "table" then
+			for _, id in pairs(list) do
+				candyDrops[tostring(id)] = nil
+			end
+		end
+	end))
+end
+
+local function candyFarmBlocked()
+	if not MiniMonsterService then
+		return "the game's monster service is missing"
+	end
+	if ReplicatedStorage:GetAttribute(portalConfig.OpenAttribute) ~= true then
+		return "the Halloween portal is closed"
+	end
+	if (tonumber(DataController:GetValue("Speed")) or 0) < (portalConfig.UnlockSpeed or 0) then
+		return "you need " .. shortNumber(portalConfig.UnlockSpeed) .. " speed for the portal"
+	end
+	if candyFailedUntil > os.clock() then
+		return "retrying the Halloween trip soon"
+	end
+	return nil
+end
+
+local function enterHalloween()
+	local character, hum, root = characterParts()
+	if not character then
+		return false
+	end
+	if inHalloween(root.Position) then
+		return true
+	end
+	stopTraining()
+	STATE.status = "Walking into the Halloween portal"
+	local deadline = os.clock() + 15
+	while running() and os.clock() < deadline and not inHalloween(root.Position) do
+		hum:MoveTo(Vector3.new(PORTAL_TRIGGER.X, root.Position.Y, PORTAL_TRIGGER.Z))
+		task.wait(0.25)
+	end
+	task.wait(1.5)
+	return inHalloween(root.Position)
+end
+
+local function nearestMonster(root)
+	local folder = Workspace:FindFirstChild("HalloweenDimension") and Workspace.HalloweenDimension:FindFirstChild("ActiveMiniMonsters")
+	local best, bestDistance = nil, math.huge
+	for _, monster in ipairs(folder and folder:GetChildren() or {}) do
+		if
+			monster:IsA("Model")
+			and not monster:GetAttribute("Boss")
+			and not monster:GetAttribute("Minion")
+			and not monster:GetAttribute("Dead")
+			and not monster:GetAttribute("Dying")
+		then
+			local position = monster:GetPivot().Position
+			if position.Y <= climbedTo(true) + 5 then
+				local distance = (position - root.Position).Magnitude
+				if distance < bestDistance then
+					best, bestDistance = monster, distance
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function collectCandy(character)
+	for id, drop in pairs(candyDrops) do
+		if (tonumber(drop.ExpiresAt) or math.huge) > Workspace:GetServerTimeNow() then
+			pivotTo(CFrame.new(drop.To + Vector3.new(0, character:GetExtentsSize().Y / 2 + 0.5, 0)))
+			waitFor(function()
+				return candyDrops[id] == nil
+			end, 1.5)
+		end
+		candyDrops[id] = nil
+	end
+end
+
+local function stepCandy()
+	local blocked = candyFarmBlocked()
+	if blocked then
+		STATE.candyStatus = "Waiting: " .. blocked
+		return nil
+	end
+	if not enterHalloween() then
+		candyFailedUntil = os.clock() + CLIMB_RETRY_SECONDS
+		noteActivity("Couldn't get through the Halloween portal, trying again in 5 minutes")
+		goHome()
+		return 1
+	end
+	if climbedTo(true) < HALLOWEEN_TOP - 10 then
+		noteActivity("Climbing the Halloween ladder to reach every monster island")
+		if not climbWall(HALLOWEEN_TOP, HALLOWEEN_FOOT, HALLOWEEN_ISLAND, "candyFarm") then
+			candyFailedUntil = os.clock() + CLIMB_RETRY_SECONDS
+			noteActivity("The Halloween climb stalled, trying again in 5 minutes")
+			goHome()
+			return 1
+		end
+	end
+	local character, hum, root = characterParts()
+	if not character then
+		return 1
+	end
+	local monster = nearestMonster(root)
+	if not monster then
+		STATE.candyStatus = "No monsters up right now"
+		STATE.status = "Waiting for Halloween monsters"
+		return 2
+	end
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	local bat = character:FindFirstChild("Bat") or (backpack and backpack:FindFirstChild("Bat"))
+	if not bat then
+		STATE.candyStatus = "No Bat in your backpack"
+		return nil
+	end
+	if bat.Parent ~= character then
+		hum:EquipTool(bat)
+		task.wait(0.2)
+	end
+	farmMode = "candy"
+	STATE.status = "Fighting " .. tostring(monster:GetAttribute("MonsterName") or monster.Name) .. " on " .. tostring(monster:GetAttribute("Island") or "?")
+	local deadline = os.clock() + 12
+	while running() and STATE.candyFarm == true and monster.Parent and not monster:GetAttribute("Dead") and not monster:GetAttribute("Dying") and os.clock() < deadline do
+		local position = monster:GetPivot().Position
+		if (root.Position - position).Magnitude > 5 then
+			local away = Vector3.new(root.Position.X - position.X, 0, root.Position.Z - position.Z)
+			away = away.Magnitude > 0.1 and away.Unit or Vector3.new(1, 0, 0)
+			pivotTo(CFrame.lookAt(position + away * 3.5 + Vector3.new(0, 1, 0), position))
+		end
+		root.CFrame = CFrame.lookAt(root.Position, Vector3.new(position.X, root.Position.Y, position.Z))
+		bat:Activate()
+		task.wait(0.4)
+	end
+	if not monster.Parent or monster:GetAttribute("Dead") or monster:GetAttribute("Dying") then
+		stats.kills += 1
+	end
+	task.wait(0.8)
+	collectCandy(character)
+	STATE.candyStatus = string.format("%s candy, %d kills", shortNumber(DataController:GetValue("Candy")), stats.kills)
+	return 0.2
+end
+
+function STATE.stepCandyShop()
+	if STATE.buyCandyEgg ~= true or not HalloweenShopService then
+		return
+	end
+	local egg = robuxEggConfig.Eggs["Halloween Dimension Egg"]
+	local price = egg and tonumber(egg.CandyPrice) or math.huge
+	if (tonumber(DataController:GetValue("Candy")) or 0) < price then
+		return
+	end
+	local ok, success, message = pcall(function()
+		local result, extra = HalloweenShopService:BuyCandyEgg()
+		if type(result) == "table" and type(result.await) == "function" then
+			local _, value, more = result:await()
+			return value, more
+		end
+		return result, extra
+	end)
+	if ok and success then
+		stats.candyEggs += 1
+		noteActivity("Bought a Halloween egg for " .. shortNumber(price) .. " candy")
+	elseif ok and type(message) == "string" then
+		noteActivity("Halloween egg: " .. message)
+	end
+end
+
+-- Calling into the game's own modules drops this thread's identity; get it back before the
+-- client helpers below connect to CoreGui-level signals.
+pcall(setthreadidentity, 8)
+
 local function stepFarm()
-	if STATE.eggFarm ~= true and STATE.treadmill ~= true then
+	if STATE.candyFarm ~= true then
+		STATE.candyStatus = "Off"
+		local character, hum, root = characterParts()
+		if character and character:FindFirstChild("Bat") and farmMode == "candy" then
+			hum:UnequipTools()
+		end
+		if root and inHalloween(root.Position) and LocalPlayer:GetAttribute("CarryingEgg") == nil then
+			goHome()
+		end
+	end
+	if STATE.eggFarm ~= true and STATE.treadmill ~= true and STATE.candyFarm ~= true then
 		farmMode = "idle"
 		STATE.status = "Idle"
 		stopTraining()
@@ -1426,8 +1652,18 @@ local function stepFarm()
 			end
 			noteActivity("Climbed to the top, every biome is reachable now")
 		end
+		local character, hum = characterParts()
+		if character and character:FindFirstChild("Bat") then
+			hum:UnequipTools()
+		end
 		collectEgg(target)
 		return 0.3
+	end
+	if STATE.candyFarm == true then
+		local pause = stepCandy()
+		if pause then
+			return pause
+		end
 	end
 	if STATE.treadmill == true then
 		farmMode = "training"
@@ -3311,6 +3547,10 @@ local function installHub()
 	makeSwitch(progressCard, "Auto Rebirth", "autoRebirth", "Rebirths as soon as every requirement is met")
 	makeSwitch(progressCard, "Auto Base Upgrade", "autoUpgrade", "Buys the next base level when you can afford it")
 
+	local eventCard = card(rightColumn, "HALLOWEEN EVENT", 3)
+	makeSwitch(eventCard, "Auto Candy Farm", "candyFarm", "Goes through the portal and kills mini monsters for candy when no egg is worth grabbing")
+	makeSwitch(eventCard, "Auto Buy Halloween Egg", "buyCandyEgg", "Spends candy on Halloween eggs, 250 each")
+
 	local sellCard = card(rightColumn, "SELLING", 2)
 	makeSwitch(sellCard, "Auto Sell Junk", "autoSell", "Sells items earning less than your weakest animal. Keeps mutated ones")
 	makeDropdown(sellCard, "Sell Every (min)", function()
@@ -3526,6 +3766,7 @@ local function installHub()
 			"Fuse · " .. tostring(STATE.fuseStatus),
 			"Rebirth · " .. tostring(STATE.rebirthStatus),
 			"Selling · " .. tostring(STATE.sellStatus),
+			"Halloween · " .. tostring(STATE.candyStatus) .. (stats.candyEggs > 0 and string.format(", %d eggs bought", stats.candyEggs) or ""),
 			string.format("Session · %d eggs, %d placed, %d fused, %d sold ($%s), %d bonuses", stats.eggs, stats.placed, stats.fused, stats.sold, STATE.shortNumber(stats.soldCash), stats.bonuses),
 			string.format("Guards · %d stuns blocked", stats.guardBlocks),
 		}
@@ -4249,6 +4490,13 @@ task.spawn(function()
 		while running() and os.clock() < waitUntil do
 			task.wait(1)
 		end
+	end
+end)
+
+task.spawn(function()
+	while running() do
+		pcall(STATE.stepCandyShop)
+		task.wait(2)
 	end
 end)
 

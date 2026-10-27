@@ -93,6 +93,7 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player. Everyth
 - **Auto Place** places an inventory egg only when it beats your weakest animal or fills an empty team slot, and waits for the server to confirm each one. **Auto Hatch** runs the game's own auto hatch. **Auto Equip Best** re-equips your best animals whenever your inventory changes.
 - **Safe Auto Fuse** puts three matching animals in the Mutate Machine only when the result beats your weakest animal and you can afford it, then collects it. It leaves the machine alone if you filled it yourself.
 - **Auto Rebirth** rebirths once every requirement is met. **Auto Base Upgrade** buys the next base level when you can afford it, and is off by default.
+- **Halloween Event.** **Auto Candy Farm** goes through the Halloween portal (it needs the portal open and its 2.5M speed), climbs the Halloween ladder once, and kills mini monsters with your Bat, collecting the candy they drop. It only runs when no egg is worth grabbing, and an egg worth grabbing still comes first. **Auto Buy Halloween Egg** spends candy on the Halloween Dimension Egg, 250 each. Both are off by default.
 - **Auto Sell Junk** sells, every **Sell Every (min)**, the items that earn less than your weakest animal. Equipped and placed animals, fuse inputs, mutated items, and any stack that could fuse into a team upgrade are kept.
 
 **Home** shows cash, speed, rebirths and what the hub is doing, an activity log, **Sell Junk Now** and **Equip Best Now**, and the theme box.
