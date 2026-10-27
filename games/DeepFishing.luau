@@ -5241,6 +5241,22 @@ local function installHub()
 		end
 	end))
 
+	do
+		local discordInvite = "https://discord.gg/94pC3T6NZG"
+		local communityCard = card(homePage, "COMMUNITY", 2)
+		local communityNote = label(communityCard, "Join the ZinoosHub Discord for updates, support and new games.", 13, muted, Enum.Font.Gotham, 36)
+		communityNote.LayoutOrder = 1
+		local communityResult = label(communityCard, "", 13, accent, Enum.Font.Gotham, 18)
+		communityResult.LayoutOrder = 3
+		actionButton(communityCard, "Copy Discord Invite", 2, true, function()
+			if typeof(setclipboard) == "function" and pcall(setclipboard, discordInvite) then
+				communityResult.Text = "Invite copied. Paste it in your browser."
+			else
+				communityResult.Text = discordInvite
+			end
+		end)
+	end
+
 	local saveCard = card(homePage, "CONFIG", 10)
 	local saveNote = label(saveCard, "Saves the toggles, Sell At, theme and hub size for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
 	saveNote.LayoutOrder = 1
