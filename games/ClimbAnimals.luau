@@ -58,6 +58,20 @@ local STATE = {
 	disable3d = false,
 	fpsBoost = false,
 	hideOnStart = false,
+	farmPickMode = "Best egg",
+	farmRarities = {},
+	farmBiomes = {},
+	farmEggs = {},
+	farmSpecialOnly = false,
+	farmMinIncome = "Any",
+	placePickMode = "Best for team",
+	placeRarities = {},
+	placeEggs = {},
+	placeBeatsOnly = true,
+	hatchPickMode = "Everything",
+	hatchRarities = {},
+	hatchEggs = {},
+	autoStamina = true,
 	toggleKey = "RightControl",
 	toggleControls = {},
 	themeSwitches = {},
@@ -140,12 +154,34 @@ local FLAG_KEYS = {
 	Disable3d = "disable3d",
 	FpsBoost = "fpsBoost",
 	HideOnStart = "hideOnStart",
+	FarmSpecialOnly = "farmSpecialOnly",
+	PlaceBeatsOnly = "placeBeatsOnly",
+	AutoStamina = "autoStamina",
 }
 
 local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
+STATE.FARM_MODES = { "Best egg", "My picks" }
+STATE.PLACE_MODES = { "Best for team", "My picks" }
+STATE.HATCH_MODES = { "Everything", "My picks" }
+STATE.MIN_INCOME = { Any = 0, ["1K"] = 1e3, ["100K"] = 1e5, ["1M"] = 1e6, ["100M"] = 1e8, ["1B"] = 1e9, ["100B"] = 1e11, ["1T"] = 1e12, ["100T"] = 1e14 }
+STATE.MIN_INCOME_OPTIONS = { "Any", "1K", "100K", "1M", "100M", "1B", "100B", "1T", "100T" }
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
+	FarmPickMode = { key = "farmPickMode", options = STATE.FARM_MODES },
+	PlacePickMode = { key = "placePickMode", options = STATE.PLACE_MODES },
+	HatchPickMode = { key = "hatchPickMode", options = STATE.HATCH_MODES },
+	FarmMinIncome = { key = "farmMinIncome", options = STATE.MIN_INCOME_OPTIONS },
+}
+-- Picked egg names, rarities and biomes, saved as lists of strings.
+STATE.LIST_KEYS = {
+	FarmRarities = "farmRarities",
+	FarmBiomes = "farmBiomes",
+	FarmEggs = "farmEggs",
+	PlaceRarities = "placeRarities",
+	PlaceEggs = "placeEggs",
+	HatchRarities = "hatchRarities",
+	HatchEggs = "hatchEggs",
 }
 local NUMBERS = { FlySpeed = { "flySpeed", 10, 300 }, SellMinutes = { "sellMinutes", 1, 30 } }
 STATE.defaultTheme = {
@@ -756,6 +792,17 @@ local function loadSaved()
 			STATE[spec[1]] = math.clamp(saved[flag], spec[2], spec[3])
 		end
 	end
+	for flag, key in pairs(STATE.LIST_KEYS) do
+		if type(saved[flag]) == "table" then
+			local list = {}
+			for _, value in ipairs(saved[flag]) do
+				if type(value) == "string" then
+					table.insert(list, value)
+				end
+			end
+			STATE[key] = list
+		end
+	end
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
 	end
@@ -803,6 +850,9 @@ local function saveConfig()
 	end
 	for flag, spec in pairs(NUMBERS) do
 		payload[flag] = STATE[spec[1]]
+	end
+	for flag, key in pairs(STATE.LIST_KEYS) do
+		payload[flag] = type(STATE[key]) == "table" and STATE[key] or {}
 	end
 	local ok, encoded = pcall(function()
 		return game:GetService("HttpService"):JSONEncode(payload)
@@ -932,6 +982,106 @@ local rebirthConfig = require(ReplicatedStorage.src.GameConfiguration.Economy.re
 local baseUpgradeConfig = require(ReplicatedStorage.src.GameConfiguration.Economy.baseUpgradeConfig)
 local sellConfig = require(ReplicatedStorage.src.GameConfiguration.Economy.animalSellConfig)
 
+-- Egg picks and stamina reach. Kept on STATE so this big chunk doesn't run out of locals.
+STATE.eggCfg = require(ReplicatedStorage.src.GameConfiguration.Gameplay.eggConfig)
+STATE.zoneCfg = require(ReplicatedStorage.src.GameConfiguration.Gameplay.zoneConfig)
+STATE.staminaCfg = require(ReplicatedStorage.src.GameConfiguration.Economy.staminaUpgradeConfig)
+STATE.staminaController = controller("StaminaUpgradeController")
+
+function STATE.eggRarity(name)
+	local entry = type(STATE.eggCfg.Eggs) == "table" and STATE.eggCfg.Eggs[name]
+	return type(entry) == "table" and entry.Rarity or nil
+end
+
+-- Rarities ordered by how much their weakest egg earns, so the list reads Common up to the rarest.
+do
+	local cheapest, names, biomeSet = {}, {}, {}
+	for name, entry in pairs(type(STATE.eggCfg.Eggs) == "table" and STATE.eggCfg.Eggs or {}) do
+		if type(entry) == "table" and type(entry.Rarity) == "string" then
+			local ok, income = pcall(earningCurve.GetCashPerSecond, name, 1, "Normal", nil)
+			income = ok and tonumber(income) or 0
+			cheapest[entry.Rarity] = math.min(cheapest[entry.Rarity] or math.huge, income)
+			table.insert(names, name)
+			if type(entry.Biome) == "string" and type(STATE.zoneCfg[entry.Biome]) == "table" then
+				biomeSet[entry.Biome] = tonumber(STATE.zoneCfg[entry.Biome].Height) or 0
+			end
+		end
+	end
+	STATE.RARITY_OPTIONS = {}
+	for rarity in pairs(cheapest) do
+		table.insert(STATE.RARITY_OPTIONS, rarity)
+	end
+	table.sort(STATE.RARITY_OPTIONS, function(a, b)
+		return cheapest[a] < cheapest[b]
+	end)
+	table.sort(names)
+	STATE.EGG_OPTIONS = names
+	STATE.BIOME_OPTIONS = {}
+	for biome in pairs(biomeSet) do
+		table.insert(STATE.BIOME_OPTIONS, biome)
+	end
+	table.sort(STATE.BIOME_OPTIONS, function(a, b)
+		return biomeSet[a] < biomeSet[b]
+	end)
+end
+
+function STATE.listHas(list, value)
+	if type(list) ~= "table" then
+		return false
+	end
+	for _, item in ipairs(list) do
+		if item == value then
+			return true
+		end
+	end
+	return false
+end
+
+function STATE.toggleListItem(key, value)
+	local list = type(STATE[key]) == "table" and STATE[key] or {}
+	local index = table.find(list, value)
+	if index then
+		table.remove(list, index)
+	else
+		table.insert(list, value)
+	end
+	STATE[key] = list
+end
+
+-- prefix is "farm", "place" or "hatch". An empty pick list means "any".
+function STATE.eggMatches(prefix, name, rarity, biome, variant, mutation)
+	local rarities, eggs, biomes = STATE[prefix .. "Rarities"], STATE[prefix .. "Eggs"], STATE[prefix .. "Biomes"]
+	if type(rarities) == "table" and #rarities > 0 and not STATE.listHas(rarities, rarity) then
+		return false
+	end
+	if type(eggs) == "table" and #eggs > 0 and not STATE.listHas(eggs, name) then
+		return false
+	end
+	if biome and type(biomes) == "table" and #biomes > 0 and not STATE.listHas(biomes, biome) then
+		return false
+	end
+	if prefix == "farm" and STATE.farmSpecialOnly == true then
+		local special = (variant ~= nil and variant ~= "" and variant ~= "Normal") or (mutation ~= nil and mutation ~= "")
+		if not special then
+			return false
+		end
+	end
+	return true
+end
+
+-- The highest biome this account's stamina can climb to, as a height. Unknown means no limit.
+function STATE.reachHeight()
+	local level = tonumber(DataController:GetValue("StaminaLevel")) or 0
+	local ok, zone = pcall(STATE.staminaCfg.GetReachableBiome, level)
+	local entry = ok and type(zone) == "string" and STATE.zoneCfg[zone]
+	return type(entry) == "table" and tonumber(entry.Height) or math.huge
+end
+
+function STATE.biomeHeight(biome)
+	local entry = STATE.zoneCfg[biome]
+	return type(entry) == "table" and tonumber(entry.Height) or nil
+end
+
 local function shortNumber(value)
 	value = tonumber(value) or 0
 	local units = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc" }
@@ -1039,6 +1189,34 @@ AutoHatchController.IsEnabled = function(...)
 end
 hubCleanup(function()
 	AutoHatchController.IsEnabled = originalHatchEnabled
+end)
+
+-- Hatch picks: the game's auto hatch asks nextReadyEgg which placed egg to hatch next, so only
+-- hand it eggs that match the picks. Placed egg ids start with the egg's name.
+STATE.originalNextReadyEgg = AutoHatchController.nextReadyEgg
+AutoHatchController.nextReadyEgg = function(self, ...)
+	if STATE.autoHatch ~= true or STATE.hatchPickMode ~= "My picks" then
+		return STATE.originalNextReadyEgg(self, ...)
+	end
+	local placed = DataController:GetValue("PlacedEggs")
+	if typeof(placed) ~= "table" then
+		return nil
+	end
+	local now = os.clock()
+	local pending = self.EggHatchController and self.EggHatchController.Pending or {}
+	for ref, data in pairs(placed) do
+		local tried = type(self.Tried) == "table" and self.Tried[ref]
+		if typeof(data) == "table" and data.CanHatch and not pending[ref] and (not tried or now - tried >= 5) then
+			local name = string.split(tostring(ref), "_")[1]
+			if STATE.eggMatches("hatch", name, STATE.eggRarity(name), nil, data.Variant, data.Mutation) then
+				return ref
+			end
+		end
+	end
+	return nil
+end
+hubCleanup(function()
+	AutoHatchController.nextReadyEgg = STATE.originalNextReadyEgg
 end)
 
 -- Egg farm and treadmill.
@@ -1218,11 +1396,18 @@ local function bestWorldEgg()
 		return nil, "no eggs spawned"
 	end
 	local _, _, count, maxAnimals, weakest = teamSnapshot()
-	local floor = (STATE.onlyUpgrades == true and weakest and count >= maxAnimals) and weakest.income or 0
+	local picks = STATE.farmPickMode == "My picks"
+	-- In My picks mode the player chose what they want, so Only Upgrades doesn't apply.
+	local floor = (not picks and STATE.onlyUpgrades == true and weakest and count >= maxAnimals) and weakest.income or 0
+	floor = math.max(floor, STATE.MIN_INCOME[STATE.farmMinIncome] or 0)
+	local reach = STATE.reachHeight()
 	local now, best, skipped = os.clock(), nil, nil
 	for _, biome in ipairs(spawned:GetChildren()) do
 		local blocked = (blockedBiomes[biome.Name] or 0) > now
-		for _, egg in ipairs(blocked and {} or biome:GetChildren()) do
+		local biomeHeight = STATE.biomeHeight(biome.Name)
+		-- Skip biomes higher than this account's stamina can climb.
+		local outOfReach = biomeHeight ~= nil and biomeHeight > reach
+		for _, egg in ipairs((blocked or outOfReach) and {} or biome:GetChildren()) do
 			local id = egg:GetAttribute("EggId")
 			if id and egg:IsA("Model") and (failedEggs[tostring(id)] or 0) <= now then
 				local income = eggIncome(egg)
@@ -1232,7 +1417,16 @@ local function bestWorldEgg()
 					and climbedTo() < CLIMB_TOP - 10
 					and part.Position.Y > climbedTo() - 3
 				local climbable = not needsClimb or climbFailedUntil <= now
-				if climbable and income > floor and (not best or income > best.income) then
+				local wanted = not picks
+					or STATE.eggMatches(
+						"farm",
+						egg:GetAttribute("EggName") or egg.Name,
+						egg:GetAttribute("Rarity") or STATE.eggRarity(egg:GetAttribute("EggName") or egg.Name),
+						biome.Name,
+						egg:GetAttribute("Variant"),
+						egg:GetAttribute("Mutation")
+					)
+				if climbable and wanted and income > floor and (not best or income > best.income) then
 					local prompt = egg:FindFirstChildWhichIsA("ProximityPrompt", true)
 					if prompt and prompt.Enabled and part then
 						best = {
@@ -1261,7 +1455,10 @@ local function bestWorldEgg()
 	if best then
 		return best
 	end
-	return nil, skipped and ("best egg is in " .. skipped .. ", which the game won't let you teleport to") or "no egg beats your team"
+	if skipped then
+		return nil, "best egg is in " .. skipped .. ", which the game won't let you teleport to"
+	end
+	return nil, picks and "no egg matches your picks" or "no egg beats your team"
 end
 
 local function deliverEgg()
@@ -1681,14 +1878,17 @@ local function stepFarm()
 	end
 	if target then
 		if target.needsClimb then
-			noteActivity(string.format("%s (%s/s) is in %s, climbing to the top", target.name, shortNumber(target.income), target.biome))
-			if not climbWall(CLIMB_TOP) then
+			-- Climb only as high as this account can reach. At max stamina that is the top, as before.
+			local reachTop = STATE.reachHeight()
+			local climbTarget = reachTop >= CLIMB_TOP - 20 and CLIMB_TOP or math.min(CLIMB_TOP, math.max(target.part.Position.Y + 8, reachTop))
+			noteActivity(string.format("%s (%s/s) is in %s, climbing to %s", target.name, shortNumber(target.income), target.biome, shortNumber(climbTarget)))
+			if not climbWall(climbTarget) then
 				climbFailedUntil = os.clock() + CLIMB_RETRY_SECONDS
 				noteActivity("The climb stalled, trying again in 5 minutes")
 				goHome()
 				return 1
 			end
-			noteActivity("Climbed to the top, every biome is reachable now")
+			noteActivity(climbTarget >= CLIMB_TOP and "Climbed to the top, every biome is reachable now" or "Climbed high enough for " .. target.biome)
 		end
 		local character, hum = characterParts()
 		if character and character:FindFirstChild("Bat") then
@@ -1763,17 +1963,25 @@ local function stepPlace()
 		placedCount += 1
 	end
 	local openSlots = math.max(0, maxAnimals - count - placedCount)
+	local picks = STATE.placePickMode == "My picks"
 	local best
 	for ref, item in pairs(inventory) do
 		if type(item) == "table" and item.Handler == "Egg" and (placeCooldown[ref] or 0) <= os.clock() then
 			local income = itemIncome(item)
-			if (openSlots > 0 or (weakest and income > weakest.income)) and (not best or income > best.income) then
+			local beatsTeam = openSlots > 0 or (weakest and income > weakest.income)
+			local wanted = beatsTeam
+			if picks then
+				local _, variant, mutation = itemFields(item)
+				wanted = STATE.eggMatches("place", item.Name, STATE.eggRarity(item.Name), nil, variant, mutation)
+					and (STATE.placeBeatsOnly ~= true or beatsTeam)
+			end
+			if wanted and (not best or income > best.income) then
 				best = { ref = ref, income = income, name = item.Name }
 			end
 		end
 	end
 	if not best then
-		STATE.placeStatus = "No egg beats your team"
+		STATE.placeStatus = picks and "No egg matches your picks" or "No egg beats your team"
 		return
 	end
 	local spot = freeSpot()
@@ -1845,6 +2053,35 @@ local function stepRebirth()
 	if pcall(RebirthController.Request, RebirthController, false) then
 		stats.rebirths += 1
 		noteActivity("Rebirth " .. tostring(rebirths + 1))
+	end
+end
+
+-- Stamina decides how high you can climb, so new accounts need it to reach better biomes.
+STATE.staminaRetryAt = 0
+function STATE.stepStamina()
+	if STATE.autoStamina ~= true or os.clock() < STATE.staminaRetryAt then
+		return
+	end
+	local controllerNow = STATE.staminaController
+	if not controllerNow or controllerNow.Pending then
+		return
+	end
+	local level = tonumber(DataController:GetValue("StaminaLevel")) or 0
+	local ok, price = pcall(STATE.staminaCfg.GetPrice, level)
+	if not ok or type(price) ~= "number" then
+		return
+	end
+	if (tonumber(DataController:GetValue("Cash")) or 0) < price then
+		return
+	end
+	STATE.staminaRetryAt = os.clock() + 10
+	if pcall(controllerNow.Purchase, controllerNow) then
+		task.delay(3, function()
+			local now = tonumber(DataController:GetValue("StaminaLevel")) or 0
+			if now > level then
+				noteActivity(string.format("Bought stamina level %d (%s)", now, shortNumber(price)))
+			end
+		end)
 	end
 end
 
@@ -2052,6 +2289,16 @@ local function sellPlan()
 	for ref, item in pairs(inventory) do
 		if type(item) == "table" and not keep[ref] then
 			local _, variant, mutation = itemFields(item)
+			-- Never sell eggs the player picked to farm or place.
+			if item.Handler == "Egg" then
+				local rarity = STATE.eggRarity(item.Name)
+				if
+					(STATE.farmPickMode == "My picks" and STATE.eggMatches("farm", item.Name, rarity, nil, variant, mutation))
+					or (STATE.placePickMode == "My picks" and STATE.eggMatches("place", item.Name, rarity, nil, variant, mutation))
+				then
+					continue
+				end
+			end
 			if
 				itemIncome(item) < weakest.income
 				and (mutation == nil or mutation == "")
@@ -3568,22 +3815,90 @@ local function installHub()
 	local leftColumn = column(1)
 	local rightColumn = column(2)
 	local farmCard = card(leftColumn, "EGG FARM", 1)
-	makeSwitch(farmCard, "Auto Egg Farm", "eggFarm", "Grabs the best egg in any biome and brings it home")
-	makeSwitch(farmCard, "Only Upgrades", "onlyUpgrades", "Only takes eggs that beat your weakest team animal")
+	makeSwitch(farmCard, "Auto Egg Farm", "eggFarm", "Grabs an egg you can reach and brings it home")
+	makeSwitch(farmCard, "Only Upgrades", "onlyUpgrades", "Best egg mode: only takes eggs that beat your weakest team animal")
 	makeSwitch(farmCard, "Guard Protection", "guardSafe", "Guards can't stun you while you carry an egg")
+	do
+		-- Picks: an empty list means any.
+		STATE.pickLabel = function(list)
+			if type(list) ~= "table" or #list == 0 then
+				return "Any"
+			elseif #list <= 2 then
+				return table.concat(list, ", ")
+			end
+			return #list .. " picked"
+		end
+		local function pickList(cardFrame, title, key, options)
+			makeMultiDropdown(cardFrame, title, function()
+				return STATE[key]
+			end, options, function(option)
+				STATE.toggleListItem(key, option)
+				saveConfig()
+			end, STATE.pickLabel)
+		end
+		STATE.pickList = pickList
+		makeDropdown(farmCard, "Farm Mode", function()
+			return STATE.farmPickMode
+		end, STATE.FARM_MODES, function(option)
+			STATE.farmPickMode = option
+			saveConfig()
+		end)
+		pickList(farmCard, "Farm Rarities", "farmRarities", STATE.RARITY_OPTIONS)
+		pickList(farmCard, "Farm Biomes", "farmBiomes", STATE.BIOME_OPTIONS)
+		pickList(farmCard, "Farm Eggs", "farmEggs", STATE.EGG_OPTIONS)
+		makeSwitch(farmCard, "Special Eggs Only", "farmSpecialOnly", "My picks mode: only Golden, Diamond, Ruby, Rainbow or mutated eggs")
+		makeDropdown(farmCard, "Min Income /s", function()
+			return STATE.farmMinIncome
+		end, STATE.MIN_INCOME_OPTIONS, function(option)
+			STATE.farmMinIncome = option
+			saveConfig()
+		end)
+	end
 
 	local trainCard = card(leftColumn, "TRAINING", 2)
 	makeSwitch(trainCard, "Treadmill When Idle", "treadmill", "Trains speed when no egg is worth taking, and claims the bonus")
 
 	local teamCard = card(leftColumn, "TEAM", 3)
-	makeSwitch(teamCard, "Auto Place", "autoPlace", "Places an egg only if it beats your weakest animal")
+	makeSwitch(teamCard, "Auto Place", "autoPlace", "Places the eggs you choose below on your base")
+	do
+		makeDropdown(teamCard, "Place Mode", function()
+			return STATE.placePickMode
+		end, STATE.PLACE_MODES, function(option)
+			STATE.placePickMode = option
+			saveConfig()
+		end)
+		STATE.pickList(teamCard, "Place Rarities", "placeRarities", STATE.RARITY_OPTIONS)
+		STATE.pickList(teamCard, "Place Eggs", "placeEggs", STATE.EGG_OPTIONS)
+		makeSwitch(teamCard, "Only If It Beats Team", "placeBeatsOnly", "My picks mode: only places an egg that beats your weakest animal")
+	end
 	makeSwitch(teamCard, "Auto Hatch", "autoHatch", "Hatches placed eggs as soon as they're ready")
+	do
+		makeDropdown(teamCard, "Hatch Mode", function()
+			return STATE.hatchPickMode
+		end, STATE.HATCH_MODES, function(option)
+			STATE.hatchPickMode = option
+			saveConfig()
+		end)
+		STATE.pickList(teamCard, "Hatch Rarities", "hatchRarities", STATE.RARITY_OPTIONS)
+		STATE.pickList(teamCard, "Hatch Eggs", "hatchEggs", STATE.EGG_OPTIONS)
+	end
 	makeSwitch(teamCard, "Auto Equip Best", "equipBest", "Re-equips your best animals when your inventory changes")
+	-- Switch rows default to order 1 and dropdown rows to 2; keep these cards in build order instead.
+	for _, cardFrame in ipairs({ farmCard, teamCard }) do
+		local order = 0
+		for _, child in ipairs(cardFrame:GetChildren()) do
+			if child:IsA("GuiObject") and child.LayoutOrder ~= 0 then
+				order += 1
+				child.LayoutOrder = order
+			end
+		end
+	end
 
 	local progressCard = card(rightColumn, "PROGRESS", 1)
 	makeSwitch(progressCard, "Safe Auto Fuse", "autoFuse", "Fuses 3 matching animals only when the result beats your team")
 	makeSwitch(progressCard, "Auto Rebirth", "autoRebirth", "Rebirths as soon as every requirement is met")
 	makeSwitch(progressCard, "Auto Base Upgrade", "autoUpgrade", "Buys the next base level when you can afford it")
+	makeSwitch(progressCard, "Auto Stamina", "autoStamina", "Buys the next stamina level when you can afford it, so you can climb to higher biomes")
 
 	local eventCard = card(rightColumn, "HALLOWEEN EVENT", 3)
 	makeSwitch(eventCard, "Auto Candy Farm", "candyFarm", "Goes through the portal and kills mini monsters for candy when no egg is worth grabbing")
@@ -4522,6 +4837,7 @@ task.spawn(function()
 	while running() do
 		pcall(stepPlace)
 		pcall(stepRebirth)
+		pcall(STATE.stepStamina)
 		pcall(stepUpgrade)
 		task.wait(1.5)
 	end
