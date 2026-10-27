@@ -150,6 +150,3 @@ If a game update removes something one feature needs, that feature turns off and
 
 The script expects an executor that provides `request`, `filtergc`, `getupvalues`, `getconnections`, `fireproximityprompt`, `readfile`, and `writefile`. `request` is what Discord alerts use. If it is missing, the Test Webhook button says so instead of failing quietly.
 
-## Rules
-
-Automation can break the game's rules. It is not guaranteed to be ban safe. Use it at your own risk.
