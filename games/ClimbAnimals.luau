@@ -396,6 +396,7 @@ function STATE.readTheme(raw)
 end
 
 STATE.hubSizes = { Compact = 0.8, Normal = 0.9, Large = 1 }
+STATE.phoneHubSizes = { Compact = { 0.75, 0.64, 0.74 }, Normal = { 0.85, 0.72, 0.8 }, Large = { 1, 0.84, 0.76 } }
 
 function STATE.hubScaleValue()
 	return STATE.hubSizes[STATE.hubSize or "Compact"] or STATE.hubSizes.Compact
@@ -2706,11 +2707,15 @@ local function installHub()
 		local compact = phone or view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
 		local margin = (compact or fullMode) and 0 or 16
 		local baseW, baseH
+		local phoneScale = 1
 		if phone and not fullMode then
-			baseW = math.max(280, math.floor(view.X * 0.84))
-			baseH = math.max(320, math.floor(view.Y * 0.76))
-			baseW = math.min(baseW, math.max(280, view.X - 20))
-			baseH = math.min(baseH, math.max(280, view.Y - 20))
+			-- Phones get their own size table: scale, share of screen width, share of screen height.
+			local fit = STATE.phoneHubSizes[STATE.hubSize or "Compact"] or STATE.phoneHubSizes.Compact
+			phoneScale = fit[1]
+			local pixelsW = math.min(math.floor(view.X * fit[2]), view.X - 20)
+			local pixelsH = math.min(math.floor(view.Y * fit[3]), view.Y - 20)
+			baseW = math.max(280, math.floor(pixelsW / phoneScale))
+			baseH = math.max(300, math.floor(pixelsH / phoneScale))
 		elseif compact or fullMode then
 			baseW = math.max(320, view.X - margin * 2)
 			baseH = math.max(480, view.Y - margin * 2)
@@ -2721,6 +2726,9 @@ local function installHub()
 		end
 		holder.Size = UDim2.fromOffset(baseW, baseH)
 		local desktopScale = (phone or compact or fullMode) and 1 or (STATE.hubScaleValue and STATE.hubScaleValue() or 1)
+		if phone and not fullMode then
+			desktopScale = phoneScale
+		end
 		uiScale.Scale = desktopScale
 		if launcher then
 			launcher.Size = phone and UDim2.fromOffset(232, 120) or UDim2.fromOffset(300, 136)
