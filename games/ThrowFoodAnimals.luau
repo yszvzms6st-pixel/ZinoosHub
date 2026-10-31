@@ -6,6 +6,7 @@ local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
 
 if game.GameId ~= 10766972131 then
 	warn("[Zinoos hub] This only runs in Throw Food For Animals.")
@@ -42,7 +43,7 @@ local MUTATION_OPTIONS = { "Gold", "Diamond", "Emerald", "Ruby", "Rainbow" }
 
 local STATE = {
 	_gen = token,
-	version = "2.1.0",
+	version = "2.2.0",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -72,6 +73,7 @@ local STATE = {
 	autoReconnect = false,
 	disable3d = false,
 	fpsBoost = false,
+	hidePets = true,
 	hideOnStart = false,
 	toggleKey = "RightControl",
 	toggleControls = {},
@@ -79,11 +81,9 @@ local STATE = {
 }
 genv.ZinoosThrowFoodState = STATE
 
--- This account is the hub owner; the menu shows an Admin tag only for them.
-STATE.adminIds = {
-	[9346336323] = true,
-}
-STATE.admin = STATE.adminIds[LocalPlayer.UserId] == true
+-- The Admin tag is deliberately locked to the owner's exact Roblox user ID.
+STATE.ownerUserId = 9346336323
+STATE.admin = LocalPlayer.UserId == STATE.ownerUserId
 
 local runtime = { connections = {}, cleanups = {} }
 local function trackConnection(connection)
@@ -154,6 +154,7 @@ local FLAG_KEYS = {
 	AutoReconnect = "autoReconnect",
 	Disable3d = "disable3d",
 	FpsBoost = "fpsBoost",
+	HidePets = "hidePets",
 	HideOnStart = "hideOnStart",
 }
 
@@ -1759,6 +1760,134 @@ hubCleanup(function()
 	STATE.applyFpsBoost()
 end)
 
+local hiddenPetVisuals = {}
+local hiddenPetRoots = {}
+
+local function hidePetVisual(object)
+	local saved = hiddenPetVisuals[object]
+	if saved then
+		if saved.kind == "part" then
+			object.LocalTransparencyModifier = 1
+			object.CastShadow = false
+		elseif saved.kind == "transparency" then
+			object.Transparency = 1
+		elseif saved.kind == "enabled" then
+			object.Enabled = false
+		end
+		return
+	end
+	if object:IsA("BasePart") then
+		hiddenPetVisuals[object] = {
+			kind = "part",
+			localTransparency = object.LocalTransparencyModifier,
+			castShadow = object.CastShadow,
+		}
+		object.LocalTransparencyModifier = 1
+		object.CastShadow = false
+	elseif object:IsA("Decal") or object:IsA("Texture") then
+		hiddenPetVisuals[object] = { kind = "transparency", transparency = object.Transparency }
+		object.Transparency = 1
+	elseif object:IsA("ParticleEmitter")
+		or object:IsA("Trail")
+		or object:IsA("Beam")
+		or object:IsA("Smoke")
+		or object:IsA("Fire")
+		or object:IsA("Sparkles")
+		or object:IsA("Highlight")
+		or object:IsA("BillboardGui")
+		or object:IsA("SurfaceGui")
+		or object:IsA("PointLight")
+		or object:IsA("SpotLight")
+		or object:IsA("SurfaceLight") then
+		hiddenPetVisuals[object] = { kind = "enabled", enabled = object.Enabled }
+		object.Enabled = false
+	end
+end
+
+local function hidePetRoot(root)
+	if STATE.hidePets ~= true or not root or not root:IsDescendantOf(workspace) then
+		return
+	end
+	hidePetVisual(root)
+	for _, object in ipairs(root:GetDescendants()) do
+		hidePetVisual(object)
+	end
+	if not hiddenPetRoots[root] then
+		hiddenPetRoots[root] = root.DescendantAdded:Connect(function(object)
+			if STATE.hidePets == true then
+				hidePetVisual(object)
+			end
+		end)
+	end
+end
+
+local function restorePetVisuals()
+	for _, connection in pairs(hiddenPetRoots) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+	table.clear(hiddenPetRoots)
+	for object, saved in pairs(hiddenPetVisuals) do
+		pcall(function()
+			if saved.kind == "part" then
+				object.LocalTransparencyModifier = saved.localTransparency
+				object.CastShadow = saved.castShadow
+			elseif saved.kind == "transparency" then
+				object.Transparency = saved.transparency
+			elseif saved.kind == "enabled" then
+				object.Enabled = saved.enabled
+			end
+		end)
+	end
+	table.clear(hiddenPetVisuals)
+end
+
+function STATE.applyHidePets()
+	if STATE.hidePets ~= true then
+		restorePetVisuals()
+		STATE.petVisibilityStatus = "Animal models visible"
+		return
+	end
+	for _, tag in ipairs({ "PlotAnimal", "Animal" }) do
+		for _, root in ipairs(CollectionService:GetTagged(tag)) do
+			hidePetRoot(root)
+		end
+	end
+	local viewFolder = workspace:FindFirstChild("NewAnimalView")
+	if viewFolder then
+		hidePetRoot(viewFolder)
+	end
+	STATE.petVisibilityStatus = "Animal models hidden locally"
+end
+
+local function hideNewPet(root)
+	task.spawn(function()
+		for _ = 1, 20 do
+			if not running() or STATE.hidePets ~= true then
+				return
+			end
+			if root:IsDescendantOf(workspace) then
+				hidePetRoot(root)
+				return
+			end
+			task.wait(0.1)
+		end
+	end)
+end
+
+trackConnection(CollectionService:GetInstanceAddedSignal("PlotAnimal"):Connect(hideNewPet))
+trackConnection(CollectionService:GetInstanceAddedSignal("Animal"):Connect(hideNewPet))
+trackConnection(workspace.ChildAdded:Connect(function(child)
+	if child.Name == "NewAnimalView" and STATE.hidePets == true then
+		hidePetRoot(child)
+	end
+end))
+hubCleanup(function()
+	STATE.hidePets = false
+	restorePetVisuals()
+end)
+
 -- Server helpers.
 function STATE.rejoin()
 	pcall(function()
@@ -2720,6 +2849,8 @@ local function installHub()
 			STATE.apply3d()
 		elseif key == "fpsBoost" then
 			STATE.applyFpsBoost()
+		elseif key == "hidePets" then
+			STATE.applyHidePets()
 		elseif key == "autoTrain" and not on then
 			task.spawn(stopTraining)
 		elseif key == "autoSell" then
@@ -3146,7 +3277,8 @@ local function installHub()
 
 	local animalCard = card(pages.Animals, "ANIMALS", 1)
 	makeSwitch(animalCard, "Auto Equip Best", "equipBest", "Keeps the strongest animals placed on your plot")
-	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 38)
+	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals only on your screen; nothing is unequipped or sold")
+	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 56)
 	STATE.uiStatusLabels.animals.LayoutOrder = 90
 
 	local progressCard = card(pages.Progress, "UPGRADES", 1)
@@ -3436,7 +3568,7 @@ local function installHub()
 				end
 			end
 		end
-		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\n%d animals · %d placed · %d backpack", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount)
+		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\n%d animals · %d placed · %d backpack\n%s", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount, STATE.petVisibilityStatus or "Checking animal visibility")
 	end
 	STATE.refreshActivity = refreshActivity
 
@@ -4238,6 +4370,16 @@ task.spawn(function()
 end)
 pcall(STATE.apply3d)
 pcall(STATE.applyFpsBoost)
+pcall(STATE.applyHidePets)
+
+task.spawn(function()
+	while running() do
+		task.wait(3)
+		if STATE.hidePets == true then
+			pcall(STATE.applyHidePets)
+		end
+	end
+end)
 
 task.spawn(function()
 	while running() do
