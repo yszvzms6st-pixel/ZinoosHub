@@ -968,6 +968,109 @@ local function invoke(name, ...)
 	return type(result) == "table" and result or { Ok = result ~= false }
 end
 
+local function claimBusy(label)
+	if ClientState.Busy ~= nil then
+		return nil, tostring(ClientState.Busy)
+	end
+	local tokenName = "ZinoosHub" .. tostring(label)
+	ClientState.Busy = tokenName
+	return tokenName
+end
+
+local function releaseBusy(tokenName)
+	if tokenName and ClientState.Busy == tokenName then
+		ClientState.Busy = nil
+	end
+end
+
+local function rootPart()
+	local character = LocalPlayer.Character
+	return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function positionOf(target)
+	if not target then
+		return nil
+	end
+	if target:IsA("BasePart") then
+		return target.Position
+	end
+	local ok, pivot = pcall(target.GetPivot, target)
+	return ok and pivot.Position or nil
+end
+
+local function moveNear(target, offset)
+	local root = rootPart()
+	local position = positionOf(target)
+	elevate()
+	if not root or not position or root.Anchored then
+		return nil, nil
+	end
+	local old = root.CFrame
+	local destination = position + (offset or Vector3.new(0, 3, 0))
+	root.CFrame = CFrame.lookAt(destination, destination + Vector3.new(0, 0, -10))
+	root.AssemblyLinearVelocity = Vector3.zero
+	task.wait(0.8)
+	return root, old
+end
+
+local function restorePosition(root, old)
+	elevate()
+	if root and root.Parent and old then
+		root.Anchored = false
+		root.CFrame = old
+		root.AssemblyLinearVelocity = Vector3.zero
+	end
+end
+
+local function localProps()
+	return workspace:FindFirstChild("LocalPlotProps")
+end
+
+local function foodShopTarget()
+	local props = localProps()
+	local shop = props and props:FindFirstChild("FoodShop")
+	return shop and (shop:FindFirstChild("ActivationCircle") or shop)
+end
+
+local function trainingTarget()
+	local props = localProps()
+	local area = props and props:FindFirstChild("TrainingArea")
+	return area and (area:FindFirstChild("TrainingSpot") or area)
+end
+
+local function standTarget()
+	local spot = trainingTarget()
+	return spot and (spot:FindFirstChild("UpgradeButton") or spot)
+end
+
+local function fenceTarget()
+	local gui = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlotUpgradeSign")
+	return gui and gui.Adornee
+end
+
+local function sellTarget()
+	local place = workspace:FindFirstChild("SellPlace")
+	return place and (place:FindFirstChild("ActivationCircle") or place)
+end
+
+local function invokeNear(label, target, remoteName, ...)
+	local tokenName, busy = claimBusy(label)
+	if not tokenName then
+		return { Ok = false, Reason = "Busy:" .. tostring(busy or "game") }
+	end
+	local root, old = moveNear(target)
+	if not root then
+		releaseBusy(tokenName)
+		return { Ok = false, Reason = "TargetUnavailable" }
+	end
+	local args = table.pack(...)
+	local result = invoke(remoteName, table.unpack(args, 1, args.n))
+	restorePosition(root, old)
+	releaseBusy(tokenName)
+	return result
+end
+
 local lastSkip = nil
 local function syncAutoSkip()
 	if lastSkip == STATE.autoSkip then
@@ -1037,10 +1140,13 @@ local function stepThrow()
 	if os.clock() < nextThrowTrigger then
 		return 0.25
 	end
-	ClientState.Busy = "ZinoosHubThrow"
+	local throwToken = claimBusy("Throw")
+	if not throwToken then
+		return 0.5
+	end
 	local moved, root, height = throwPosition()
 	if not moved then
-		ClientState.Busy = nil
+		releaseBusy(throwToken)
 		STATE.throwStatus = "Throw line unavailable"
 		nextThrowTrigger = os.clock() + 1
 		return 0.5
@@ -1062,9 +1168,7 @@ local function stepThrow()
 		end
 	end
 	leaveThrowLine(root, height)
-	if ClientState.Busy == "ZinoosHubThrow" then
-		ClientState.Busy = nil
-	end
+	releaseBusy(throwToken)
 	local after = tonumber(getData("Throws")) or lastObservedThrows
 	if after > lastObservedThrows then
 		stats.throws += after - lastObservedThrows
@@ -1083,13 +1187,31 @@ local function stepThrow()
 end
 
 local trainingSession = nil
+local trainingToken = nil
+local trainingRoot = nil
+local trainingReturn = nil
 local nextBonus = 0
+local pendingBonusId = nil
+local pendingBonusExpires = 0
+trackConnection(Remotes.Event("Training_Bonus").OnClientEvent:Connect(function(id, expires)
+	if STATE.autoTrain == true and STATE.autoTapBonus == true then
+		pendingBonusId = id
+		pendingBonusExpires = tonumber(expires) or 0
+	end
+end))
 local function stopTraining()
 	if trainingSession then
 		invoke("Training_Stop")
 		trainingSession = nil
 		STATE.trainingStatus = "Stopped"
 	end
+	restorePosition(trainingRoot, trainingReturn)
+	trainingRoot = nil
+	trainingReturn = nil
+	releaseBusy(trainingToken)
+	trainingToken = nil
+	pendingBonusId = nil
+	pendingBonusExpires = 0
 end
 hubCleanup(stopTraining)
 
@@ -1100,6 +1222,18 @@ local function stepTraining()
 		return
 	end
 	if not trainingSession then
+		trainingToken = claimBusy("Training")
+		if not trainingToken then
+			STATE.trainingStatus = "Waiting for " .. tostring(ClientState.Busy or "game")
+			return
+		end
+		trainingRoot, trainingReturn = moveNear(trainingTarget())
+		if not trainingRoot then
+			STATE.trainingStatus = "Training spot unavailable"
+			releaseBusy(trainingToken)
+			trainingToken = nil
+			return
+		end
 		local result = invoke("Training_Start")
 		if result.Ok then
 			trainingSession = result
@@ -1109,18 +1243,31 @@ local function stepTraining()
 			noteActivity("Training started")
 		else
 			STATE.trainingStatus = "Start rejected: " .. tostring(result.Reason or "unknown")
+			restorePosition(trainingRoot, trainingReturn)
+			trainingRoot = nil
+			trainingReturn = nil
+			releaseBusy(trainingToken)
+			trainingToken = nil
 			return
 		end
 	end
-	if STATE.autoTapBonus == true and os.clock() >= nextBonus then
-		nextBonus = os.clock() + 0.55
-		local id = trainingSession.Id or trainingSession.SessionId
-		if id then
-			local result = invoke("Training_TapBonus", id)
+	if STATE.autoTapBonus == true and pendingBonusId and os.clock() >= nextBonus then
+		if pendingBonusExpires <= 0 or workspace:GetServerTimeNow() < pendingBonusExpires then
+			local bonusId = pendingBonusId
+			pendingBonusId = nil
+			local result = invoke("Training_TapBonus", bonusId)
 			if result.Ok then
 				stats.bonuses += 1
 				STATE.trainingStatus = "Training + bonus"
+				local finish = (tonumber(result.Start) or 0) + (tonumber(result.Duration) or 0)
+				if finish > 0 then
+					nextBonus = os.clock() + math.max(0.1, finish - workspace:GetServerTimeNow())
+				end
+			elseif result.Reason then
+				STATE.trainingStatus = "Training; bonus " .. tostring(result.Reason)
 			end
+		else
+			pendingBonusId = nil
 		end
 	end
 end
@@ -1145,38 +1292,45 @@ local function stepUpgrades()
 	local data = readAll()
 	local money = tonumber(data.Money) or 0
 	local changed = false
+	STATE.upgradeStatus = "Checking upgrades"
 	if STATE.autoFood == true then
 		local best = bestOwnedFood(data)
-		local nextFood = FoodsConfig.GetAny and FoodsConfig.GetAny(best + 1) or (FoodsConfig.All or {})[best + 1]
+		local nextFood = FoodsConfig.Get and FoodsConfig.Get(best + 1) or (FoodsConfig.All or {})[best + 1]
 		if nextFood and (tonumber(nextFood.Price) or math.huge) <= money then
-			local result = invoke("Shop_Buy", nextFood.Index)
+			local result = invokeNear("Food", foodShopTarget(), "Shop_Buy", nextFood.Index)
 			if result.Ok then
 				stats.foods += 1
 				changed = true
 				STATE.upgradeStatus = "Bought " .. tostring(nextFood.Name)
 				noteActivity(STATE.upgradeStatus)
+			else
+				STATE.upgradeStatus = "Food: " .. tostring(result.Reason or "rejected")
 			end
 		else
 			local equipped = tonumber(data.EquippedFood) or 0
 			if best > equipped then
-				local result = invoke("Shop_Equip", best)
+				local result = invokeNear("Food", foodShopTarget(), "Shop_Equip", best)
 				if result.Ok then
 					STATE.upgradeStatus = "Equipped " .. tostring((FoodsConfig.GetAny and FoodsConfig.GetAny(best) or {}).Name or ("food " .. best))
 					changed = true
+				else
+					STATE.upgradeStatus = "Food equip: " .. tostring(result.Reason or "rejected")
 				end
 			end
 		end
 	end
 	if not changed and STATE.autoStand == true then
 		local stand = tonumber(data.Stand) or 0
-		local nextStand = StandsConfig.GetAny and StandsConfig.GetAny(stand + 1) or (StandsConfig.All or {})[stand + 1]
+		local nextStand = StandsConfig.Get and StandsConfig.Get(stand + 1) or (StandsConfig.All or {})[stand + 1]
 		if nextStand and (tonumber(nextStand.Price) or math.huge) <= money then
-			local result = invoke("Stand_Upgrade")
+			local result = invokeNear("Stand", standTarget(), "Stand_Upgrade")
 			if result.Ok then
 				stats.stands += 1
 				changed = true
 				STATE.upgradeStatus = "Bought " .. tostring(nextStand.Name)
 				noteActivity(STATE.upgradeStatus)
+			else
+				STATE.upgradeStatus = "Stand: " .. tostring(result.Reason or "rejected")
 			end
 		end
 	end
@@ -1184,27 +1338,39 @@ local function stepUpgrades()
 		local level = tonumber(data.FenceLevel) or 0
 		local upgrade = FenceConfig.Get and FenceConfig.Get(level + 1) or (FenceConfig.Upgrades or {})[level + 1]
 		if upgrade and (tonumber(upgrade.Price) or math.huge) <= money then
-			local result = invoke("Plot_UpgradeFence")
+			local result = invokeNear("Fence", fenceTarget(), "Plot_UpgradeFence")
 			if result.Ok then
 				stats.fences += 1
+				changed = true
 				STATE.upgradeStatus = "Fence upgraded"
 				noteActivity(STATE.upgradeStatus)
+			else
+				STATE.upgradeStatus = "Fence: " .. tostring(result.Reason or "rejected")
 			end
 		end
 	end
-	if not changed and STATE.upgradeStatus == "Checking" then
-		STATE.upgradeStatus = "Waiting for money"
+	if not changed and STATE.upgradeStatus == "Checking upgrades" then
+		STATE.upgradeStatus = "Waiting for money, release, or maxed"
 	end
 end
 
 local nextEquip = 0
 function STATE.equipBestNow()
+	local tokenName, busy = claimBusy("Equip")
+	if not tokenName then
+		STATE.equipStatus = "Waiting for " .. tostring(busy or "game")
+		return false
+	end
 	local result = invoke("Plot_EquipBest")
+	releaseBusy(tokenName)
 	if result.Ok then
-		STATE.status = "Best animals equipped"
-		noteActivity(STATE.status)
+		local changed = (tonumber(result.Placed) or 0) + (tonumber(result.Removed) or 0)
+		STATE.equipStatus = changed > 0 and ("Equipped " .. tostring(result.Count or result.Placed or changed)) or "Best already equipped"
+		STATE.status = STATE.equipStatus
+		noteActivity(STATE.equipStatus)
 		return true
 	end
+	STATE.equipStatus = "Equip: " .. tostring(result.Reason or "rejected")
 	return false
 end
 
@@ -1213,7 +1379,8 @@ local function animalIncome(entry)
 	return ok and tonumber(value) or 0
 end
 
-function STATE.sellJunkNow()
+local nextSellAt = 0
+function STATE.sellJunkNow(force)
 	local animals = getData("Animals")
 	if type(animals) ~= "table" then
 		STATE.sellStatus = "No animals"
@@ -1232,9 +1399,21 @@ function STATE.sellJunkNow()
 	for index = 1, math.min(math.max(0, STATE.keepBest), #ranked) do
 		keep[ranked[index].id] = true
 	end
+	local tokenName, busy = claimBusy("Sell")
+	if not tokenName then
+		STATE.sellStatus = "Waiting for " .. tostring(busy or "game")
+		return 0
+	end
+	local root, old = moveNear(sellTarget())
+	if not root then
+		releaseBusy(tokenName)
+		STATE.sellStatus = "Sell circle unavailable"
+		return 0
+	end
 	local sold = 0
+	local rejected = nil
 	for _, item in ipairs(ranked) do
-		if not running() or STATE.autoSell ~= true and sold > 0 then
+		if not running() or (force ~= true and STATE.autoSell ~= true) then
 			break
 		end
 		local entry = item.entry
@@ -1243,11 +1422,15 @@ function STATE.sellJunkNow()
 			if result.Ok then
 				sold += 1
 				stats.sold += 1
+			elseif not rejected then
+				rejected = tostring(result.Reason or "rejected")
 			end
 			task.wait(0.12)
 		end
 	end
-	STATE.sellStatus = sold > 0 and ("Sold " .. sold .. " weak animals") or "Nothing safe to sell"
+	restorePosition(root, old)
+	releaseBusy(tokenName)
+	STATE.sellStatus = sold > 0 and ("Sold " .. sold .. " weak animals") or (rejected and ("Sell: " .. rejected) or "Nothing safe to sell")
 	if sold > 0 then noteActivity(STATE.sellStatus) end
 	return sold
 end
@@ -1255,10 +1438,12 @@ end
 local eggCursor = 0
 local function stepEggs()
 	if STATE.autoEggs ~= true then
+		STATE.eggStatus = "Off"
 		return
 	end
 	local eggs = getData("Eggs")
 	if type(eggs) ~= "table" then
+		STATE.eggStatus = "Egg data unavailable"
 		return
 	end
 	local key
@@ -1269,20 +1454,31 @@ local function stepEggs()
 		end
 	end
 	if not key then
+		STATE.eggStatus = "No eggs"
 		return
 	end
 	local plotIndex = tonumber(LocalPlayer:GetAttribute("PlotIndex")) or 1
 	local plot = workspace:FindFirstChild("Plots") and workspace.Plots:FindFirstChild(tostring(plotIndex))
 	if not plot then
+		STATE.eggStatus = "Plot unavailable"
+		return
+	end
+	local tokenName, busy = claimBusy("Egg")
+	if not tokenName then
+		STATE.eggStatus = "Waiting for " .. tostring(busy or "game")
 		return
 	end
 	eggCursor = (eggCursor + 1) % 9
 	local x = (eggCursor % 3 - 1) * 5
 	local z = (math.floor(eggCursor / 3) - 1) * 5
 	local result = invoke("Egg_Place", key, plot.Position + Vector3.new(x, plot.Size.Y / 2 + 0.5, z))
+	releaseBusy(tokenName)
 	if result.Ok then
 		stats.eggs += 1
+		STATE.eggStatus = "Placed " .. tostring(key)
 		noteActivity("Placed " .. tostring(key) .. " egg")
+	else
+		STATE.eggStatus = "Egg: " .. tostring(result.Reason or "rejected")
 	end
 end
 
@@ -1291,15 +1487,20 @@ local function stepRewards()
 	if os.clock() < nextReward then return end
 	nextReward = os.clock() + 5
 	local data = readAll()
+	local attempted = false
 	if STATE.autoOffline == true and type(data.OfflinePending) == "table" and (tonumber(data.OfflinePending.Base) or 0) > 0 then
+		attempted = true
 		local result = invoke("Offline_Claim")
 		if result.Ok then
 			stats.rewards += 1
 			STATE.rewardStatus = "Claimed offline earnings"
 			noteActivity(STATE.rewardStatus)
+		else
+			STATE.rewardStatus = "Offline reward: " .. tostring(result.Reason or "rejected")
 		end
 	end
 	if STATE.autoFree == true and data.FreeAnimalClaimed ~= true then
+		attempted = true
 		local result = invoke("Shop_ClaimFree")
 		if result.Ok then
 			stats.rewards += 1
@@ -1309,6 +1510,9 @@ local function stepRewards()
 			STATE.rewardStatus = "Free reward: " .. tostring(result.Reason)
 		end
 	end
+	if not attempted then
+		STATE.rewardStatus = (STATE.autoOffline == true or STATE.autoFree == true) and "No rewards ready" or "Off"
+	end
 end
 
 function STATE.teleportTo(kind)
@@ -1317,18 +1521,21 @@ function STATE.teleportTo(kind)
 	if not root then return false end
 	local target
 	if kind == "Shop" then
-		target = workspace:FindFirstChild("LocalPlotProps") and workspace.LocalPlotProps:FindFirstChild("FoodShop")
+		target = foodShopTarget()
 	elseif kind == "Training" then
-		target = workspace:FindFirstChild("LocalPlotProps") and workspace.LocalPlotProps:FindFirstChild("TrainingArea")
+		target = trainingTarget()
 	elseif kind == "Sell" then
-		target = workspace:FindFirstChild("SellPlace")
+		target = sellTarget()
 	elseif kind == "Throw" then
 		throwPosition()
 		return true
 	end
 	if target then
-		local position = target:IsA("BasePart") and target.Position or target:GetPivot().Position
-		root.CFrame = CFrame.new(position + Vector3.new(0, 4, 0))
+		local position = positionOf(target)
+		if not position then return false end
+		local destination = position + Vector3.new(0, 3, 0)
+		root.CFrame = CFrame.lookAt(destination, destination + Vector3.new(0, 0, -10))
+		root.AssemblyLinearVelocity = Vector3.zero
 		return true
 	end
 	return false
@@ -2436,6 +2643,11 @@ local function installHub()
 			STATE.applyFpsBoost()
 		elseif key == "autoTrain" and not on then
 			task.spawn(stopTraining)
+		elseif key == "autoSell" then
+			nextSellAt = 0
+			if not on then
+				STATE.sellStatus = "Off"
+			end
 		elseif key == "equipBest" and on then
 			task.spawn(STATE.equipBestNow)
 		elseif key == "walkSpeed" and not on then
@@ -3689,7 +3901,7 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	actionsNote.LayoutOrder = 1
 	actionButton(actionsCard, "Sell Junk Now", 2, true, function()
 		task.spawn(function()
-			local sold = STATE.sellJunkNow()
+			local sold = STATE.sellJunkNow(true)
 			actionsNote.Text = sold > 0 and ("Sold " .. sold .. " junk items") or tostring(STATE.sellStatus)
 		end)
 	end)
@@ -3796,12 +4008,16 @@ end)
 task.spawn(function()
 	while running() do
 		if STATE.autoSell == true then
-			pcall(STATE.sellJunkNow)
+			if os.clock() >= nextSellAt then
+				local ok = pcall(STATE.sellJunkNow, false)
+				local waiting = type(STATE.sellStatus) == "string" and string.sub(STATE.sellStatus, 1, 11) == "Waiting for"
+				nextSellAt = os.clock() + ((ok and not waiting) and math.max(1, STATE.sellMinutes) * 60 or 1)
+			end
 		else
 			STATE.sellStatus = "Off"
+			nextSellAt = 0
 		end
-		local waitUntil = os.clock() + math.max(1, STATE.sellMinutes) * 60
-		while running() and os.clock() < waitUntil do task.wait(1) end
+		task.wait(0.5)
 	end
 end)
 
