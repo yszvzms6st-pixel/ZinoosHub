@@ -34,9 +34,15 @@ local function running()
 	return genv.ZinoosThrowFoodGen == token
 end
 
+local RARITY_OPTIONS = {
+	"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic",
+	"Secret", "Divine", "Celestial", "Eternal", "Cosmic", "Supreme",
+}
+local MUTATION_OPTIONS = { "Gold", "Diamond", "Emerald", "Ruby", "Rainbow" }
+
 local STATE = {
 	_gen = token,
-	version = "2.0.0",
+	version = "2.1.0",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -47,10 +53,10 @@ local STATE = {
 	autoFence = false,
 	equipBest = true,
 	autoSell = false,
-	keepMutations = true,
 	keepBest = 10,
 	sellMinutes = 2,
-	autoEggs = false,
+	sellRarities = table.clone(RARITY_OPTIONS),
+	protectedMutations = table.clone(MUTATION_OPTIONS),
 	autoOffline = true,
 	autoFree = true,
 	autoSuper = false,
@@ -135,8 +141,6 @@ local FLAG_KEYS = {
 	AutoFence = "autoFence",
 	EquipBest = "equipBest",
 	AutoSell = "autoSell",
-	KeepMutations = "keepMutations",
-	AutoEggs = "autoEggs",
 	AutoOffline = "autoOffline",
 	AutoFree = "autoFree",
 	AutoSuper = "autoSuper",
@@ -158,7 +162,14 @@ local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", 
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 }
-STATE.LIST_KEYS = {}
+STATE.LIST_KEYS = {
+	SellRarities = "sellRarities",
+	ProtectedMutations = "protectedMutations",
+}
+local LIST_OPTIONS = {
+	SellRarities = RARITY_OPTIONS,
+	ProtectedMutations = MUTATION_OPTIONS,
+}
 local NUMBERS = {
 	FlySpeed = { "flySpeed", 10, 300 },
 	SellMinutes = { "sellMinutes", 1, 30 },
@@ -775,14 +786,25 @@ local function loadSaved()
 	end
 	for flag, key in pairs(STATE.LIST_KEYS) do
 		if type(saved[flag]) == "table" then
-			local list = {}
+			local selected = {}
 			for _, value in ipairs(saved[flag]) do
 				if type(value) == "string" then
-					table.insert(list, value)
+					selected[value] = true
+				end
+			end
+			local list = {}
+			for _, option in ipairs(LIST_OPTIONS[flag] or {}) do
+				if selected[option] then
+					table.insert(list, option)
 				end
 			end
 			STATE[key] = list
 		end
+	end
+	-- v2.0 stored one all-or-nothing mutation switch. Preserve its meaning once,
+	-- then save the new per-mutation selection format.
+	if type(saved.ProtectedMutations) ~= "table" and saved.KeepMutations == false then
+		STATE.protectedMutations = {}
 	end
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
@@ -857,7 +879,7 @@ STATE.trainingStatus = "Off"
 STATE.upgradeStatus = "Checking"
 STATE.sellStatus = "Off"
 STATE.rewardStatus = "Checking"
-local stats = { throws = 0, trained = 0, bonuses = 0, foods = 0, stands = 0, fences = 0, sold = 0, eggs = 0, rewards = 0 }
+local stats = { throws = 0, trained = 0, bonuses = 0, foods = 0, stands = 0, fences = 0, sold = 0, rewards = 0 }
 STATE.stats = stats
 STATE.activity = {}
 
@@ -920,6 +942,8 @@ elevate()
 local FenceConfig = require(ReplicatedStorage.Config.FenceConfig)
 elevate()
 local AreasConfig = require(ReplicatedStorage.Config.AreasConfig)
+elevate()
+local AnimalEconomy = require(ReplicatedStorage.Config.AnimalEconomy)
 elevate()
 local Mutations = require(ReplicatedStorage.Shared.Mutations)
 elevate()
@@ -1384,18 +1408,58 @@ local function animalIncome(entry)
 	return ok and tonumber(value) or 0
 end
 
+local function listContains(list, value)
+	return type(list) == "table" and type(value) == "string" and table.find(list, value) ~= nil
+end
+
+local function animalRarity(entry)
+	if type(entry) ~= "table" or type(entry.ModelName) ~= "string" then
+		return nil
+	end
+	local ok, info = pcall(AnimalEconomy.Get, entry.ModelName)
+	return ok and type(info) == "table" and type(info.Rarity) == "string" and info.Rarity or nil
+end
+
+local function sellProtection(entry, id, keep)
+	if entry.Placed then
+		return "placed"
+	end
+	if keep[id] then
+		return "best"
+	end
+	if entry.Mutation and listContains(STATE.protectedMutations, entry.Mutation) then
+		return "mutation"
+	end
+	local rarity = animalRarity(entry)
+	if not rarity or not listContains(STATE.sellRarities, rarity) then
+		return "rarity"
+	end
+	return nil
+end
+
 local function buildSellPlan()
 	local animals = getData("Animals")
 	if type(animals) ~= "table" then
 		return nil
 	end
 	local ranked = {}
-	local summary = { total = 0, placed = 0, mutated = 0, eligible = 0 }
+	local summary = {
+		total = 0,
+		backpack = 0,
+		placed = 0,
+		protectedBest = 0,
+		protectedMutation = 0,
+		excludedRarity = 0,
+		eligible = 0,
+	}
 	for id, entry in pairs(animals) do
 		if type(entry) == "table" then
 			summary.total += 1
-			if entry.Placed then summary.placed += 1 end
-			if entry.Mutation then summary.mutated += 1 end
+			if entry.Placed then
+				summary.placed += 1
+			else
+				summary.backpack += 1
+			end
 			table.insert(ranked, { id = id, entry = entry, income = animalIncome(entry) })
 		end
 	end
@@ -1407,12 +1471,17 @@ local function buildSellPlan()
 		keep[ranked[index].id] = true
 	end
 	for _, item in ipairs(ranked) do
-		local entry = item.entry
-		if not entry.Placed and not keep[item.id] and not (STATE.keepMutations and entry.Mutation) then
+		local reason = sellProtection(item.entry, item.id, keep)
+		if not reason then
 			summary.eligible += 1
+		elseif reason == "best" then
+			summary.protectedBest += 1
+		elseif reason == "mutation" then
+			summary.protectedMutation += 1
+		elseif reason == "rarity" then
+			summary.excludedRarity += 1
 		end
 	end
-	summary.keepBest = math.min(math.max(0, STATE.keepBest), #ranked)
 	return ranked, keep, summary
 end
 
@@ -1445,8 +1514,7 @@ function STATE.sellJunkNow(force)
 		if not running() or (force ~= true and STATE.autoSell ~= true) then
 			break
 		end
-		local entry = item.entry
-		if not entry.Placed and not keep[item.id] and not (STATE.keepMutations and entry.Mutation) then
+		if not sellProtection(item.entry, item.id, keep) then
 			local result = invoke("Plot_SellAnimal", item.id)
 			if result.Ok then
 				sold += 1
@@ -1462,53 +1530,6 @@ function STATE.sellJunkNow(force)
 	STATE.sellStatus = sold > 0 and ("Sold " .. sold .. " weak animals") or (rejected and ("Sell: " .. rejected) or "Nothing safe to sell")
 	if sold > 0 then noteActivity(STATE.sellStatus) end
 	return sold
-end
-
-local eggCursor = 0
-local function stepEggs()
-	if STATE.autoEggs ~= true then
-		STATE.eggStatus = "Off"
-		return
-	end
-	local eggs = getData("Eggs")
-	if type(eggs) ~= "table" then
-		STATE.eggStatus = "Egg data unavailable"
-		return
-	end
-	local key
-	for eggName, count in pairs(eggs) do
-		if tonumber(count) and tonumber(count) > 0 then
-			key = eggName
-			break
-		end
-	end
-	if not key then
-		STATE.eggStatus = "No eggs"
-		return
-	end
-	local plotIndex = tonumber(LocalPlayer:GetAttribute("PlotIndex")) or 1
-	local plot = workspace:FindFirstChild("Plots") and workspace.Plots:FindFirstChild(tostring(plotIndex))
-	if not plot then
-		STATE.eggStatus = "Plot unavailable"
-		return
-	end
-	local tokenName, busy = claimBusy("Egg")
-	if not tokenName then
-		STATE.eggStatus = "Waiting for " .. tostring(busy or "game")
-		return
-	end
-	eggCursor = (eggCursor + 1) % 9
-	local x = (eggCursor % 3 - 1) * 5
-	local z = (math.floor(eggCursor / 3) - 1) * 5
-	local result = invoke("Egg_Place", key, plot.Position + Vector3.new(x, plot.Size.Y / 2 + 0.5, z))
-	releaseBusy(tokenName)
-	if result.Ok then
-		stats.eggs += 1
-		STATE.eggStatus = "Placed " .. tostring(key)
-		noteActivity("Placed " .. tostring(key) .. " egg")
-	else
-		STATE.eggStatus = "Egg: " .. tostring(result.Reason or "rejected")
-	end
 end
 
 local nextReward = 0
@@ -3022,7 +3043,9 @@ local function installHub()
 	end
 
 	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName, labelOf)
-		local showList = labelOf or STATE.rarityLabel
+		local showList = labelOf or function(list)
+			return tostring(type(list) == "table" and #list or 0) .. " selected"
+		end
 		local row = Instance.new("Frame")
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 2
@@ -3076,6 +3099,35 @@ local function installHub()
 	end
 
 	STATE.toggleControls = {}
+	local function selectedLabel(list, options)
+		local count = type(list) == "table" and #list or 0
+		if count == 0 then
+			return "None selected"
+		end
+		if count == #options then
+			return "All " .. tostring(count) .. " selected"
+		end
+		if count <= 2 then
+			return table.concat(list, ", ")
+		end
+		return tostring(count) .. " selected"
+	end
+	local function toggleSelection(key, option, options)
+		local selected = {}
+		for _, value in ipairs(STATE[key] or {}) do
+			selected[value] = true
+		end
+		selected[option] = not selected[option]
+		local ordered = {}
+		for _, value in ipairs(options) do
+			if selected[value] then
+				table.insert(ordered, value)
+			end
+		end
+		STATE[key] = ordered
+		nextSellAt = 0
+		saveConfig()
+	end
 
 	STATE.uiStatusLabels = {}
 	local throwCard = card(pages.Farming, "AUTO THROW", 1)
@@ -3092,9 +3144,8 @@ local function installHub()
 	STATE.uiStatusLabels.training = label(trainCard, "Status · " .. tostring(STATE.trainingStatus), 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.training.LayoutOrder = 90
 
-	local animalCard = card(pages.Animals, "ANIMALS & EGGS", 1)
+	local animalCard = card(pages.Animals, "ANIMALS", 1)
 	makeSwitch(animalCard, "Auto Equip Best", "equipBest", "Keeps the strongest animals placed on your plot")
-	makeSwitch(animalCard, "Auto Place Eggs", "autoEggs", "Places owned eggs safely inside your plot")
 	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 38)
 	STATE.uiStatusLabels.animals.LayoutOrder = 90
 
@@ -3106,8 +3157,21 @@ local function installHub()
 	STATE.uiStatusLabels.upgrade.LayoutOrder = 90
 
 	local sellCard = card(pages.Selling, "SMART SELL", 1)
-	makeSwitch(sellCard, "Auto Sell Weak Animals", "autoSell", "Only sells unplaced animals below your protected best group")
-	makeSwitch(sellCard, "Keep Mutations", "keepMutations", "Never sells Gold, Diamond, Emerald, Ruby or Rainbow animals")
+	makeSwitch(sellCard, "Auto Sell Filtered Animals", "autoSell", "Sells only unplaced animals matching your selected rarities")
+	makeMultiDropdown(sellCard, "Sell Rarities", function()
+		return STATE.sellRarities
+	end, RARITY_OPTIONS, function(option)
+		toggleSelection("sellRarities", option, RARITY_OPTIONS)
+	end, function(list)
+		return selectedLabel(list, RARITY_OPTIONS)
+	end)
+	makeMultiDropdown(sellCard, "Protect Mutations", function()
+		return STATE.protectedMutations
+	end, MUTATION_OPTIONS, function(option)
+		toggleSelection("protectedMutations", option, MUTATION_OPTIONS)
+	end, function(list)
+		return selectedLabel(list, MUTATION_OPTIONS)
+	end)
 	makeDropdown(sellCard, "Keep Best Animals", function()
 		return tostring(STATE.keepBest)
 	end, { "0", "5", "10", "15", "20", "30" }, function(option)
@@ -3317,7 +3381,7 @@ local function installHub()
 	STATE.refreshHealth = nil
 
 	local note = card(homePage, "HOW IT WORKS", 7)
-	local noteBody = label(note, "Auto Throw uses the game's native server contract. Upgrades only buy when affordable. Smart Sell protects your selected best group, every placed animal, and mutations when enabled.", 13, ink, Enum.Font.Gotham, 56)
+	local noteBody = label(note, "Auto Throw uses the game's native server contract. Upgrades only buy when affordable. Smart Sell follows your rarity filter and protects placed animals, your best group, and selected mutations.", 13, ink, Enum.Font.Gotham, 56)
 	noteBody.LayoutOrder = 1
 
 	local activityCard = card(homePage, "ACTIVITY", 8)
@@ -3335,7 +3399,7 @@ local function installHub()
 			"Upgrades · " .. tostring(STATE.upgradeStatus),
 			"Selling · " .. tostring(STATE.sellStatus),
 			"Rewards · " .. tostring(STATE.rewardStatus),
-			string.format("Session · %d throws, %d training starts, %d bonuses, %d foods, %d stands, %d fences, %d sold, %d eggs", stats.throws, stats.trained, stats.bonuses, stats.foods, stats.stands, stats.fences, stats.sold, stats.eggs),
+			string.format("Session · %d throws, %d training starts, %d bonuses, %d foods, %d stands, %d fences, %d sold", stats.throws, stats.trained, stats.bonuses, stats.foods, stats.stands, stats.fences, stats.sold),
 		}
 		if STATE.antiAfk == true then
 			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK working through VirtualUser" or "Anti AFK waiting for idle"
@@ -3357,17 +3421,22 @@ local function installHub()
 		local preview = STATE.sellPreview()
 		elevate()
 		if preview then
-			STATE.uiStatusLabels.sell.Text = string.format("%s\n%d eligible · %d best protected · %d mutations · %d placed", publicStatus(STATE.sellStatus), preview.eligible, preview.keepBest, preview.mutated, preview.placed)
+			STATE.uiStatusLabels.sell.Text = string.format("%s\n%d eligible · %d rarities selected\n%d best · %d mutations · %d placed protected", publicStatus(STATE.sellStatus), preview.eligible, #STATE.sellRarities, preview.protectedBest, preview.protectedMutation, preview.placed)
 		else
 			STATE.uiStatusLabels.sell.Text = publicStatus(STATE.sellStatus)
 		end
-		local eggs = DataController:GetValue("Eggs")
+		local animals = DataController:GetValue("Animals")
 		elevate()
-		local eggCount = 0
-		if type(eggs) == "table" then
-			for _, count in pairs(eggs) do eggCount += tonumber(count) or 0 end
+		local animalCount, placedCount = 0, 0
+		if type(animals) == "table" then
+			for _, entry in pairs(animals) do
+				if type(entry) == "table" then
+					animalCount += 1
+					if entry.Placed then placedCount += 1 end
+				end
+			end
 		end
-		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\nEggs · %s · %d owned", publicStatus(STATE.equipStatus or "Ready"), STATE.autoEggs == true and publicStatus(STATE.eggStatus or "Ready") or "Off", eggCount)
+		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\n%d animals · %d placed · %d backpack", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount)
 	end
 	STATE.refreshActivity = refreshActivity
 
@@ -3998,8 +4067,8 @@ local function installHub()
 		applyPreset({
 			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = false,
 			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
-			autoFence = true, equipBest = true, autoSell = false, keepMutations = true,
-			autoEggs = true, autoOffline = true, autoFree = true,
+			autoFence = true, equipBest = true, autoSell = false,
+			autoOffline = true, autoFree = true,
 		}, "Safe AFK")
 		quickNote.Text = "Safe AFK enabled · protected selling remains off"
 	end)
@@ -4007,15 +4076,15 @@ local function installHub()
 		applyPreset({
 			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = true,
 			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
-			autoFence = true, equipBest = true, autoSell = true, keepMutations = true,
-			autoEggs = true, autoOffline = true, autoFree = true,
+			autoFence = true, equipBest = true, autoSell = true,
+			autoOffline = true, autoFree = true,
 		}, "Fast Progress")
-		quickNote.Text = "Fast Progress enabled · best, placed and mutated animals stay protected"
+		quickNote.Text = "Fast Progress enabled · best, placed and selected mutations stay protected"
 	end)
 	actionButton(quickCard, "Stop Automation", 4, false, function()
 		applyPreset({
 			autoThrow = false, autoTrain = false, autoFood = false, autoStand = false,
-			autoFence = false, equipBest = false, autoSell = false, autoEggs = false,
+			autoFence = false, equipBest = false, autoSell = false,
 			autoOffline = false, autoFree = false,
 		}, "Stopped")
 		quickNote.Text = "All game automation stopped"
@@ -4130,12 +4199,11 @@ task.spawn(function()
 	end
 end)
 
--- Training, upgrades, team management, eggs and rewards.
+-- Training, upgrades, team management and rewards.
 task.spawn(function()
 	while running() do
 		pcall(stepTraining)
 		pcall(stepUpgrades)
-		pcall(stepEggs)
 		pcall(stepRewards)
 		if STATE.equipBest == true and os.clock() >= nextEquip then
 			nextEquip = os.clock() + 8
