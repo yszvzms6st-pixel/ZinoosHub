@@ -40,10 +40,19 @@ local RARITY_OPTIONS = {
 	"Secret", "Divine", "Celestial", "Eternal", "Cosmic", "Supreme",
 }
 local MUTATION_OPTIONS = { "Gold", "Diamond", "Emerald", "Ruby", "Rainbow" }
+local RARITY_RANK = {}
+for index, rarity in ipairs(RARITY_OPTIONS) do
+	RARITY_RANK[rarity] = index
+end
+local NOTIFY_RARITY_OPTIONS = { "All" }
+for _, rarity in ipairs(RARITY_OPTIONS) do
+	table.insert(NOTIFY_RARITY_OPTIONS, rarity)
+end
+local ESP_DISTANCE_OPTIONS = { "100", "250", "500", "1000", "Unlimited" }
 
 local STATE = {
 	_gen = token,
-	version = "2.2.1",
+	version = "2.3.0",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -74,6 +83,16 @@ local STATE = {
 	disable3d = false,
 	fpsBoost = false,
 	hidePets = true,
+	notifications = true,
+	notifyCatches = true,
+	notifySales = true,
+	notifyProgress = true,
+	notifyMinRarity = "All",
+	espEnabled = false,
+	espOwnOnly = false,
+	espAllAnimals = false,
+	espRarities = table.clone(RARITY_OPTIONS),
+	espMaxDistance = "500",
 	hideOnStart = false,
 	toggleKey = "RightControl",
 	toggleControls = {},
@@ -155,6 +174,13 @@ local FLAG_KEYS = {
 	Disable3d = "disable3d",
 	FpsBoost = "fpsBoost",
 	HidePets = "hidePets",
+	Notifications = "notifications",
+	NotifyCatches = "notifyCatches",
+	NotifySales = "notifySales",
+	NotifyProgress = "notifyProgress",
+	EspEnabled = "espEnabled",
+	EspOwnOnly = "espOwnOnly",
+	EspAllAnimals = "espAllAnimals",
 	HideOnStart = "hideOnStart",
 }
 
@@ -162,14 +188,18 @@ local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
+	NotifyMinRarity = { key = "notifyMinRarity", options = NOTIFY_RARITY_OPTIONS },
+	EspMaxDistance = { key = "espMaxDistance", options = ESP_DISTANCE_OPTIONS },
 }
 STATE.LIST_KEYS = {
 	SellRarities = "sellRarities",
 	ProtectedMutations = "protectedMutations",
+	EspRarities = "espRarities",
 }
 local LIST_OPTIONS = {
 	SellRarities = RARITY_OPTIONS,
 	ProtectedMutations = MUTATION_OPTIONS,
+	EspRarities = RARITY_OPTIONS,
 }
 local NUMBERS = {
 	FlySpeed = { "flySpeed", 10, 300 },
@@ -883,6 +913,8 @@ STATE.rewardStatus = "Checking"
 local stats = { throws = 0, trained = 0, bonuses = 0, foods = 0, stands = 0, fences = 0, sold = 0, rewards = 0 }
 STATE.stats = stats
 STATE.activity = {}
+STATE.notificationLog = {}
+STATE.toast = nil
 
 local function noteActivity(text)
 	if type(text) ~= "string" or text == "" or STATE.activity[#STATE.activity] == text then
@@ -976,7 +1008,7 @@ end
 local function shortNumber(value)
 	value = tonumber(value) or 0
 	local abs = math.abs(value)
-	for _, unit in ipairs({ {1e36, "Ud"}, {1e33, "Dc"}, {1e30, "No"}, {1e27, "Oc"}, {1e24, "Sp"}, {1e21, "Sx"}, {1e18, "Qi"}, {1e15, "Qa"}, {1e12, "T"}, {1e9, "B"}, {1e6, "M"}, {1e3, "K"} }) do
+	for _, unit in ipairs({ {1e63, "Vg"}, {1e60, "Nod"}, {1e57, "Ocd"}, {1e54, "Spd"}, {1e51, "Sxd"}, {1e48, "Qid"}, {1e45, "Qad"}, {1e42, "Td"}, {1e39, "Dd"}, {1e36, "Ud"}, {1e33, "Dc"}, {1e30, "No"}, {1e27, "Oc"}, {1e24, "Sp"}, {1e21, "Sx"}, {1e18, "Qi"}, {1e15, "Qa"}, {1e12, "T"}, {1e9, "B"}, {1e6, "M"}, {1e3, "K"} }) do
 		if abs >= unit[1] then
 			return string.format("%.2f%s", value / unit[1], unit[2]):gsub("%.00", ""):gsub("(%..-)0([A-Za-z]+)$", "%1%2")
 		end
@@ -994,8 +1026,125 @@ local function invoke(name, ...)
 	return type(result) == "table" and result or { Ok = result ~= false }
 end
 
+local function notificationAllowed(category, rarity)
+	if STATE.notifications ~= true then
+		return false
+	end
+	if category == "catch" then
+		if STATE.notifyCatches ~= true then
+			return false
+		end
+		local minimum = STATE.notifyMinRarity
+		if minimum ~= "All" then
+			local wanted = RARITY_RANK[minimum] or 1
+			local actual = RARITY_RANK[rarity] or 1
+			if actual < wanted then
+				return false
+			end
+		end
+	elseif category == "sale" then
+		return STATE.notifySales == true
+	elseif category == "progress" then
+		return STATE.notifyProgress == true
+	end
+	return true
+end
+
+local function notify(category, title, message, rarity)
+	if not notificationAllowed(category, rarity) then
+		return false
+	end
+	local entry = {
+		category = category,
+		title = tostring(title or "ZinoosHub"),
+		message = tostring(message or ""),
+		rarity = rarity,
+		time = os.time(),
+	}
+	table.insert(STATE.notificationLog, entry)
+	while #STATE.notificationLog > 20 do
+		table.remove(STATE.notificationLog, 1)
+	end
+	if typeof(STATE.toast) == "function" then
+		local ok = pcall(STATE.toast, entry)
+		return ok
+	end
+	return false
+end
+STATE.notify = notify
+
 local function publicStatus(value)
 	return (tostring(value or "game"):gsub("ZinoosHub([%w_]+)", "%1"))
+end
+
+local function readableAnimalName(value)
+	local text = tostring(value or "Animal"):gsub("_", " ")
+	text = text:gsub("(%l)(%u)", "%1 %2")
+	text = text:gsub("(%a)(%d)", "%1 %2"):gsub("(%d)(%a)", "%1 %2")
+	return text
+end
+
+local function describeCatch(result)
+	result = type(result) == "table" and result or {}
+	local entry = type(result.Entry) == "table" and result.Entry
+		or type(result.Animal) == "table" and result.Animal
+		or result
+	local modelName = entry.ModelName or result.ModelName
+	local info = nil
+	if type(modelName) == "string" then
+		local ok, value = pcall(AnimalEconomy.Get, modelName)
+		if ok and type(value) == "table" then
+			info = value
+		end
+	end
+	local displayName = entry.DisplayName or result.DisplayName
+		or (info and (info.DisplayName or info.Name))
+		or modelName
+		or "Animal"
+	local rarity = entry.Rarity or result.Rarity or (info and info.Rarity) or "Common"
+	local mutation = entry.Mutation or result.Mutation
+	local income = tonumber(entry.Income or result.Income)
+	if not income and type(modelName) == "string" then
+		local ok, value = pcall(Mutations.IncomeOf, {
+			ModelName = modelName,
+			Mutation = mutation,
+		}, LocalPlayer:GetAttribute("BestIncome") or 0)
+		if ok then
+			income = tonumber(value)
+		end
+	end
+	displayName = readableAnimalName(displayName)
+	local title = mutation and (tostring(mutation) .. " " .. tostring(displayName)) or tostring(displayName)
+	local message = tostring(rarity)
+	if income and income > 0 then
+		message ..= "  •  $" .. shortNumber(income) .. "/s"
+	end
+	return title, message, rarity
+end
+
+local knownAnimalIds = {}
+local animalWatchReady = false
+local function stepAnimalNotifications()
+	local animals = getData("Animals")
+	if type(animals) ~= "table" then
+		return
+	end
+	local current = {}
+	for id, entry in pairs(animals) do
+		current[id] = true
+		if animalWatchReady and not knownAnimalIds[id] and type(entry) == "table" then
+			local title, message, rarity = describeCatch(entry)
+			STATE.lastCatch = {
+				id = id,
+				title = title,
+				message = message,
+				rarity = rarity,
+			}
+			notify("catch", "Caught " .. title, message, rarity)
+		end
+	end
+	knownAnimalIds = current
+	animalWatchReady = true
 end
 
 local function claimBusy(label)
@@ -1333,6 +1482,7 @@ local function stepUpgrades()
 				changed = true
 				STATE.upgradeStatus = "Bought " .. tostring(nextFood.Name)
 				noteActivity(STATE.upgradeStatus)
+				notify("progress", "Food upgraded", tostring(nextFood.Name))
 			else
 				STATE.upgradeStatus = "Food: " .. tostring(result.Reason or "rejected")
 			end
@@ -1343,6 +1493,7 @@ local function stepUpgrades()
 				if result.Ok then
 					STATE.upgradeStatus = "Equipped " .. tostring((FoodsConfig.GetAny and FoodsConfig.GetAny(best) or {}).Name or ("food " .. best))
 					changed = true
+					notify("progress", "Food equipped", (STATE.upgradeStatus:gsub("^Equipped%s+", "")))
 				else
 					STATE.upgradeStatus = "Food equip: " .. tostring(result.Reason or "rejected")
 				end
@@ -1359,6 +1510,7 @@ local function stepUpgrades()
 				changed = true
 				STATE.upgradeStatus = "Bought " .. tostring(nextStand.Name)
 				noteActivity(STATE.upgradeStatus)
+				notify("progress", "Stand upgraded", tostring(nextStand.Name))
 			else
 				STATE.upgradeStatus = "Stand: " .. tostring(result.Reason or "rejected")
 			end
@@ -1374,6 +1526,7 @@ local function stepUpgrades()
 				changed = true
 				STATE.upgradeStatus = "Fence upgraded"
 				noteActivity(STATE.upgradeStatus)
+				notify("progress", "Fence upgraded", "A new plot slot is available")
 			else
 				STATE.upgradeStatus = "Fence: " .. tostring(result.Reason or "rejected")
 			end
@@ -1398,6 +1551,9 @@ function STATE.equipBestNow()
 		STATE.equipStatus = changed > 0 and ("Equipped " .. tostring(result.Count or result.Placed or changed)) or "Best already equipped"
 		STATE.status = STATE.equipStatus
 		noteActivity(STATE.equipStatus)
+		if changed > 0 then
+			notify("progress", "Best team equipped", STATE.equipStatus)
+		end
 		return true
 	end
 	STATE.equipStatus = "Equip: " .. tostring(result.Reason or "rejected")
@@ -1529,7 +1685,10 @@ function STATE.sellJunkNow(force)
 	restorePosition(root, old)
 	releaseBusy(tokenName)
 	STATE.sellStatus = sold > 0 and ("Sold " .. sold .. " weak animals") or (rejected and ("Sell: " .. rejected) or "Nothing safe to sell")
-	if sold > 0 then noteActivity(STATE.sellStatus) end
+	if sold > 0 then
+		noteActivity(STATE.sellStatus)
+		notify("sale", "Animals sold", STATE.sellStatus)
+	end
 	return sold
 end
 
@@ -1546,6 +1705,7 @@ local function stepRewards()
 			stats.rewards += 1
 			STATE.rewardStatus = "Claimed offline earnings"
 			noteActivity(STATE.rewardStatus)
+			notify("progress", "Offline earnings claimed", "Your saved animal income was collected")
 		else
 			STATE.rewardStatus = "Offline reward: " .. tostring(result.Reason or "rejected")
 		end
@@ -1557,6 +1717,7 @@ local function stepRewards()
 			stats.rewards += 1
 			STATE.rewardStatus = "Claimed free animal"
 			noteActivity(STATE.rewardStatus)
+			notify("progress", "Free animal claimed", "Check the catch notification for its details")
 		elseif result.Reason then
 			STATE.rewardStatus = "Free reward: " .. tostring(result.Reason)
 		end
@@ -1726,35 +1887,191 @@ hubCleanup(function()
 end)
 
 local graphicsBefore = nil
-function STATE.applyFpsBoost()
-	if STATE.fpsBoost == true then
-		graphicsBefore = graphicsBefore or { shadows = Lighting.GlobalShadows, effects = {} }
-		pcall(function()
-			graphicsBefore.quality = graphicsBefore.quality or settings().Rendering.QualityLevel
-			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+local potatoVisuals = {}
+local potatoEpoch = 0
+local potatoChanged = 0
+
+local function potatoSet(object, property, value)
+	if not object or object:GetAttribute("ZinoosOwned") == true then
+		return false
+	end
+	local saved = potatoVisuals[object]
+	if not saved then
+		saved = {}
+		potatoVisuals[object] = saved
+		potatoChanged += 1
+	end
+	if saved[property] == nil then
+		local ok, current = pcall(function()
+			return object[property]
 		end)
-		Lighting.GlobalShadows = false
-		for _, effect in ipairs(Lighting:GetChildren()) do
-			if effect:IsA("PostEffect") and effect.Enabled then
-				graphicsBefore.effects[effect] = true
-				effect.Enabled = false
-			end
+		if not ok then
+			return false
 		end
-	elseif graphicsBefore then
-		Lighting.GlobalShadows = graphicsBefore.shadows
-		pcall(function()
-			if graphicsBefore.quality then
-				settings().Rendering.QualityLevel = graphicsBefore.quality
-			end
-		end)
-		for effect in pairs(graphicsBefore.effects) do
-			if effect.Parent then
-				effect.Enabled = true
-			end
+		saved[property] = { value = current }
+	end
+	return pcall(function()
+		object[property] = value
+	end)
+end
+
+local function simplifyVisual(object)
+	if STATE.fpsBoost ~= true or object:GetAttribute("ZinoosOwned") == true then
+		return
+	end
+	if object:IsA("BasePart") then
+		potatoSet(object, "Material", Enum.Material.Plastic)
+		potatoSet(object, "MaterialVariant", "")
+		potatoSet(object, "Reflectance", 0)
+		potatoSet(object, "CastShadow", false)
+		if object:IsA("MeshPart") then
+			potatoSet(object, "TextureID", "")
+			potatoSet(object, "RenderFidelity", Enum.RenderFidelity.Performance)
 		end
-		graphicsBefore = nil
+	elseif object:IsA("Decal") or object:IsA("Texture") then
+		potatoSet(object, "Transparency", 1)
+	elseif object:IsA("SpecialMesh") then
+		potatoSet(object, "TextureId", "")
+	elseif object:IsA("SurfaceAppearance") then
+		for _, property in ipairs({ "ColorMap", "MetalnessMap", "NormalMap", "RoughnessMap" }) do
+			potatoSet(object, property, "")
+		end
+	elseif object:IsA("ParticleEmitter")
+		or object:IsA("Trail")
+		or object:IsA("Beam")
+		or object:IsA("Smoke")
+		or object:IsA("Fire")
+		or object:IsA("Sparkles")
+		or object:IsA("PointLight")
+		or object:IsA("SpotLight")
+		or object:IsA("SurfaceLight")
+		or object:IsA("PostEffect") then
+		potatoSet(object, "Enabled", false)
+	elseif object:IsA("Atmosphere") then
+		potatoSet(object, "Density", 0)
+		potatoSet(object, "Haze", 0)
+		potatoSet(object, "Glare", 0)
 	end
 end
+
+local function restorePotatoVisuals()
+	for object, properties in pairs(potatoVisuals) do
+		if object.Parent then
+			for property, saved in pairs(properties) do
+				pcall(function()
+					object[property] = saved.value
+				end)
+			end
+		end
+	end
+	table.clear(potatoVisuals)
+	potatoChanged = 0
+end
+
+local function applyTerrainPotato()
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if not terrain then
+		return
+	end
+	graphicsBefore.terrain = graphicsBefore.terrain or {}
+	for property, value in pairs({
+		WaterWaveSize = 0,
+		WaterWaveSpeed = 0,
+		WaterReflectance = 0,
+		WaterTransparency = 1,
+	}) do
+		if graphicsBefore.terrain[property] == nil then
+			graphicsBefore.terrain[property] = terrain[property]
+		end
+		terrain[property] = value
+	end
+	if graphicsBefore.decoration == nil and typeof(gethiddenproperty) == "function" then
+		local ok, value = pcall(gethiddenproperty, terrain, "Decoration")
+		if ok then
+			graphicsBefore.decoration = value == true
+		end
+	end
+	if typeof(sethiddenproperty) == "function" then
+		pcall(sethiddenproperty, terrain, "Decoration", false)
+	end
+end
+
+local function restoreTerrainPotato(saved)
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if not terrain then
+		return
+	end
+	for property, value in pairs(saved.terrain or {}) do
+		pcall(function()
+			terrain[property] = value
+		end)
+	end
+	if saved.decoration ~= nil and typeof(sethiddenproperty) == "function" then
+		pcall(sethiddenproperty, terrain, "Decoration", saved.decoration)
+	end
+end
+
+function STATE.applyFpsBoost()
+	potatoEpoch += 1
+	local epoch = potatoEpoch
+	if STATE.fpsBoost == true then
+		if not graphicsBefore then
+			graphicsBefore = { shadows = Lighting.GlobalShadows }
+			pcall(function()
+				graphicsBefore.quality = settings().Rendering.QualityLevel
+				settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+			end)
+		end
+		Lighting.GlobalShadows = false
+		applyTerrainPotato()
+		STATE.potatoStatus = "Applying Potato Mode..."
+		task.spawn(function()
+			local objects = Workspace:GetDescendants()
+			for _, object in ipairs(Lighting:GetChildren()) do
+				table.insert(objects, object)
+			end
+			for index, object in ipairs(objects) do
+				if not running() or STATE.fpsBoost ~= true or epoch ~= potatoEpoch then
+					return
+				end
+				simplifyVisual(object)
+				if index % 250 == 0 then
+					task.wait()
+				end
+			end
+			STATE.potatoChangedCount = potatoChanged
+			STATE.potatoStatus = string.format("Potato Mode active • %d visuals simplified", potatoChanged)
+		end)
+	elseif graphicsBefore then
+		local saved = graphicsBefore
+		graphicsBefore = nil
+		Lighting.GlobalShadows = saved.shadows
+		pcall(function()
+			if saved.quality then
+				settings().Rendering.QualityLevel = saved.quality
+			end
+		end)
+		restoreTerrainPotato(saved)
+		restorePotatoVisuals()
+		STATE.potatoChangedCount = 0
+		STATE.potatoStatus = "Potato Mode off"
+		if STATE.hidePets == true and typeof(STATE.applyHidePets) == "function" then
+			STATE.applyHidePets()
+		end
+	end
+end
+
+trackConnection(Workspace.DescendantAdded:Connect(function(object)
+	if STATE.fpsBoost == true then
+		task.defer(simplifyVisual, object)
+	end
+end))
+trackConnection(Lighting.ChildAdded:Connect(function(object)
+	if STATE.fpsBoost == true then
+		task.defer(simplifyVisual, object)
+	end
+end))
+
 hubCleanup(function()
 	STATE.fpsBoost = false
 	STATE.applyFpsBoost()
@@ -1764,6 +2081,9 @@ local hiddenPetVisuals = {}
 local hiddenPetRoots = {}
 
 local function hidePetVisual(object)
+	if object:GetAttribute("ZinoosOwned") == true then
+		return
+	end
 	local saved = hiddenPetVisuals[object]
 	if saved then
 		if saved.kind == "part" then
@@ -1832,11 +2152,11 @@ local function restorePetVisuals()
 		pcall(function()
 			if saved.kind == "part" then
 				object.LocalTransparencyModifier = saved.localTransparency
-				object.CastShadow = saved.castShadow
+				object.CastShadow = STATE.fpsBoost == true and false or saved.castShadow
 			elseif saved.kind == "transparency" then
-				object.Transparency = saved.transparency
+				object.Transparency = STATE.fpsBoost == true and 1 or saved.transparency
 			elseif saved.kind == "enabled" then
-				object.Enabled = saved.enabled
+				object.Enabled = STATE.fpsBoost == true and false or saved.enabled
 			end
 		end)
 	end
@@ -1886,6 +2206,216 @@ end))
 hubCleanup(function()
 	STATE.hidePets = false
 	restorePetVisuals()
+	STATE.fpsBoost = false
+	STATE.applyFpsBoost()
+end)
+
+-- Lightweight animal ESP. It reads the game's confirmed PlotAnimal attributes and
+-- keeps its own UI under CoreGui so Hide Animal Models can stay enabled.
+local ESP_COLORS = {
+	Common = Color3.fromRGB(190, 198, 210),
+	Uncommon = Color3.fromRGB(95, 220, 130),
+	Rare = Color3.fromRGB(70, 155, 255),
+	Epic = Color3.fromRGB(180, 95, 255),
+	Legendary = Color3.fromRGB(255, 185, 60),
+	Mythic = Color3.fromRGB(255, 80, 135),
+	Secret = Color3.fromRGB(255, 245, 150),
+	Divine = Color3.fromRGB(255, 255, 255),
+	Celestial = Color3.fromRGB(90, 235, 255),
+	Eternal = Color3.fromRGB(255, 105, 225),
+	Cosmic = Color3.fromRGB(125, 105, 255),
+	Supreme = Color3.fromRGB(255, 80, 80),
+}
+local espFolder = Instance.new("Folder")
+espFolder.Name = "ZinoosThrowFoodESP"
+elevate()
+espFolder.Parent = CoreGui
+local espEntries = {}
+
+local function clearEspEntry(root)
+	local entry = espEntries[root]
+	if not entry then
+		return
+	end
+	for _, object in ipairs({ entry.billboard, entry.highlight }) do
+		if object then
+			pcall(function()
+				object:Destroy()
+			end)
+		end
+	end
+	espEntries[root] = nil
+end
+
+local function clearEsp()
+	for root in pairs(espEntries) do
+		clearEspEntry(root)
+	end
+	STATE.espStatus = "ESP off"
+end
+
+local function espLimit()
+	if STATE.espMaxDistance == "Unlimited" then
+		return math.huge
+	end
+	return tonumber(STATE.espMaxDistance) or 500
+end
+
+local function espAllowed(root, distance)
+	if STATE.espEnabled ~= true or not root or not root:IsDescendantOf(workspace) then
+		return false
+	end
+	local rarity = root:GetAttribute("Rarity") or "Common"
+	if not listContains(STATE.espRarities, rarity) then
+		return false
+	end
+	if STATE.espOwnOnly == true and root:GetAttribute("OwnerUserId") ~= LocalPlayer.UserId then
+		return false
+	end
+	return distance <= espLimit()
+end
+
+local function ensureEspEntry(root, adornee)
+	local entry = espEntries[root]
+	if entry and entry.adornee == adornee and entry.billboard.Parent then
+		return entry
+	end
+	clearEspEntry(root)
+	elevate()
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "ZinoosAnimalESP"
+	billboard:SetAttribute("ZinoosOwned", true)
+	billboard.Adornee = adornee
+	billboard.AlwaysOnTop = true
+	billboard.LightInfluence = 0
+	billboard.Size = UDim2.fromOffset(210, 54)
+	billboard.StudsOffsetWorldSpace = Vector3.new(0, 4, 0)
+	billboard.Parent = espFolder
+
+	local text = Instance.new("TextLabel")
+	text.Name = "Details"
+	text.BackgroundColor3 = Color3.fromRGB(8, 11, 17)
+	text.BackgroundTransparency = 0.2
+	text.BorderSizePixel = 0
+	text.Size = UDim2.fromScale(1, 1)
+	text.Font = Enum.Font.GothamBold
+	text.TextSize = 13
+	text.TextWrapped = true
+	text.TextStrokeColor3 = Color3.new(0, 0, 0)
+	text.TextStrokeTransparency = 0.35
+	text.Parent = billboard
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 7)
+	corner.Parent = text
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 1
+	stroke.Transparency = 0.2
+	stroke.Parent = text
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "ZinoosAnimalESP"
+	highlight:SetAttribute("ZinoosOwned", true)
+	highlight.Adornee = root
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 0.88
+	highlight.OutlineTransparency = 0.08
+	highlight.Parent = espFolder
+
+	entry = {
+		adornee = adornee,
+		billboard = billboard,
+		label = text,
+		stroke = stroke,
+		highlight = highlight,
+	}
+	espEntries[root] = entry
+	return entry
+end
+
+function STATE.refreshEsp()
+	if STATE.espEnabled ~= true then
+		clearEsp()
+		return 0
+	end
+	local playerRoot = rootPart()
+	local candidates = {}
+	local bestByPlot = {}
+	for _, root in ipairs(CollectionService:GetTagged("PlotAnimal")) do
+		if root:IsDescendantOf(workspace) then
+			local adornee = root.PrimaryPart or root:FindFirstChildWhichIsA("BasePart", true)
+			local position = adornee and adornee.Position
+			local distance = playerRoot and position and (playerRoot.Position - position).Magnitude or 0
+			if adornee and espAllowed(root, distance) then
+				local candidate = {
+					root = root,
+					adornee = adornee,
+					distance = distance,
+					income = tonumber(root:GetAttribute("Income")) or 0,
+				}
+				if STATE.espAllAnimals == true then
+					table.insert(candidates, candidate)
+				else
+					local plotKey = tostring(root:GetAttribute("OwnerUserId") or 0) .. ":" .. tostring(root:GetAttribute("PlotIndex") or "?")
+					local current = bestByPlot[plotKey]
+					if not current or candidate.income > current.income then
+						bestByPlot[plotKey] = candidate
+					end
+				end
+			end
+		end
+	end
+	if STATE.espAllAnimals ~= true then
+		for _, candidate in pairs(bestByPlot) do
+			table.insert(candidates, candidate)
+		end
+	end
+	table.sort(candidates, function(a, b)
+		return a.distance < b.distance
+	end)
+
+	local seen = {}
+	local visible = 0
+	for _, candidate in ipairs(candidates) do
+		local root = candidate.root
+		local adornee = candidate.adornee
+		local distance = candidate.distance
+		if root:IsDescendantOf(workspace) and adornee.Parent then
+				seen[root] = true
+				visible += 1
+				local rarity = root:GetAttribute("Rarity") or "Common"
+				local color = ESP_COLORS[rarity] or Color3.new(1, 1, 1)
+				local displayName = root:GetAttribute("DisplayName") or root:GetAttribute("AnimalName") or root.Name
+				local mutation = root:GetAttribute("Mutation")
+				local income = candidate.income
+				local ownerId = tonumber(root:GetAttribute("OwnerUserId")) or 0
+				local owner = ownerId == LocalPlayer.UserId and "You" or ((Players:GetPlayerByUserId(ownerId) or {}).DisplayName or "Other plot")
+				local entry = ensureEspEntry(root, adornee)
+				elevate()
+				entry.label.Text = string.format("%s%s  [%s]\n$%s/s  •  %dm  •  %s", mutation and (mutation .. " ") or "", tostring(displayName), tostring(rarity), shortNumber(income), math.floor(distance + 0.5), tostring(owner))
+				entry.label.TextColor3 = color
+				entry.stroke.Color = color
+				entry.highlight.FillColor = color
+				entry.highlight.OutlineColor = color
+				local ok, size = pcall(root.GetExtentsSize, root)
+				entry.billboard.StudsOffsetWorldSpace = Vector3.new(0, ok and math.clamp(size.Y * 0.6 + 1.5, 3, 14) or 4, 0)
+		end
+	end
+	for root in pairs(espEntries) do
+		if not seen[root] then
+			clearEspEntry(root)
+		end
+	end
+	STATE.espStatus = STATE.espAllAnimals == true
+		and string.format("ESP showing %d animals", visible)
+		or string.format("ESP showing %d strongest plot animals", visible)
+	return visible
+end
+
+hubCleanup(function()
+	clearEsp()
+	pcall(function()
+		espFolder:Destroy()
+	end)
 end)
 
 -- Server helpers.
@@ -2013,6 +2543,127 @@ local function installHub()
 	gui.DisplayOrder = 220
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.Parent = CoreGui
+
+	local toastHost = Instance.new("Frame")
+	toastHost.Name = "Notifications"
+	toastHost.BackgroundTransparency = 1
+	toastHost.AnchorPoint = Vector2.new(1, 0)
+	toastHost.Position = UDim2.new(1, -18, 0, 18)
+	toastHost.Size = UDim2.fromOffset(320, 420)
+	toastHost.ZIndex = 80
+	toastHost.Parent = gui
+	local toastLayout = Instance.new("UIListLayout")
+	toastLayout.Padding = UDim.new(0, 8)
+	toastLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+	toastLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	toastLayout.Parent = toastHost
+	local activeToasts = {}
+	local toastSerial = 0
+	local lastToastKey = nil
+	local lastToastAt = 0
+
+	STATE.toast = function(entry)
+		elevate()
+		local key = tostring(entry.title) .. "\0" .. tostring(entry.message)
+		if key == lastToastKey and os.clock() - lastToastAt < 1.5 then
+			return
+		end
+		lastToastKey = key
+		lastToastAt = os.clock()
+		toastSerial += 1
+		while #activeToasts >= 4 do
+			local oldest = table.remove(activeToasts, 1)
+			if oldest and oldest.Parent then oldest:Destroy() end
+		end
+
+		local color = entry.rarity and ESP_COLORS[entry.rarity]
+			or (entry.category == "sale" and Color3.fromRGB(92, 230, 150))
+			or (entry.category == "progress" and Color3.fromRGB(255, 190, 80))
+			or accent
+		local toast = Instance.new("CanvasGroup")
+		toast.Name = "Toast"
+		toast.BackgroundColor3 = cardColor
+		toast.BackgroundTransparency = 0.04
+		toast.BorderSizePixel = 0
+		toast.GroupTransparency = 1
+		toast.LayoutOrder = -toastSerial
+		toast.Size = UDim2.fromOffset(310, 72)
+		toast.ZIndex = 81
+		toast.Parent = toastHost
+		role(toast, "card")
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 10)
+		corner.Parent = toast
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = color
+		stroke.Transparency = 0.25
+		stroke.Thickness = 1
+		stroke.Parent = toast
+		local bar = Instance.new("Frame")
+		bar.BackgroundColor3 = color
+		bar.BorderSizePixel = 0
+		bar.Size = UDim2.fromOffset(4, 48)
+		bar.Position = UDim2.fromOffset(10, 12)
+		bar.ZIndex = 82
+		bar.Parent = toast
+		local barCorner = Instance.new("UICorner")
+		barCorner.CornerRadius = UDim.new(1, 0)
+		barCorner.Parent = bar
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamBold
+		title.Text = tostring(entry.title)
+		title.TextColor3 = ink
+		title.TextSize = 14
+		title.TextTruncate = Enum.TextTruncate.AtEnd
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Position = UDim2.fromOffset(24, 10)
+		title.Size = UDim2.new(1, -56, 0, 20)
+		title.ZIndex = 82
+		title.Parent = toast
+		role(title, "ink")
+		local body = Instance.new("TextLabel")
+		body.BackgroundTransparency = 1
+		body.Font = Enum.Font.Gotham
+		body.Text = tostring(entry.message)
+		body.TextColor3 = muted
+		body.TextSize = 12
+		body.TextWrapped = true
+		body.TextXAlignment = Enum.TextXAlignment.Left
+		body.TextYAlignment = Enum.TextYAlignment.Top
+		body.Position = UDim2.fromOffset(24, 32)
+		body.Size = UDim2.new(1, -38, 0, 30)
+		body.ZIndex = 82
+		body.Parent = toast
+		role(body, "muted")
+		local close = Instance.new("TextButton")
+		close.BackgroundTransparency = 1
+		close.Font = Enum.Font.GothamBold
+		close.Text = "×"
+		close.TextColor3 = muted
+		close.TextSize = 18
+		close.Position = UDim2.new(1, -30, 0, 5)
+		close.Size = UDim2.fromOffset(24, 24)
+		close.ZIndex = 83
+		close.Parent = toast
+		role(close, "muted")
+		table.insert(activeToasts, toast)
+
+		local closing = false
+		local function dismiss()
+			if closing or not toast.Parent then return end
+			closing = true
+			playMotion(toast, { GroupTransparency = 1 }, tweenInfo.fade)
+			task.delay(0.22, function()
+				local index = table.find(activeToasts, toast)
+				if index then table.remove(activeToasts, index) end
+				if toast.Parent then toast:Destroy() end
+			end)
+		end
+		close.Activated:Connect(dismiss)
+		playMotion(toast, { GroupTransparency = 0 }, tweenInfo.fade)
+		task.delay(4.5, dismiss)
+	end
 
 	local uiScale = Instance.new("UIScale")
 	uiScale.Parent = gui
@@ -2875,6 +3526,10 @@ local function installHub()
 			STATE.applyFpsBoost()
 		elseif key == "hidePets" then
 			STATE.applyHidePets()
+		elseif key == "espEnabled" or key == "espOwnOnly" or key == "espAllAnimals" then
+			task.defer(STATE.refreshEsp)
+		elseif key == "notifications" and on then
+			task.defer(notify, "system", "Notifications enabled", "Catches, sales and progress will appear here")
 		elseif key == "autoTrain" and not on then
 			task.spawn(stopTraining)
 		elseif key == "autoSell" then
@@ -3280,7 +3935,11 @@ local function installHub()
 			end
 		end
 		STATE[key] = ordered
-		nextSellAt = 0
+		if key == "espRarities" then
+			task.defer(STATE.refreshEsp)
+		else
+			nextSellAt = 0
+		end
 		saveConfig()
 	end
 
@@ -3304,6 +3963,27 @@ local function installHub()
 	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals only on your screen; nothing is unequipped or sold")
 	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 56)
 	STATE.uiStatusLabels.animals.LayoutOrder = 90
+
+	local espCard = card(pages.Animals, "ANIMAL ESP", 2)
+	makeSwitch(espCard, "Animal ESP", "espEnabled", "Shows names, rarity, mutation, income, distance and owner through walls")
+	makeSwitch(espCard, "My Plot Only", "espOwnOnly", "Only show animals owned by your account")
+	makeSwitch(espCard, "Show Every Animal", "espAllAnimals", "Off keeps one strongest animal per plot so labels stay readable")
+	makeMultiDropdown(espCard, "ESP Rarities", function()
+		return STATE.espRarities
+	end, RARITY_OPTIONS, function(option)
+		toggleSelection("espRarities", option, RARITY_OPTIONS)
+	end, function(list)
+		return selectedLabel(list, RARITY_OPTIONS)
+	end)
+	makeDropdown(espCard, "ESP Distance", function()
+		return STATE.espMaxDistance
+	end, ESP_DISTANCE_OPTIONS, function(option)
+		STATE.espMaxDistance = option
+		saveConfig()
+		task.defer(STATE.refreshEsp)
+	end)
+	STATE.uiStatusLabels.esp = label(espCard, STATE.espStatus or "ESP off", 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.esp.LayoutOrder = 90
 
 	local progressCard = card(pages.Progress, "UPGRADES", 1)
 	makeSwitch(progressCard, "Auto Buy Best Food", "autoFood", "Buys and equips the next affordable food")
@@ -3348,7 +4028,26 @@ local function installHub()
 	makeSwitch(rewardCard, "Auto Free Animal", "autoFree", "Claims the free shop animal when available")
 	STATE.uiStatusLabels.reward = label(rewardCard, "Status · " .. tostring(STATE.rewardStatus), 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.reward.LayoutOrder = 90
-	local screenCard = card(pages.Settings, "DISPLAY", 2)
+
+	local notificationCard = card(pages.Settings, "NOTIFICATIONS", 2)
+	makeSwitch(notificationCard, "Hub Notifications", "notifications", "Shows clean on-screen updates even while the dashboard is closed")
+	makeSwitch(notificationCard, "Catch Notifications", "notifyCatches", "Shows the animal, mutation, rarity and income you just received")
+	makeSwitch(notificationCard, "Sale Notifications", "notifySales", "Shows how many filtered animals Smart Sell removed")
+	makeSwitch(notificationCard, "Upgrade & Reward Notifications", "notifyProgress", "Shows food, stand, fence, team and reward progress")
+	local notificationNote
+	makeDropdown(notificationCard, "Minimum Catch Rarity", function()
+		return STATE.notifyMinRarity
+	end, NOTIFY_RARITY_OPTIONS, function(option)
+		STATE.notifyMinRarity = option
+		if notificationNote then
+			notificationNote.Text = option == "All" and "Catch filter · All catches" or ("Catch filter · " .. tostring(option) .. " and above")
+		end
+		saveConfig()
+	end)
+	notificationNote = label(notificationCard, STATE.notifyMinRarity == "All" and "Catch filter · All catches" or ("Catch filter · " .. tostring(STATE.notifyMinRarity) .. " and above"), 12, accent, Enum.Font.GothamMedium, 18)
+	notificationNote.LayoutOrder = 90
+
+	local screenCard = card(pages.Settings, "DISPLAY", 3)
 	makeDropdown(screenCard, "Hub Size", function()
 		return STATE.hubSize or "Compact"
 	end, { "Compact", "Normal", "Large" }, function(option)
@@ -3409,7 +4108,7 @@ local function installHub()
 		return chipValue
 	end
 
-	local lookCard = card(pages.Settings, "THEME", 3)
+	local lookCard = card(pages.Settings, "THEME", 4)
 	local themeNote = label(lookCard, "Paste a theme and import it. It saves on this account.", 12, muted, Enum.Font.Gotham, 32)
 	themeNote.LayoutOrder = 1
 	local themeBox = Instance.new("TextBox")
@@ -3593,6 +4292,12 @@ local function installHub()
 			end
 		end
 		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\n%d animals · %d placed · %d backpack\n%s", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount, STATE.petVisibilityStatus or "Checking animal visibility")
+		if STATE.uiStatusLabels.esp then
+			STATE.uiStatusLabels.esp.Text = STATE.espStatus or "ESP off"
+		end
+		if STATE.uiStatusLabels.potato then
+			STATE.uiStatusLabels.potato.Text = STATE.potatoStatus or "Potato Mode off"
+		end
 	end
 	STATE.refreshActivity = refreshActivity
 
@@ -3635,6 +4340,9 @@ local function installHub()
 		remember(button, parentFrame, text)
 		return button
 	end
+	actionButton(notificationCard, "Test Notification", 91, false, function()
+		notify("system", "Notifications are working", "ZinoosHub will show catches, sales and progress here")
+	end)
 	local playerSlot = Instance.new("Frame")
 	playerSlot.BackgroundTransparency = 1
 	playerSlot.BorderSizePixel = 0
@@ -3678,7 +4386,7 @@ local function installHub()
 	makeSwitch(clientCard, "No Gameplay Paused", "noPausePopup", "Hides the Gameplay Paused popup")
 	makeSwitch(clientCard, "Auto Reconnect on Kick", "autoReconnect", "Rejoins the game when you get disconnected")
 	makeSwitch(clientCard, "Disable 3D Rendering", "disable3d", "Big FPS saver while you AFK")
-	makeSwitch(clientCard, "FPS Boost", "fpsBoost", "Lowest graphics, no shadows or effects")
+	makeSwitch(clientCard, "Potato Mode", "fpsBoost", "Reversible low-detail mode: removes textures, particles, beams, lights, heavy materials, water effects and shadows")
 	makeSwitch(clientCard, "Hide UI On Start", "hideOnStart", "Starts hidden. Press the toggle key to show it")
 	makeDropdown(clientCard, "Toggle Key", function()
 		return STATE.toggleKey
@@ -3686,6 +4394,8 @@ local function installHub()
 		STATE.toggleKey = option
 		saveConfig()
 	end)
+	STATE.uiStatusLabels.potato = label(clientCard, STATE.potatoStatus or "Potato Mode off", 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.potato.LayoutOrder = 90
 
 	local serverCard = card(playerPage, "SERVER", 5)
 	local serverNote = label(serverCard, "Job " .. string.sub(game.JobId, 1, 8) .. "...  ·  Place " .. tostring(game.PlaceId), 12, muted, Enum.Font.Gotham, 16)
@@ -4276,7 +4986,7 @@ local function installHub()
 	end
 	do
 		local discordInvite = "https://discord.gg/94pC3T6NZG"
-		local communityCard = card(pages.Settings, "COMMUNITY", 4)
+		local communityCard = card(pages.Settings, "COMMUNITY", 5)
 		local communityNote = label(communityCard, "Join the ZinoosHub Discord for updates, support and new games.", 13, muted, Enum.Font.Gotham, 36)
 		communityNote.LayoutOrder = 1
 		local communityResult = label(communityCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -4303,7 +5013,7 @@ local function installHub()
 	end
 
 	do
-	local saveCard = card(pages.Settings, "CONFIG", 5)
+	local saveCard = card(pages.Settings, "CONFIG", 6)
 	local saveNote = label(saveCard, "Saves the toggles, timings and theme for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
 	saveNote.LayoutOrder = 1
 	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -4395,6 +5105,18 @@ end)
 pcall(STATE.apply3d)
 pcall(STATE.applyFpsBoost)
 pcall(STATE.applyHidePets)
+pcall(stepAnimalNotifications)
+pcall(STATE.refreshEsp)
+
+task.spawn(function()
+	while running() do
+		pcall(stepAnimalNotifications)
+		if STATE.espEnabled == true then
+			pcall(STATE.refreshEsp)
+		end
+		task.wait(0.6)
+	end
+end)
 
 task.spawn(function()
 	while running() do
