@@ -43,7 +43,7 @@ local MUTATION_OPTIONS = { "Gold", "Diamond", "Emerald", "Ruby", "Rainbow" }
 
 local STATE = {
 	_gen = token,
-	version = "2.2.0",
+	version = "2.2.1",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -2591,6 +2591,30 @@ local function installHub()
 			mark(6, 6, 9, 0, false)
 			mark(6, 6, 0, 9, false)
 			mark(6, 6, 9, 9, false)
+		elseif kind == "Animals" then
+			mark(3, 3, 0, 2, true)
+			mark(3, 3, 4, 0, true)
+			mark(3, 3, 9, 0, true)
+			mark(3, 3, 13, 2, true)
+			mark(10, 7, 3, 8, true)
+		elseif kind == "Progress" then
+			mark(3, 5, 1, 10, false)
+			mark(3, 9, 6, 6, false)
+			mark(3, 13, 11, 2, false)
+		elseif kind == "Selling" then
+			mark(12, 5, 2, 1, true)
+			mark(12, 5, 2, 6, true)
+			mark(12, 5, 2, 11, true)
+		elseif kind == "Player" then
+			mark(6, 6, 5, 1, true)
+			mark(12, 6, 2, 9, true)
+		elseif kind == "Settings" then
+			mark(12, 2, 2, 2, false)
+			mark(3, 3, 4, 1, true)
+			mark(12, 2, 2, 7, false)
+			mark(3, 3, 10, 6, true)
+			mark(12, 2, 2, 12, false)
+			mark(3, 3, 6, 11, true)
 		else
 			mark(10, 10, 3, 3, true)
 		end
