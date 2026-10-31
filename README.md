@@ -8,6 +8,7 @@ Client automation for Roblox. One loadstring works in every supported game:
 | **Deep Fishing** (Game ID `10526853622`) | `games/DeepFishing.luau` |
 | **Solve The Cube** (Game ID `10769259605`) | `games/SolveTheCube.luau` |
 | **Climb For Animals Eggs** (Game ID `10765490774`) | `games/ClimbAnimals.luau` |
+| **Throw Food For Animals** (Game ID `10766972131`) | `games/ThrowFoodAnimals.luau` |
 
 ## Load it
 
