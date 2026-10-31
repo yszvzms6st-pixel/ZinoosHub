@@ -36,6 +36,7 @@ end
 
 local STATE = {
 	_gen = token,
+	version = "2.0.0",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -166,25 +167,25 @@ local NUMBERS = {
 STATE.defaultTheme = {
 	blush = 1,
 	Kind = "theme",
-	Name = "AstaTheme",
+	Name = "ZinoosDark",
 	Theme = {
 		Colors = {
-			Panel = "151110",
-			Text = "f2ece8",
-			Element = "000000",
-			Risky = "ffffff",
-			Outline = "000000",
-			Hover = "000000",
-			Background = "000000",
-			DimText = "ffffff",
-			Accent = "fff1e9",
+			Panel = "10141c",
+			Text = "f5f7fb",
+			Element = "171d28",
+			Risky = "ff6577",
+			Outline = "2a3445",
+			Hover = "1d2532",
+			Background = "0b0f15",
+			DimText = "9ba8ba",
+			Accent = "8268ff",
 		},
 		Glow = false,
-		ElementGlow = true,
-		CardOpacity = 0.66,
+		ElementGlow = false,
+		CardOpacity = 0.98,
 		Wallpaper = {
-			Image = "https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/8239b4cd-652e-4ebf-a692-6a796f1bc0c6.jpg",
-			Transparency = 0.17,
+			Image = "",
+			Transparency = 1,
 		},
 		Icon = "https://ysoyjfnigavjajrjftmv.supabase.co/storage/v1/object/public/theme-images/63c9defa-4d08-4112-bbfe-d981407516df.jpg",
 	},
@@ -729,7 +730,7 @@ local function borrowLiftRockTheme()
 	local ok, saved = pcall(function()
 		return game:GetService("HttpService"):JSONDecode(readfile(path))
 	end)
-	if ok and type(saved) == "table" and type(saved.ThemeData) == "table" then
+	if ok and type(saved) == "table" and type(saved.ThemeData) == "table" and saved.Theme ~= "AstaTheme" and saved.Theme ~= "ZinoosDark" then
 		local look, name, source = STATE.readTheme(saved.ThemeData)
 		if type(look) == "table" then
 			STATE.hubThemeLook = look
@@ -786,7 +787,7 @@ local function loadSaved()
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
 	end
-	if type(saved.ThemeData) == "table" then
+	if type(saved.ThemeData) == "table" and saved.Theme ~= "AstaTheme" and saved.Theme ~= "ZinoosDark" then
 		local look, name, source = STATE.readTheme(saved.ThemeData)
 		if type(look) == "table" then
 			STATE.hubThemeLook = look
@@ -819,7 +820,7 @@ local function saveConfig()
 		DockX = STATE.dockX,
 		DockY = STATE.dockY,
 		DockCustom = STATE.dockCustom == true,
-		Theme = type(STATE.themeName) == "string" and STATE.themeName or "AstaTheme",
+		Theme = type(STATE.themeName) == "string" and STATE.themeName or "ZinoosDark",
 		ThemeData = type(STATE.themeSource) == "table" and STATE.themeSource or nil,
 	}
 	for flag, key in pairs(FLAG_KEYS) do
@@ -968,9 +969,13 @@ local function invoke(name, ...)
 	return type(result) == "table" and result or { Ok = result ~= false }
 end
 
+local function publicStatus(value)
+	return (tostring(value or "game"):gsub("ZinoosHub([%w_]+)", "%1"))
+end
+
 local function claimBusy(label)
 	if ClientState.Busy ~= nil then
-		return nil, tostring(ClientState.Busy)
+		return nil, publicStatus(ClientState.Busy)
 	end
 	local tokenName = "ZinoosHub" .. tostring(label)
 	ClientState.Busy = tokenName
@@ -1133,7 +1138,7 @@ local function stepThrow()
 		STATE.throwStatus = STATE.perfectMeter and "Perfect throw running" or "Throw running"
 		return 0.25
 	elseif busy then
-		STATE.status = "Waiting for " .. tostring(busy)
+		STATE.status = "Waiting for " .. publicStatus(busy)
 		STATE.throwStatus = "Waiting for game"
 		return 0.5
 	end
@@ -1224,7 +1229,7 @@ local function stepTraining()
 	if not trainingSession then
 		trainingToken = claimBusy("Training")
 		if not trainingToken then
-			STATE.trainingStatus = "Waiting for " .. tostring(ClientState.Busy or "game")
+			STATE.trainingStatus = "Waiting for " .. publicStatus(ClientState.Busy)
 			return
 		end
 		trainingRoot, trainingReturn = moveNear(trainingTarget())
@@ -1379,16 +1384,18 @@ local function animalIncome(entry)
 	return ok and tonumber(value) or 0
 end
 
-local nextSellAt = 0
-function STATE.sellJunkNow(force)
+local function buildSellPlan()
 	local animals = getData("Animals")
 	if type(animals) ~= "table" then
-		STATE.sellStatus = "No animals"
-		return 0
+		return nil
 	end
 	local ranked = {}
+	local summary = { total = 0, placed = 0, mutated = 0, eligible = 0 }
 	for id, entry in pairs(animals) do
 		if type(entry) == "table" then
+			summary.total += 1
+			if entry.Placed then summary.placed += 1 end
+			if entry.Mutation then summary.mutated += 1 end
 			table.insert(ranked, { id = id, entry = entry, income = animalIncome(entry) })
 		end
 	end
@@ -1398,6 +1405,28 @@ function STATE.sellJunkNow(force)
 	local keep = {}
 	for index = 1, math.min(math.max(0, STATE.keepBest), #ranked) do
 		keep[ranked[index].id] = true
+	end
+	for _, item in ipairs(ranked) do
+		local entry = item.entry
+		if not entry.Placed and not keep[item.id] and not (STATE.keepMutations and entry.Mutation) then
+			summary.eligible += 1
+		end
+	end
+	summary.keepBest = math.min(math.max(0, STATE.keepBest), #ranked)
+	return ranked, keep, summary
+end
+
+function STATE.sellPreview()
+	local _, _, summary = buildSellPlan()
+	return summary
+end
+
+local nextSellAt = 0
+function STATE.sellJunkNow(force)
+	local ranked, keep = buildSellPlan()
+	if not ranked then
+		STATE.sellStatus = "No animals"
+		return 0
 	end
 	local tokenName, busy = claimBusy("Sell")
 	if not tokenName then
@@ -1914,7 +1943,7 @@ local function installHub()
 	local dockName = Instance.new("TextLabel")
 	dockName.BackgroundTransparency = 1
 	dockName.Font = Enum.Font.GothamBold
-	dockName.Text = LocalPlayer.DisplayName
+	dockName.Text = "ZinoosHub"
 	dockName.TextColor3 = ink
 	role(dockName, "ink")
 	dockName.TextSize = 15
@@ -1926,9 +1955,9 @@ local function installHub()
 	local dockGame = Instance.new("TextLabel")
 	dockGame.BackgroundTransparency = 1
 	dockGame.Font = Enum.Font.Gotham
-	dockGame.Text = STATE.admin and "Admin" or "Throw Food Animals"
-	dockGame.TextColor3 = STATE.admin and accent or muted
-	role(dockGame, STATE.admin and "accentText" or "muted")
+	dockGame.Text = "Throw Food For Animals · v" .. STATE.version
+	dockGame.TextColor3 = muted
+	role(dockGame, "muted")
 	dockGame.TextSize = 12
 	dockGame.TextXAlignment = Enum.TextXAlignment.Left
 	dockGame.Position = UDim2.fromOffset(60, 32)
@@ -1977,7 +2006,7 @@ local function installHub()
 	local dockHint = Instance.new("TextLabel")
 	dockHint.BackgroundTransparency = 1
 	dockHint.Font = Enum.Font.Gotham
-	dockHint.Text = "Click or press Right Ctrl to open"
+	dockHint.Text = "Open dashboard  →"
 	dockHint.TextColor3 = muted
 	role(dockHint, "muted")
 	dockHint.TextSize = 12
@@ -1985,6 +2014,15 @@ local function installHub()
 	dockHint.Position = UDim2.fromOffset(14, 100)
 	dockHint.Size = UDim2.new(1, -28, 0, 18)
 	dockHint.Parent = launcher
+	local launcherOpenButton = Instance.new("TextButton")
+	launcherOpenButton.Name = "Open"
+	launcherOpenButton.AutoButtonColor = false
+	launcherOpenButton.BackgroundTransparency = 1
+	launcherOpenButton.Text = ""
+	launcherOpenButton.Position = UDim2.fromOffset(8, 94)
+	launcherOpenButton.Size = UDim2.new(1, -16, 0, 34)
+	launcherOpenButton.ZIndex = 10
+	launcherOpenButton.Parent = launcher
 	local fpsCount = 0
 	trackConnection(RunService.Heartbeat:Connect(function()
 		fpsCount += 1
@@ -2123,7 +2161,7 @@ local function installHub()
 	local brand = Instance.new("TextLabel")
 	brand.BackgroundTransparency = 1
 	brand.Font = Enum.Font.GothamBold
-	brand.Text = "Zinoos"
+	brand.Text = "ZinoosHub"
 	brand.TextColor3 = ink
 	role(brand, "ink")
 	brand.TextSize = 16
@@ -2135,7 +2173,7 @@ local function installHub()
 	local brandSub = Instance.new("TextLabel")
 	brandSub.BackgroundTransparency = 1
 	brandSub.Font = Enum.Font.Gotham
-	brandSub.Text = "Throw Food Animals"
+	brandSub.Text = "Throw Food · v" .. STATE.version
 	brandSub.TextColor3 = muted
 	role(brandSub, "muted")
 	brandSub.TextSize = 12
@@ -2285,11 +2323,15 @@ local function installHub()
 		return page
 	end
 
-	local homePage = newPage("Home")
-	local mainPage = newPage("Main")
+	local homePage = newPage("Dashboard")
+	newPage("Farming")
+	newPage("Animals")
+	newPage("Progress")
+	newPage("Selling")
 	local playerPage = newPage("Player")
+	newPage("Settings")
 
-	local currentPage = "Home"
+	local currentPage = "Dashboard"
 	local pageToken = 0
 	local function playCards(page)
 		if not page then
@@ -2331,11 +2373,16 @@ local function installHub()
 		visit(page)
 	end
 	local function showPage(name)
+		local targetPage = pages[name]
+		if not targetPage then
+			return
+		end
 		currentPage = name
 		for pageName, page in pairs(pages) do
 			page.Visible = pageName == name
 		end
 		pageTitle.Text = name
+		targetPage.CanvasPosition = Vector2.zero
 		local themeNow = STATE.hubThemeDef()
 		for buttonName, button in pairs(navButtons) do
 			local on = buttonName == name
@@ -2385,11 +2432,11 @@ local function installHub()
 			corner.Parent = part
 			return part
 		end
-		if kind == "Home" then
+		if kind == "Dashboard" then
 			mark(10, 7, 3, 8, false)
 			local roof = mark(2, 8, 7, 1, false)
 			roof.Rotation = 40
-		elseif kind == "Main" then
+		elseif kind == "Farming" then
 			mark(6, 6, 0, 0, false)
 			mark(6, 6, 9, 0, false)
 			mark(6, 6, 0, 9, false)
@@ -2450,9 +2497,13 @@ local function installHub()
 			showPage(name)
 		end)
 	end
-	addNav("Home", 1)
-	addNav("Main", 2)
-	addNav("Player", 3)
+	addNav("Dashboard", 1)
+	addNav("Farming", 2)
+	addNav("Animals", 3)
+	addNav("Progress", 4)
+	addNav("Selling", 5)
+	addNav("Player", 6)
+	addNav("Settings", 7)
 
 	local profile = Instance.new("Frame")
 	profile.BackgroundColor3 = cardColor
@@ -2590,27 +2641,26 @@ local function installHub()
 	local searchRows = {}
 	local function remember(row, cardFrame, text)
 		row:SetAttribute("ZinoosSearch", string.lower(text))
-		local page = "Main"
+		local page = "Dashboard"
 		local current = row
 		while current do
-			if current == playerPage then
-				page = "Player"
-				break
-			elseif current == homePage then
-				page = "Home"
-				break
-			elseif current == mainPage then
-				page = "Main"
-				break
+			for pageName, pageObject in pairs(pages) do
+				if current == pageObject then
+					page = pageName
+					current = nil
+					break
+				end
 			end
-			current = current.Parent
+			if current then
+				current = current.Parent
+			end
 		end
 		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text), page = page }
 	end
 
 	local function paintSwitch(track, knob, on, instant)
 		local themeNow = STATE.hubThemeDef()
-		local goal = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+		local goal = on and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 4, 0.5, 0)
 		local color = on and themeNow.accent or themeNow.off
 		local knobColor = on and themeNow.inkDark or themeNow.accent
 		local glow = track:FindFirstChild("Glow")
@@ -2633,9 +2683,17 @@ local function installHub()
 		end
 	end
 
+	local syncToggle
 	local function onToggle(key, on)
 		STATE[key] = on
-		if key == "antiAfk" and on and pulseAntiAfk then
+		if key == "autoThrow" and on then
+			STATE.autoTrain = false
+			task.spawn(stopTraining)
+			if syncToggle then syncToggle("autoTrain") end
+		elseif key == "autoTrain" and on then
+			STATE.autoThrow = false
+			if syncToggle then syncToggle("autoThrow") end
+		elseif key == "antiAfk" and on and pulseAntiAfk then
 			task.defer(pulseAntiAfk)
 		elseif key == "disable3d" then
 			STATE.apply3d()
@@ -2664,7 +2722,8 @@ local function installHub()
 		row.Name = name
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 1
-		row.Size = UDim2.new(1, 0, 0, hint and 50 or 30)
+		row.Size = UDim2.new(1, 0, 0, hint and 58 or 44)
+		row.Active = true
 		row.ZIndex = 6
 		row.Parent = parentBox
 		local title = Instance.new("TextLabel")
@@ -2689,7 +2748,7 @@ local function installHub()
 			note.TextWrapped = true
 			note.TextXAlignment = Enum.TextXAlignment.Left
 			note.Position = UDim2.fromOffset(0, 18)
-			note.Size = UDim2.new(1, -52, 0, 28)
+			note.Size = UDim2.new(1, -60, 0, 34)
 			note.ZIndex = 6
 			note.Parent = row
 		end
@@ -2698,7 +2757,7 @@ local function installHub()
 		track.Text = ""
 		track.AnchorPoint = Vector2.new(1, 0.5)
 		track.Position = UDim2.new(1, 0, 0.5, 0)
-		track.Size = UDim2.fromOffset(36, 20)
+		track.Size = UDim2.fromOffset(42, 24)
 		track.ZIndex = 7
 		track.Parent = row
 		local trackCorner = Instance.new("UICorner")
@@ -2713,7 +2772,7 @@ local function installHub()
 		trackStroke.Parent = track
 		local knob = Instance.new("Frame")
 		knob.AnchorPoint = Vector2.new(0, 0.5)
-		knob.Size = UDim2.fromOffset(14, 14)
+		knob.Size = UDim2.fromOffset(16, 16)
 		knob.BackgroundColor3 = Color3.new(1, 1, 1)
 		knob.BorderSizePixel = 0
 		knob.ZIndex = 8
@@ -2728,14 +2787,34 @@ local function installHub()
 		end
 		control.value = STATE[key] == true
 		paintSwitch(track, knob, control.value, true)
-		onActivate(track, function()
+		local function toggleValue()
 			control.value = not control.value
 			paintSwitch(track, knob, control.value)
 			onToggle(key, control.value == true)
-		end)
+		end
+		onActivate(track, toggleValue)
+		local rowButton = Instance.new("TextButton")
+		rowButton.Name = "RowButton"
+		rowButton.BackgroundTransparency = 1
+		rowButton.Text = ""
+		rowButton.Size = UDim2.fromScale(1, 1)
+		rowButton.ZIndex = 5
+		rowButton.Parent = row
+		onActivate(rowButton, toggleValue)
 		STATE.themeSwitches[#STATE.themeSwitches + 1] = { track = track, knob = knob, key = key }
 		remember(row, parentBox, name .. " " .. (hint or ""))
 		return row
+	end
+	syncToggle = function(key)
+		local control = STATE.toggleControls[key]
+		if type(control) == "table" then
+			control.value = STATE[key] == true
+		end
+		for _, entry in ipairs(STATE.themeSwitches) do
+			if entry.key == key and entry.track.Parent then
+				paintSwitch(entry.track, entry.knob, STATE[key] == true)
+			end
+		end
 	end
 
 	local popupBlock = Instance.new("TextButton")
@@ -2998,52 +3077,35 @@ local function installHub()
 
 	STATE.toggleControls = {}
 
-	local columns = Instance.new("Frame")
-	columns.BackgroundTransparency = 1
-	columns.Size = UDim2.new(1, 0, 0, 0)
-	columns.AutomaticSize = Enum.AutomaticSize.Y
-	columns.Parent = mainPage
-	local columnLayout = Instance.new("UIListLayout")
-	columnLayout.FillDirection = Enum.FillDirection.Horizontal
-	columnLayout.Padding = UDim.new(0, 12)
-	columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	columnLayout.Parent = columns
-
-	local function column(order)
-		local frame = Instance.new("Frame")
-		frame.BackgroundTransparency = 1
-		frame.LayoutOrder = order
-		frame.Size = UDim2.new(0.5, -6, 0, 0)
-		frame.AutomaticSize = Enum.AutomaticSize.Y
-		frame.Parent = columns
-		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 12)
-		layout.SortOrder = Enum.SortOrder.LayoutOrder
-		layout.Parent = frame
-		return frame
-	end
-	local leftColumn = column(1)
-	local rightColumn = column(2)
-		local throwCard = card(leftColumn, "THROWING", 1)
+	STATE.uiStatusLabels = {}
+	local throwCard = card(pages.Farming, "AUTO THROW", 1)
 	makeSwitch(throwCard, "Auto Throw", "autoThrow", "Runs the game's native throw remotes repeatedly")
 	makeSwitch(throwCard, "Perfect Meter", "perfectMeter", "Submits the native meter's maximum result")
 	makeSwitch(throwCard, "Auto Skip Reveals", "autoSkip", "Uses the game's AutoSkip setting")
 	makeSwitch(throwCard, "Use Super Throws", "autoSuper", "Uses stored Super Throws when available")
+	STATE.uiStatusLabels.throw = label(throwCard, "Status · " .. tostring(STATE.throwStatus), 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.throw.LayoutOrder = 90
 
-	local trainCard = card(leftColumn, "TRAINING", 2)
+	local trainCard = card(pages.Farming, "TRAINING", 2)
 	makeSwitch(trainCard, "Auto Train", "autoTrain", "Trains throw power through the native training session")
 	makeSwitch(trainCard, "Auto Tap Bonus", "autoTapBonus", "Claims training tap bonuses while Auto Train is active")
+	STATE.uiStatusLabels.training = label(trainCard, "Status · " .. tostring(STATE.trainingStatus), 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.training.LayoutOrder = 90
 
-	local animalCard = card(leftColumn, "ANIMALS & EGGS", 3)
+	local animalCard = card(pages.Animals, "ANIMALS & EGGS", 1)
 	makeSwitch(animalCard, "Auto Equip Best", "equipBest", "Keeps the strongest animals placed on your plot")
 	makeSwitch(animalCard, "Auto Place Eggs", "autoEggs", "Places owned eggs safely inside your plot")
+	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 38)
+	STATE.uiStatusLabels.animals.LayoutOrder = 90
 
-	local progressCard = card(rightColumn, "UPGRADES", 1)
+	local progressCard = card(pages.Progress, "UPGRADES", 1)
 	makeSwitch(progressCard, "Auto Buy Best Food", "autoFood", "Buys and equips the next affordable food")
 	makeSwitch(progressCard, "Auto Upgrade Stand", "autoStand", "Buys the next affordable training stand")
 	makeSwitch(progressCard, "Auto Upgrade Fence", "autoFence", "Adds plot slots when the next fence is affordable")
+	STATE.uiStatusLabels.upgrade = label(progressCard, "Status · " .. tostring(STATE.upgradeStatus), 12, accent, Enum.Font.GothamMedium, 38)
+	STATE.uiStatusLabels.upgrade.LayoutOrder = 90
 
-	local sellCard = card(rightColumn, "SMART SELL", 2)
+	local sellCard = card(pages.Selling, "SMART SELL", 1)
 	makeSwitch(sellCard, "Auto Sell Weak Animals", "autoSell", "Only sells unplaced animals below your protected best group")
 	makeSwitch(sellCard, "Keep Mutations", "keepMutations", "Never sells Gold, Diamond, Emerald, Ruby or Rainbow animals")
 	makeDropdown(sellCard, "Keep Best Animals", function()
@@ -3058,11 +3120,15 @@ local function installHub()
 		STATE.sellMinutes = tonumber(option) or STATE.sellMinutes
 		saveConfig()
 	end)
+	STATE.uiStatusLabels.sell = label(sellCard, "Checking protected animals...", 12, accent, Enum.Font.GothamMedium, 38)
+	STATE.uiStatusLabels.sell.LayoutOrder = 90
 
-	local rewardCard = card(rightColumn, "REWARDS", 3)
+	local rewardCard = card(pages.Progress, "REWARDS", 2)
 	makeSwitch(rewardCard, "Auto Offline Claim", "autoOffline", "Claims pending offline animal income")
 	makeSwitch(rewardCard, "Auto Free Animal", "autoFree", "Claims the free shop animal when available")
-local screenCard = card(rightColumn, "SCREEN", 4)
+	STATE.uiStatusLabels.reward = label(rewardCard, "Status · " .. tostring(STATE.rewardStatus), 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.reward.LayoutOrder = 90
+	local screenCard = card(pages.Settings, "DISPLAY", 2)
 	makeDropdown(screenCard, "Hub Size", function()
 		return STATE.hubSize or "Compact"
 	end, { "Compact", "Normal", "Large" }, function(option)
@@ -3123,7 +3189,7 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		return chipValue
 	end
 
-	local lookCard = card(homePage, "THEME", 0)
+	local lookCard = card(pages.Settings, "THEME", 3)
 	local themeNote = label(lookCard, "Paste a theme and import it. It saves on this account.", 12, muted, Enum.Font.Gotham, 32)
 	themeNote.LayoutOrder = 1
 	local themeBox = Instance.new("TextBox")
@@ -3207,9 +3273,9 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	introLayout.Padding = UDim.new(0, 4)
 	introLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	introLayout.Parent = intro
-	local welcome = label(intro, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
+	local welcome = label(intro, "ZinoosHub is ready", 22, ink, Enum.Font.GothamBold, 28)
 	welcome.LayoutOrder = 1
-	local blurb = label(intro, "Grabs eggs that beat your team, trains speed, and keeps your team and inventory sorted.", 14, muted, Enum.Font.Gotham, 36)
+	local blurb = label(intro, "Throw, train, upgrade and manage your animals from one clear dashboard.", 14, muted, Enum.Font.Gotham, 36)
 	blurb.LayoutOrder = 2
 	local sessionStarted = os.time()
 	local function sessionClock()
@@ -3237,13 +3303,13 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	statGrid.BackgroundTransparency = 1
 	statGrid.Size = UDim2.new(1, 0, 0, 128)
 	statGrid.Parent = statSlot
-	local solvesText = statChip(statGrid, "Cash", 1)
+	local solvesText = statChip(statGrid, "Money", 1)
 	solvesText.Parent.Position = UDim2.fromOffset(0, 0)
-	local movesText = statChip(statGrid, "Income /s", 2)
+	local movesText = statChip(statGrid, "Animals", 2)
 	movesText.Parent.Position = UDim2.new(0.5, 5, 0, 0)
-	local tableText = statChip(statGrid, "Level", 3)
+	local tableText = statChip(statGrid, "Food", 3)
 	tableText.Parent.Position = UDim2.fromOffset(0, 68)
-	local statusText = statChip(statGrid, "Doing", 4)
+	local statusText = statChip(statGrid, "Stand / Fence", 4)
 	statusText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
 	statusText.TextSize = 14
 	statusText.TextTruncate = Enum.TextTruncate.AtEnd
@@ -3261,7 +3327,7 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	activityBody.Size = UDim2.new(1, 0, 0, 0)
 	activityBody.TextWrapped = true
 	remember(activityBody, activityCard, "activity status solves")
-		local function refreshActivity()
+	local function refreshActivity()
 		local lines = {
 			"Status · " .. tostring(STATE.status),
 			"Throwing · " .. tostring(STATE.throwStatus),
@@ -3280,6 +3346,28 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		local text = table.concat(lines, "\n")
 		if activityBody.Text ~= text then activityBody.Text = text end
 		activityBody.TextColor3 = STATE.hubThemeDef().ink
+		STATE.uiStatusLabels.throw.Text = "Status · " .. publicStatus(STATE.throwStatus)
+		STATE.uiStatusLabels.training.Text = "Status · " .. publicStatus(STATE.trainingStatus)
+		local foodLevel = DataController:GetValue("EquippedFood") or 0
+		local standLevel = DataController:GetValue("Stand") or 0
+		local fenceLevel = DataController:GetValue("FenceLevel") or 0
+		elevate()
+		STATE.uiStatusLabels.upgrade.Text = string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(foodLevel), tostring(standLevel), tostring(fenceLevel))
+		STATE.uiStatusLabels.reward.Text = "Status · " .. publicStatus(STATE.rewardStatus)
+		local preview = STATE.sellPreview()
+		elevate()
+		if preview then
+			STATE.uiStatusLabels.sell.Text = string.format("%s\n%d eligible · %d best protected · %d mutations · %d placed", publicStatus(STATE.sellStatus), preview.eligible, preview.keepBest, preview.mutated, preview.placed)
+		else
+			STATE.uiStatusLabels.sell.Text = publicStatus(STATE.sellStatus)
+		end
+		local eggs = DataController:GetValue("Eggs")
+		elevate()
+		local eggCount = 0
+		if type(eggs) == "table" then
+			for _, count in pairs(eggs) do eggCount += tonumber(count) or 0 end
+		end
+		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\nEggs · %s · %d owned", publicStatus(STATE.equipStatus or "Ready"), STATE.autoEggs == true and publicStatus(STATE.eggStatus or "Ready") or "Off", eggCount)
 	end
 	STATE.refreshActivity = refreshActivity
 
@@ -3400,13 +3488,13 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	local function applySearch()
 		local query = string.lower(search.Text)
 		local used = {}
-		local pages = {}
+		local matchingPages = {}
 		for _, item in ipairs(searchRows) do
 			local show = query == "" or string.find(item.text, query, 1, true) ~= nil
 			item.row.Visible = show
 			if show and query ~= "" then
 				used[item.card] = true
-				pages[item.page or "Main"] = true
+				matchingPages[item.page or "Dashboard"] = true
 			end
 		end
 		for _, item in ipairs(searchRows) do
@@ -3415,39 +3503,32 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		if query == "" then
 			return
 		end
-		local current = "Main"
-		if homePage.Visible then
-			current = "Home"
-		elseif playerPage.Visible then
-			current = "Player"
-		end
-		if pages[current] then
+		if matchingPages[currentPage] then
 			return
 		end
-		if pages.Home and not pages.Main and not pages.Player then
-			showPage("Home")
-		elseif pages.Main and not pages.Home and not pages.Player then
-			showPage("Main")
-		elseif pages.Player and not pages.Home and not pages.Main then
-			showPage("Player")
-		elseif pages.Home then
-			showPage("Home")
-		elseif pages.Main then
-			showPage("Main")
-		elseif pages.Player then
-			showPage("Player")
+		for _, name in ipairs({ "Dashboard", "Farming", "Animals", "Progress", "Selling", "Player", "Settings" }) do
+			if matchingPages[name] then
+				showPage(name)
+				break
+			end
 		end
 	end
 	trackConnection(search:GetPropertyChangedSignal("Text"):Connect(applySearch))
 	local function refreshHome()
 		local money = DataController:GetValue("Money")
-		local income = LocalPlayer:GetAttribute("IncomeRate") or 0
-		local level = DataController:GetValue("Level") or 1
+		local animals = DataController:GetValue("Animals")
+		local animalCount = 0
+		if type(animals) == "table" then
+			for _ in pairs(animals) do animalCount += 1 end
+		end
+		local food = DataController:GetValue("EquippedFood") or 0
+		local stand = DataController:GetValue("Stand") or 0
+		local fence = DataController:GetValue("FenceLevel") or 0
 		elevate()
 		solvesText.Text = "$" .. STATE.shortNumber(money)
-		movesText.Text = "$" .. STATE.shortNumber(income)
-		tableText.Text = tostring(level)
-		statusText.Text = tostring(STATE.status)
+		movesText.Text = tostring(animalCount)
+		tableText.Text = "Level " .. tostring(food)
+		statusText.Text = tostring(stand) .. " / " .. tostring(fence)
 	end
 	refreshHome()
 	refreshActivity()
@@ -3566,7 +3647,7 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	STATE.applyLook = applyLook
 	applyLook()
 
-	showPage("Home")
+	showPage("Dashboard")
 
 	local function placeTopLeft(obj, absX, absY)
 		local parentPos = obj.Parent.AbsolutePosition
@@ -3643,26 +3724,21 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		end
 	end
 	applyHubLayout = function(_, compact, baseW)
-		local narrow = compact or baseW < 860
 		sideWrap.Size = compact and UDim2.new(0, 72, 1, 0) or UDim2.new(0.25, 0, 1, 0)
 		content.Position = compact and UDim2.fromOffset(72, 0) or UDim2.new(0.25, 0, 0, 0)
 		content.Size = compact and UDim2.new(1, -72, 1, 0) or UDim2.new(0.75, 0, 1, 0)
 		brand.Visible = not compact
 		brandSub.Visible = not compact
 		profile.Visible = not compact
-		columnLayout.FillDirection = narrow and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
-		local columnSize = narrow and UDim2.new(1, 0, 0, 0) or UDim2.new(0.5, -6, 0, 0)
-		leftColumn.Size = columnSize
-		rightColumn.Size = columnSize
-		for index, name in ipairs({ "Home", "Main", "Player" }) do
+		for index, name in ipairs({ "Dashboard", "Farming", "Animals", "Progress", "Selling", "Player", "Settings" }) do
 			local button = navButtons[name]
 			if button then
 				local label = button:FindFirstChild("Label")
 				if label then
 					label.Visible = not compact
 				end
-				button.Size = compact and UDim2.fromOffset(48, 44) or UDim2.new(1, -24, 0, 36)
-				button.Position = UDim2.fromOffset(12, compact and (70 + (index - 1) * 52) or (78 + (index - 1) * 42))
+				button.Size = compact and UDim2.fromOffset(48, 42) or UDim2.new(1, -24, 0, 36)
+				button.Position = UDim2.fromOffset(12, compact and (60 + (index - 1) * 46) or (70 + (index - 1) * 42))
 			end
 		end
 		for _, page in pairs(pages) do
@@ -3862,6 +3938,10 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		end
 	end))
 
+	bindPress(launcherOpenButton)
+	onActivate(launcherOpenButton, function()
+		setOpen(true)
+	end)
 	bindPress(closeButton)
 	bindPress(fullButton)
 	fullButton.MouseEnter:Connect(function()
@@ -3896,7 +3976,52 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		end
 	end))
 
-	local actionsCard = card(homePage, "ACTIONS", 9)
+	do
+	local function applyPreset(values, name)
+		for key, value in pairs(values) do
+			STATE[key] = value
+			if syncToggle then syncToggle(key) end
+		end
+		if STATE.autoTrain ~= true then
+			task.spawn(stopTraining)
+		end
+		nextSellAt = 0
+		saveConfig()
+		STATE.status = name .. " preset active"
+		noteActivity(STATE.status)
+	end
+
+	local quickCard = card(homePage, "QUICK START", 5)
+	local quickNote = label(quickCard, "Choose a safe starting point. You can still change every option afterwards.", 12, muted, Enum.Font.Gotham, 34)
+	quickNote.LayoutOrder = 1
+	actionButton(quickCard, "Safe AFK", 2, true, function()
+		applyPreset({
+			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = false,
+			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
+			autoFence = true, equipBest = true, autoSell = false, keepMutations = true,
+			autoEggs = true, autoOffline = true, autoFree = true,
+		}, "Safe AFK")
+		quickNote.Text = "Safe AFK enabled · protected selling remains off"
+	end)
+	actionButton(quickCard, "Fast Progress", 3, false, function()
+		applyPreset({
+			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = true,
+			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
+			autoFence = true, equipBest = true, autoSell = true, keepMutations = true,
+			autoEggs = true, autoOffline = true, autoFree = true,
+		}, "Fast Progress")
+		quickNote.Text = "Fast Progress enabled · best, placed and mutated animals stay protected"
+	end)
+	actionButton(quickCard, "Stop Automation", 4, false, function()
+		applyPreset({
+			autoThrow = false, autoTrain = false, autoFood = false, autoStand = false,
+			autoFence = false, equipBest = false, autoSell = false, autoEggs = false,
+			autoOffline = false, autoFree = false,
+		}, "Stopped")
+		quickNote.Text = "All game automation stopped"
+	end)
+
+	local actionsCard = card(homePage, "MANUAL ACTIONS", 9)
 	local actionsNote = label(actionsCard, "Run these now instead of waiting for the next pass.", 12, muted, Enum.Font.Gotham, 16)
 	actionsNote.LayoutOrder = 1
 	actionButton(actionsCard, "Sell Junk Now", 2, true, function()
@@ -3923,9 +4048,10 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	actionButton(actionsCard, "Teleport To Sell", 7, false, function()
 		actionsNote.Text = STATE.teleportTo("Sell") and "Moved to sell shop" or "Sell shop unavailable"
 	end)
+	end
 	do
 		local discordInvite = "https://discord.gg/94pC3T6NZG"
-		local communityCard = card(homePage, "COMMUNITY", 2)
+		local communityCard = card(pages.Settings, "COMMUNITY", 4)
 		local communityNote = label(communityCard, "Join the ZinoosHub Discord for updates, support and new games.", 13, muted, Enum.Font.Gotham, 36)
 		communityNote.LayoutOrder = 1
 		local communityResult = label(communityCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -3939,7 +4065,20 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		end)
 	end
 
-	local saveCard = card(homePage, "CONFIG", 10)
+	do
+	local compatibilityCard = card(pages.Settings, "COMPATIBILITY", 1)
+	local capabilityLines = {
+		"Executor · connected",
+		"Config saving · " .. ((typeof(writefile) == "function" and typeof(readfile) == "function") and "available" or "unavailable"),
+		"Clipboard · " .. (typeof(setclipboard) == "function" and "available" or "unavailable"),
+		"Reconnect queue · " .. ((typeof(queue_on_teleport) == "function" or (syn and typeof(syn.queue_on_teleport) == "function")) and "available" or "unavailable"),
+	}
+	local compatibilityText = label(compatibilityCard, table.concat(capabilityLines, "\n"), 13, ink, Enum.Font.Gotham, 74)
+	compatibilityText.LayoutOrder = 1
+	end
+
+	do
+	local saveCard = card(pages.Settings, "CONFIG", 5)
 	local saveNote = label(saveCard, "Saves the toggles, timings and theme for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
 	saveNote.LayoutOrder = 1
 	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -3949,6 +4088,7 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 		saveResult.Text = "Saved for " .. LocalPlayer.DisplayName
 		saveResult.TextColor3 = accent
 	end)
+	end
 
 	windowScale.Scale = 0.9
 	sideWrap.GroupTransparency = 1
@@ -3957,7 +4097,7 @@ local screenCard = card(rightColumn, "SCREEN", 4)
 	holder.Visible = false
 	shadow.Visible = false
 	launcher.Visible = STATE.hideOnStart ~= true
-	dockHint.Text = "Click or press " .. tostring(STATE.toggleKey) .. " to open"
+	dockHint.Text = "Open dashboard · " .. tostring(STATE.toggleKey)
 
 	STATE.hubWindow = {
 		Unload = function()
