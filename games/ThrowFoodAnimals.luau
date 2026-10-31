@@ -52,7 +52,7 @@ local ESP_DISTANCE_OPTIONS = { "100", "250", "500", "1000", "Unlimited" }
 
 local STATE = {
 	_gen = token,
-	version = "2.3.0",
+	version = "2.3.1",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -2563,106 +2563,117 @@ local function installHub()
 	local lastToastAt = 0
 
 	STATE.toast = function(entry)
-		elevate()
 		local key = tostring(entry.title) .. "\0" .. tostring(entry.message)
 		if key == lastToastKey and os.clock() - lastToastAt < 1.5 then
-			return
+			return true
 		end
 		lastToastKey = key
 		lastToastAt = os.clock()
-		toastSerial += 1
-		while #activeToasts >= 4 do
-			local oldest = table.remove(activeToasts, 1)
-			if oldest and oldest.Parent then oldest:Destroy() end
-		end
 
-		local color = entry.rarity and ESP_COLORS[entry.rarity]
-			or (entry.category == "sale" and Color3.fromRGB(92, 230, 150))
-			or (entry.category == "progress" and Color3.fromRGB(255, 190, 80))
-			or accent
-		local toast = Instance.new("CanvasGroup")
-		toast.Name = "Toast"
-		toast.BackgroundColor3 = cardColor
-		toast.BackgroundTransparency = 0.04
-		toast.BorderSizePixel = 0
-		toast.GroupTransparency = 1
-		toast.LayoutOrder = -toastSerial
-		toast.Size = UDim2.fromOffset(310, 72)
-		toast.ZIndex = 81
-		toast.Parent = toastHost
-		role(toast, "card")
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(0, 10)
-		corner.Parent = toast
-		local stroke = Instance.new("UIStroke")
-		stroke.Color = color
-		stroke.Transparency = 0.25
-		stroke.Thickness = 1
-		stroke.Parent = toast
-		local bar = Instance.new("Frame")
-		bar.BackgroundColor3 = color
-		bar.BorderSizePixel = 0
-		bar.Size = UDim2.fromOffset(4, 48)
-		bar.Position = UDim2.fromOffset(10, 12)
-		bar.ZIndex = 82
-		bar.Parent = toast
-		local barCorner = Instance.new("UICorner")
-		barCorner.CornerRadius = UDim.new(1, 0)
-		barCorner.Parent = bar
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamBold
-		title.Text = tostring(entry.title)
-		title.TextColor3 = ink
-		title.TextSize = 14
-		title.TextTruncate = Enum.TextTruncate.AtEnd
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Position = UDim2.fromOffset(24, 10)
-		title.Size = UDim2.new(1, -56, 0, 20)
-		title.ZIndex = 82
-		title.Parent = toast
-		role(title, "ink")
-		local body = Instance.new("TextLabel")
-		body.BackgroundTransparency = 1
-		body.Font = Enum.Font.Gotham
-		body.Text = tostring(entry.message)
-		body.TextColor3 = muted
-		body.TextSize = 12
-		body.TextWrapped = true
-		body.TextXAlignment = Enum.TextXAlignment.Left
-		body.TextYAlignment = Enum.TextYAlignment.Top
-		body.Position = UDim2.fromOffset(24, 32)
-		body.Size = UDim2.new(1, -38, 0, 30)
-		body.ZIndex = 82
-		body.Parent = toast
-		role(body, "muted")
-		local close = Instance.new("TextButton")
-		close.BackgroundTransparency = 1
-		close.Font = Enum.Font.GothamBold
-		close.Text = "×"
-		close.TextColor3 = muted
-		close.TextSize = 18
-		close.Position = UDim2.new(1, -30, 0, 5)
-		close.Size = UDim2.fromOffset(24, 24)
-		close.ZIndex = 83
-		close.Parent = toast
-		role(close, "muted")
-		table.insert(activeToasts, toast)
+		-- Rendering must never hold up farming, selling, or upgrade loops. Some
+		-- executors can yield when a CoreGui tree is built from an event callback.
+		task.spawn(function()
+			local ok = pcall(function()
+				toastSerial += 1
+				while #activeToasts >= 4 do
+					local oldest = table.remove(activeToasts, 1)
+					if oldest and oldest.Parent then oldest:Destroy() end
+				end
 
-		local closing = false
-		local function dismiss()
-			if closing or not toast.Parent then return end
-			closing = true
-			playMotion(toast, { GroupTransparency = 1 }, tweenInfo.fade)
-			task.delay(0.22, function()
-				local index = table.find(activeToasts, toast)
-				if index then table.remove(activeToasts, index) end
-				if toast.Parent then toast:Destroy() end
+				local color = entry.rarity and ESP_COLORS[entry.rarity]
+					or (entry.category == "sale" and Color3.fromRGB(92, 230, 150))
+					or (entry.category == "progress" and Color3.fromRGB(255, 190, 80))
+					or accent
+				local toast = Instance.new("CanvasGroup")
+				toast.Name = "Toast"
+				toast.BackgroundColor3 = cardColor
+				toast.BackgroundTransparency = 0.04
+				toast.BorderSizePixel = 0
+				toast.GroupTransparency = 1
+				toast.LayoutOrder = -toastSerial
+				toast.Size = UDim2.fromOffset(310, 72)
+				toast.ZIndex = 81
+				toast:SetAttribute("ZinoosRole", "card")
+				toast.Parent = toastHost
+				local corner = Instance.new("UICorner")
+				corner.CornerRadius = UDim.new(0, 10)
+				corner.Parent = toast
+				local stroke = Instance.new("UIStroke")
+				stroke.Color = color
+				stroke.Transparency = 0.25
+				stroke.Thickness = 1
+				stroke.Parent = toast
+				local bar = Instance.new("Frame")
+				bar.BackgroundColor3 = color
+				bar.BorderSizePixel = 0
+				bar.Size = UDim2.fromOffset(4, 48)
+				bar.Position = UDim2.fromOffset(10, 12)
+				bar.ZIndex = 82
+				bar.Parent = toast
+				local barCorner = Instance.new("UICorner")
+				barCorner.CornerRadius = UDim.new(1, 0)
+				barCorner.Parent = bar
+				local title = Instance.new("TextLabel")
+				title.BackgroundTransparency = 1
+				title.Font = Enum.Font.GothamBold
+				title.Text = tostring(entry.title)
+				title.TextColor3 = ink
+				title.TextSize = 14
+				title.TextTruncate = Enum.TextTruncate.AtEnd
+				title.TextXAlignment = Enum.TextXAlignment.Left
+				title.Position = UDim2.fromOffset(24, 10)
+				title.Size = UDim2.new(1, -56, 0, 20)
+				title.ZIndex = 82
+				title:SetAttribute("ZinoosRole", "ink")
+				title.Parent = toast
+				local body = Instance.new("TextLabel")
+				body.BackgroundTransparency = 1
+				body.Font = Enum.Font.Gotham
+				body.Text = tostring(entry.message)
+				body.TextColor3 = muted
+				body.TextSize = 12
+				body.TextWrapped = true
+				body.TextXAlignment = Enum.TextXAlignment.Left
+				body.TextYAlignment = Enum.TextYAlignment.Top
+				body.Position = UDim2.fromOffset(24, 32)
+				body.Size = UDim2.new(1, -38, 0, 30)
+				body.ZIndex = 82
+				body:SetAttribute("ZinoosRole", "muted")
+				body.Parent = toast
+				local close = Instance.new("TextButton")
+				close.BackgroundTransparency = 1
+				close.Font = Enum.Font.GothamBold
+				close.Text = "×"
+				close.TextColor3 = muted
+				close.TextSize = 18
+				close.Position = UDim2.new(1, -30, 0, 5)
+				close.Size = UDim2.fromOffset(24, 24)
+				close.ZIndex = 83
+				close:SetAttribute("ZinoosRole", "muted")
+				close.Parent = toast
+				table.insert(activeToasts, toast)
+
+				local closing = false
+				local function dismiss()
+					if closing or not toast.Parent then return end
+					closing = true
+					TweenService:Create(toast, tweenInfo.fade, { GroupTransparency = 1 }):Play()
+					task.delay(0.22, function()
+						local index = table.find(activeToasts, toast)
+						if index then table.remove(activeToasts, index) end
+						if toast.Parent then toast:Destroy() end
+					end)
+				end
+				close.Activated:Connect(dismiss)
+				TweenService:Create(toast, tweenInfo.fade, { GroupTransparency = 0 }):Play()
+				task.delay(4.5, dismiss)
 			end)
-		end
-		close.Activated:Connect(dismiss)
-		playMotion(toast, { GroupTransparency = 0 }, tweenInfo.fade)
-		task.delay(4.5, dismiss)
+			if not ok then
+				-- Notifications are optional UI; never let a renderer failure stop automation.
+				return
+			end
+		end)
+		return true
 	end
 
 	local uiScale = Instance.new("UIScale")
