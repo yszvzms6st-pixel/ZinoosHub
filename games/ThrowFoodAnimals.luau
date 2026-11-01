@@ -52,7 +52,7 @@ local ESP_DISTANCE_OPTIONS = { "100", "250", "500", "1000", "Unlimited" }
 
 local STATE = {
 	_gen = token,
-	version = "2.3.1",
+	version = "2.4.0",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -1887,7 +1887,7 @@ hubCleanup(function()
 end)
 
 local graphicsBefore = nil
-local potatoVisuals = {}
+local potatoVisuals = setmetatable({}, { __mode = "k" })
 local potatoEpoch = 0
 local potatoChanged = 0
 
@@ -1899,8 +1899,8 @@ local function potatoSet(object, property, value)
 	if not saved then
 		saved = {}
 		potatoVisuals[object] = saved
-		potatoChanged += 1
 	end
+	local firstChange = saved[property] == nil
 	if saved[property] == nil then
 		local ok, current = pcall(function()
 			return object[property]
@@ -1910,24 +1910,31 @@ local function potatoSet(object, property, value)
 		end
 		saved[property] = { value = current }
 	end
-	return pcall(function()
+	local written = pcall(function()
 		object[property] = value
 	end)
+	if written and firstChange then
+		potatoChanged += 1
+	end
+	return written
 end
 
 local function simplifyVisual(object)
 	if STATE.fpsBoost ~= true or object:GetAttribute("ZinoosOwned") == true then
 		return
 	end
-	if object:IsA("BasePart") then
-		potatoSet(object, "Material", Enum.Material.Plastic)
+	if object:IsA("MeshPart") then
+		potatoSet(object, "TextureID", "")
+		potatoSet(object, "Material", Enum.Material.SmoothPlastic)
 		potatoSet(object, "MaterialVariant", "")
 		potatoSet(object, "Reflectance", 0)
 		potatoSet(object, "CastShadow", false)
-		if object:IsA("MeshPart") then
-			potatoSet(object, "TextureID", "")
-			potatoSet(object, "RenderFidelity", Enum.RenderFidelity.Performance)
-		end
+		potatoSet(object, "RenderFidelity", Enum.RenderFidelity.Performance)
+	elseif object:IsA("BasePart") then
+		potatoSet(object, "Material", Enum.Material.SmoothPlastic)
+		potatoSet(object, "MaterialVariant", "")
+		potatoSet(object, "Reflectance", 0)
+		potatoSet(object, "CastShadow", false)
 	elseif object:IsA("Decal") or object:IsA("Texture") then
 		potatoSet(object, "Transparency", 1)
 	elseif object:IsA("SpecialMesh") then
@@ -1951,6 +1958,9 @@ local function simplifyVisual(object)
 		potatoSet(object, "Density", 0)
 		potatoSet(object, "Haze", 0)
 		potatoSet(object, "Glare", 0)
+	elseif object:IsA("Clouds") then
+		potatoSet(object, "Cover", 0)
+		potatoSet(object, "Density", 0)
 	end
 end
 
@@ -2016,18 +2026,24 @@ function STATE.applyFpsBoost()
 	local epoch = potatoEpoch
 	if STATE.fpsBoost == true then
 		if not graphicsBefore then
-			graphicsBefore = { shadows = Lighting.GlobalShadows }
+			graphicsBefore = {
+				shadows = Lighting.GlobalShadows,
+				environmentDiffuse = Lighting.EnvironmentDiffuseScale,
+				environmentSpecular = Lighting.EnvironmentSpecularScale,
+			}
 			pcall(function()
 				graphicsBefore.quality = settings().Rendering.QualityLevel
 				settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 			end)
 		end
 		Lighting.GlobalShadows = false
+		Lighting.EnvironmentDiffuseScale = 0
+		Lighting.EnvironmentSpecularScale = 0
 		applyTerrainPotato()
 		STATE.potatoStatus = "Applying Potato Mode..."
 		task.spawn(function()
 			local objects = Workspace:GetDescendants()
-			for _, object in ipairs(Lighting:GetChildren()) do
+			for _, object in ipairs(Lighting:GetDescendants()) do
 				table.insert(objects, object)
 			end
 			for index, object in ipairs(objects) do
@@ -2035,17 +2051,19 @@ function STATE.applyFpsBoost()
 					return
 				end
 				simplifyVisual(object)
-				if index % 250 == 0 then
+				if index % 500 == 0 then
 					task.wait()
 				end
 			end
 			STATE.potatoChangedCount = potatoChanged
-			STATE.potatoStatus = string.format("Potato Mode active • %d visuals simplified", potatoChanged)
+			STATE.potatoStatus = string.format("Potato Mode active • %d properties reduced", potatoChanged)
 		end)
 	elseif graphicsBefore then
 		local saved = graphicsBefore
 		graphicsBefore = nil
 		Lighting.GlobalShadows = saved.shadows
+		Lighting.EnvironmentDiffuseScale = saved.environmentDiffuse
+		Lighting.EnvironmentSpecularScale = saved.environmentSpecular
 		pcall(function()
 			if saved.quality then
 				settings().Rendering.QualityLevel = saved.quality
@@ -2066,7 +2084,7 @@ trackConnection(Workspace.DescendantAdded:Connect(function(object)
 		task.defer(simplifyVisual, object)
 	end
 end))
-trackConnection(Lighting.ChildAdded:Connect(function(object)
+trackConnection(Lighting.DescendantAdded:Connect(function(object)
 	if STATE.fpsBoost == true then
 		task.defer(simplifyVisual, object)
 	end
@@ -4397,7 +4415,7 @@ local function installHub()
 	makeSwitch(clientCard, "No Gameplay Paused", "noPausePopup", "Hides the Gameplay Paused popup")
 	makeSwitch(clientCard, "Auto Reconnect on Kick", "autoReconnect", "Rejoins the game when you get disconnected")
 	makeSwitch(clientCard, "Disable 3D Rendering", "disable3d", "Big FPS saver while you AFK")
-	makeSwitch(clientCard, "Potato Mode", "fpsBoost", "Reversible low-detail mode: removes textures, particles, beams, lights, heavy materials, water effects and shadows")
+	makeSwitch(clientCard, "Potato Mode", "fpsBoost", "Reversible low-detail mode: strips textures, smooths materials, disables effects, clouds, environment lighting, water effects and shadows")
 	makeSwitch(clientCard, "Hide UI On Start", "hideOnStart", "Starts hidden. Press the toggle key to show it")
 	makeDropdown(clientCard, "Toggle Key", function()
 		return STATE.toggleKey
