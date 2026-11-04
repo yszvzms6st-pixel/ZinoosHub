@@ -49,10 +49,33 @@ for _, rarity in ipairs(RARITY_OPTIONS) do
 	table.insert(NOTIFY_RARITY_OPTIONS, rarity)
 end
 local ESP_DISTANCE_OPTIONS = { "100", "250", "500", "1000", "Unlimited" }
+local KEEP_BACKUP_OPTIONS = { "Keep 0", "Keep 5", "Keep 10", "Keep 15", "Keep 20", "Keep 30" }
+local SELL_INTERVAL_OPTIONS = { "Every 1 minute", "Every 2 minutes", "Every 5 minutes", "Every 10 minutes", "Every 30 minutes" }
+local SUPER_RESERVE_OPTIONS = { "Use all", "Keep 1", "Keep 5", "Keep 10", "Keep 25", "Keep 50" }
+local TRAIN_TARGET_OPTIONS = { "1K", "2.5K", "5K", "10K", "25K", "50K", "100K", "250K", "500K", "1M", "5M", "10M" }
+local TRAIN_TARGET_VALUES = {
+	["1K"] = 1e3, ["2.5K"] = 2.5e3, ["5K"] = 5e3, ["10K"] = 1e4,
+	["25K"] = 2.5e4, ["50K"] = 5e4, ["100K"] = 1e5, ["250K"] = 2.5e5,
+	["500K"] = 5e5, ["1M"] = 1e6, ["5M"] = 5e6, ["10M"] = 1e7,
+}
+local CASH_RESERVE_OPTIONS = {
+	"$0", "$1K", "$10K", "$100K", "$1M", "$10M", "$100M", "$1B",
+	"$1T", "$1Qa", "$1Qi", "$1Sx", "$1Sp", "$1Oc", "$1No", "$1Dc", "$1Ud", "$1Dd", "$1Td",
+	"$1Qad", "$1Qid", "$1Sxd", "$1Spd", "$1Ocd", "$1Nod", "$1Vg",
+}
+local CASH_RESERVE_VALUES = {
+	["$0"] = 0, ["$1K"] = 1e3, ["$10K"] = 1e4, ["$100K"] = 1e5,
+	["$1M"] = 1e6, ["$10M"] = 1e7, ["$100M"] = 1e8, ["$1B"] = 1e9,
+	["$1T"] = 1e12, ["$1Qa"] = 1e15, ["$1Qi"] = 1e18, ["$1Sx"] = 1e21,
+	["$1Sp"] = 1e24, ["$1Oc"] = 1e27, ["$1No"] = 1e30, ["$1Dc"] = 1e33,
+	["$1Ud"] = 1e36, ["$1Dd"] = 1e39, ["$1Td"] = 1e42,
+	["$1Qad"] = 1e45, ["$1Qid"] = 1e48, ["$1Sxd"] = 1e51, ["$1Spd"] = 1e54,
+	["$1Ocd"] = 1e57, ["$1Nod"] = 1e60, ["$1Vg"] = 1e63,
+}
 
 local STATE = {
 	_gen = token,
-	version = "2.4.0",
+	version = "2.5.0",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -65,8 +88,17 @@ local STATE = {
 	autoSell = false,
 	keepBest = 10,
 	sellMinutes = 2,
-	sellRarities = table.clone(RARITY_OPTIONS),
+	sellRarities = { "Common", "Uncommon", "Rare" },
 	protectedMutations = table.clone(MUTATION_OPTIONS),
+	stopOnRarity = false,
+	stopTargetRarity = "Supreme",
+	stopOnMutation = false,
+	stopTargetMutations = { "Rainbow" },
+	trainToTarget = false,
+	trainTargetPower = "10K",
+	resumeThrowAfterTraining = true,
+	cashReserve = "$0",
+	superThrowReserve = 0,
 	autoOffline = true,
 	autoFree = true,
 	autoSuper = false,
@@ -147,7 +179,6 @@ end
 
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowFoodAnimals_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SPEED_OPTIONS = { "16", "24", "32", "50", "75", "100" }
-local SELL_MINUTE_OPTIONS = { "1", "2", "5", "10", "30" }
 
 local FLAG_KEYS = {
 	AutoThrow = "autoThrow",
@@ -163,6 +194,10 @@ local FLAG_KEYS = {
 	AutoOffline = "autoOffline",
 	AutoFree = "autoFree",
 	AutoSuper = "autoSuper",
+	StopOnRarity = "stopOnRarity",
+	StopOnMutation = "stopOnMutation",
+	TrainToTarget = "trainToTarget",
+	ResumeThrowAfterTraining = "resumeThrowAfterTraining",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	InfiniteJump = "infiniteJump",
@@ -190,21 +225,27 @@ local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	NotifyMinRarity = { key = "notifyMinRarity", options = NOTIFY_RARITY_OPTIONS },
 	EspMaxDistance = { key = "espMaxDistance", options = ESP_DISTANCE_OPTIONS },
+	StopTargetRarity = { key = "stopTargetRarity", options = RARITY_OPTIONS },
+	TrainTargetPower = { key = "trainTargetPower", options = TRAIN_TARGET_OPTIONS },
+	CashReserve = { key = "cashReserve", options = CASH_RESERVE_OPTIONS },
 }
 STATE.LIST_KEYS = {
 	SellRarities = "sellRarities",
 	ProtectedMutations = "protectedMutations",
 	EspRarities = "espRarities",
+	StopTargetMutations = "stopTargetMutations",
 }
 local LIST_OPTIONS = {
 	SellRarities = RARITY_OPTIONS,
 	ProtectedMutations = MUTATION_OPTIONS,
 	EspRarities = RARITY_OPTIONS,
+	StopTargetMutations = MUTATION_OPTIONS,
 }
 local NUMBERS = {
 	FlySpeed = { "flySpeed", 10, 300 },
 	SellMinutes = { "sellMinutes", 1, 30 },
 	KeepBest = { "keepBest", 0, 50 },
+	SuperThrowReserve = { "superThrowReserve", 0, 9999 },
 }
 STATE.defaultTheme = {
 	blush = 1,
@@ -910,10 +951,24 @@ STATE.trainingStatus = "Off"
 STATE.upgradeStatus = "Checking"
 STATE.sellStatus = "Off"
 STATE.rewardStatus = "Checking"
-local stats = { throws = 0, trained = 0, bonuses = 0, foods = 0, stands = 0, fences = 0, sold = 0, rewards = 0 }
+local stats = {
+	throws = 0,
+	trained = 0,
+	bonuses = 0,
+	foods = 0,
+	stands = 0,
+	fences = 0,
+	sold = 0,
+	rewards = 0,
+	catches = 0,
+	targetStops = 0,
+	rarityCounts = {},
+	mutationCounts = {},
+}
 STATE.stats = stats
 STATE.activity = {}
 STATE.notificationLog = {}
+STATE.catchHistory = {}
 STATE.toast = nil
 
 local function noteActivity(text)
@@ -967,6 +1022,8 @@ end
 local DataReplicator = require(ReplicatedStorage.Shared.DataReplicator)
 elevate()
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
+elevate()
+local LevelConfig = require(ReplicatedStorage.Config.LevelConfig)
 elevate()
 local FoodsConfig = require(ReplicatedStorage.Config.FoodsConfig)
 elevate()
@@ -1119,11 +1176,43 @@ local function describeCatch(result)
 	if income and income > 0 then
 		message ..= "  •  $" .. shortNumber(income) .. "/s"
 	end
-	return title, message, rarity
+	return title, message, rarity, mutation, income, displayName
 end
 
 local knownAnimalIds = {}
 local animalWatchReady = false
+local function targetCatchMatched(rarity, mutation)
+	local rarityHit = STATE.stopOnRarity == true
+		and (RARITY_RANK[rarity] or 0) >= (RARITY_RANK[STATE.stopTargetRarity] or math.huge)
+	local mutationHit = STATE.stopOnMutation == true
+		and type(mutation) == "string"
+		and type(STATE.stopTargetMutations) == "table"
+		and table.find(STATE.stopTargetMutations, mutation) ~= nil
+	return rarityHit or mutationHit, rarityHit, mutationHit
+end
+
+local function stopForTargetCatch(title, rarity, mutation)
+	local matched, rarityHit, mutationHit = targetCatchMatched(rarity, mutation)
+	if not matched then
+		return
+	end
+	STATE.autoThrow = false
+	stats.targetStops += 1
+	local reason = rarityHit and (tostring(rarity) .. " rarity")
+		or (mutationHit and (tostring(mutation) .. " mutation"))
+		or "target"
+	STATE.throwStatus = "Stopped for " .. tostring(title)
+	STATE.status = "Target animal found"
+	noteActivity("Stopped Auto Throw: " .. tostring(title) .. " matched " .. tostring(reason))
+	notify("system", "Target animal found", tostring(title) .. " matched " .. tostring(reason))
+	if typeof(STATE.syncToggle) == "function" then
+		pcall(STATE.syncToggle, "autoThrow")
+	end
+	saveConfig()
+end
+STATE.targetCatchMatched = targetCatchMatched
+STATE.stopForTargetCatch = stopForTargetCatch
+
 local function stepAnimalNotifications()
 	local animals = getData("Animals")
 	if type(animals) ~= "table" then
@@ -1133,14 +1222,28 @@ local function stepAnimalNotifications()
 	for id, entry in pairs(animals) do
 		current[id] = true
 		if animalWatchReady and not knownAnimalIds[id] and type(entry) == "table" then
-			local title, message, rarity = describeCatch(entry)
+			local title, message, rarity, mutation, income, displayName = describeCatch(entry)
 			STATE.lastCatch = {
 				id = id,
 				title = title,
 				message = message,
 				rarity = rarity,
+				mutation = mutation,
+				income = income,
+				displayName = displayName,
+				time = os.time(),
 			}
+			stats.catches += 1
+			stats.rarityCounts[rarity] = (stats.rarityCounts[rarity] or 0) + 1
+			if mutation then
+				stats.mutationCounts[mutation] = (stats.mutationCounts[mutation] or 0) + 1
+			end
+			table.insert(STATE.catchHistory, 1, STATE.lastCatch)
+			while #STATE.catchHistory > 12 do
+				table.remove(STATE.catchHistory)
+			end
 			notify("catch", "Caught " .. title, message, rarity)
+			stopForTargetCatch(title, rarity, mutation)
 		end
 	end
 	knownAnimalIds = current
@@ -1333,7 +1436,8 @@ local function stepThrow()
 	STATE.status = "Throwing food"
 	STATE.throwStatus = STATE.perfectMeter and "Perfect throw running" or "Throw running"
 	task.wait(0.25)
-	if STATE.autoSuper == true and (tonumber(getData("SuperThrows")) or 0) > 0 then
+	if STATE.autoSuper == true
+		and (tonumber(getData("SuperThrows")) or 0) > (tonumber(STATE.superThrowReserve) or 0) then
 		invoke("Throw_UseSuper")
 	end
 	local started = invoke("Throw_Start")
@@ -1394,10 +1498,43 @@ local function stopTraining()
 end
 hubCleanup(stopTraining)
 
+local function stopTrainingAtTarget()
+	if STATE.autoTrain ~= true or STATE.trainToTarget ~= true then
+		return false
+	end
+	local level = tonumber(getData("Level")) or 1
+	local trainedPower = tonumber(getData("ThrowPower")) or 0
+	local power = tonumber(LevelConfig.EffectiveThrowPower(level, trainedPower)) or 0
+	local target = TRAIN_TARGET_VALUES[STATE.trainTargetPower] or math.huge
+	if power < target then
+		return false
+	end
+	stopTraining()
+	elevate()
+	STATE.autoTrain = false
+	if STATE.resumeThrowAfterTraining == true then
+		STATE.autoThrow = true
+	end
+	STATE.trainingStatus = "Target reached at " .. shortNumber(power)
+	STATE.status = STATE.resumeThrowAfterTraining == true and "Training target reached; throwing resumed" or "Training target reached"
+	noteActivity(STATE.status)
+	notify("progress", "Training target reached", shortNumber(power) .. " throw power")
+	if typeof(STATE.syncToggle) == "function" then
+		pcall(STATE.syncToggle, "autoTrain")
+		pcall(STATE.syncToggle, "autoThrow")
+	end
+	saveConfig()
+	return true
+end
+STATE.stopTrainingAtTarget = stopTrainingAtTarget
+
 local function stepTraining()
 	if STATE.autoTrain ~= true then
 		stopTraining()
 		STATE.trainingStatus = "Off"
+		return
+	end
+	if stopTrainingAtTarget() then
 		return
 	end
 	if not trainingSession then
@@ -1470,12 +1607,16 @@ local function stepUpgrades()
 	nextUpgrade = os.clock() + 1.5
 	local data = readAll()
 	local money = tonumber(data.Money) or 0
+	local reserve = CASH_RESERVE_VALUES[STATE.cashReserve] or 0
+	local spendable = math.max(0, money - reserve)
+	local reserveBlocked = false
 	local changed = false
 	STATE.upgradeStatus = "Checking upgrades"
 	if STATE.autoFood == true then
 		local best = bestOwnedFood(data)
 		local nextFood = FoodsConfig.Get and FoodsConfig.Get(best + 1) or (FoodsConfig.All or {})[best + 1]
-		if nextFood and (tonumber(nextFood.Price) or math.huge) <= money then
+		local nextFoodPrice = nextFood and (tonumber(nextFood.Price) or math.huge) or math.huge
+		if nextFood and nextFoodPrice <= spendable then
 			local result = invokeNear("Food", foodShopTarget(), "Shop_Buy", nextFood.Index)
 			if result.Ok then
 				stats.foods += 1
@@ -1487,6 +1628,9 @@ local function stepUpgrades()
 				STATE.upgradeStatus = "Food: " .. tostring(result.Reason or "rejected")
 			end
 		else
+			if nextFood and nextFoodPrice <= money then
+				reserveBlocked = true
+			end
 			local equipped = tonumber(data.EquippedFood) or 0
 			if best > equipped then
 				local result = invokeNear("Food", foodShopTarget(), "Shop_Equip", best)
@@ -1503,7 +1647,8 @@ local function stepUpgrades()
 	if not changed and STATE.autoStand == true then
 		local stand = tonumber(data.Stand) or 0
 		local nextStand = StandsConfig.Get and StandsConfig.Get(stand + 1) or (StandsConfig.All or {})[stand + 1]
-		if nextStand and (tonumber(nextStand.Price) or math.huge) <= money then
+		local nextStandPrice = nextStand and (tonumber(nextStand.Price) or math.huge) or math.huge
+		if nextStand and nextStandPrice <= spendable then
 			local result = invokeNear("Stand", standTarget(), "Stand_Upgrade")
 			if result.Ok then
 				stats.stands += 1
@@ -1514,12 +1659,15 @@ local function stepUpgrades()
 			else
 				STATE.upgradeStatus = "Stand: " .. tostring(result.Reason or "rejected")
 			end
+		elseif nextStand and nextStandPrice <= money then
+			reserveBlocked = true
 		end
 	end
 	if not changed and STATE.autoFence == true then
 		local level = tonumber(data.FenceLevel) or 0
 		local upgrade = FenceConfig.Get and FenceConfig.Get(level + 1) or (FenceConfig.Upgrades or {})[level + 1]
-		if upgrade and (tonumber(upgrade.Price) or math.huge) <= money then
+		local fencePrice = upgrade and (tonumber(upgrade.Price) or math.huge) or math.huge
+		if upgrade and fencePrice <= spendable then
 			local result = invokeNear("Fence", fenceTarget(), "Plot_UpgradeFence")
 			if result.Ok then
 				stats.fences += 1
@@ -1530,10 +1678,14 @@ local function stepUpgrades()
 			else
 				STATE.upgradeStatus = "Fence: " .. tostring(result.Reason or "rejected")
 			end
+		elseif upgrade and fencePrice <= money then
+			reserveBlocked = true
 		end
 	end
 	if not changed and STATE.upgradeStatus == "Checking upgrades" then
-		STATE.upgradeStatus = "Waiting for money, release, or maxed"
+		STATE.upgradeStatus = reserveBlocked
+			and ("Keeping " .. tostring(STATE.cashReserve) .. " cash reserve")
+			or "Waiting for money, release, or maxed"
 	end
 end
 
@@ -1600,6 +1752,7 @@ local function buildSellPlan()
 		return nil
 	end
 	local ranked = {}
+	local backpackRanked = {}
 	local summary = {
 		total = 0,
 		backpack = 0,
@@ -1617,15 +1770,22 @@ local function buildSellPlan()
 			else
 				summary.backpack += 1
 			end
-			table.insert(ranked, { id = id, entry = entry, income = animalIncome(entry) })
+			local item = { id = id, entry = entry, income = animalIncome(entry) }
+			table.insert(ranked, item)
+			if not entry.Placed then
+				table.insert(backpackRanked, item)
+			end
 		end
 	end
 	table.sort(ranked, function(a, b)
 		return a.income > b.income
 	end)
+	table.sort(backpackRanked, function(a, b)
+		return a.income > b.income
+	end)
 	local keep = {}
-	for index = 1, math.min(math.max(0, STATE.keepBest), #ranked) do
-		keep[ranked[index].id] = true
+	for index = 1, math.min(math.max(0, STATE.keepBest), #backpackRanked) do
+		keep[backpackRanked[index].id] = true
 	end
 	for _, item in ipairs(ranked) do
 		local reason = sellProtection(item.entry, item.id, keep)
@@ -1645,6 +1805,16 @@ end
 function STATE.sellPreview()
 	local _, _, summary = buildSellPlan()
 	return summary
+end
+
+function STATE.sellRiskWarning()
+	local highest = nil
+	for _, rarity in ipairs(STATE.sellRarities or {}) do
+		if (RARITY_RANK[rarity] or 0) >= (RARITY_RANK.Epic or 4) then
+			highest = rarity
+		end
+	end
+	return highest and ("Warning: " .. tostring(highest) .. " and other selected high rarities can be sold") or nil
 end
 
 local nextSellAt = 0
@@ -3565,6 +3735,11 @@ local function installHub()
 			nextSellAt = 0
 			if not on then
 				STATE.sellStatus = "Off"
+			else
+				local warning = STATE.sellRiskWarning()
+				if warning then
+					task.defer(notify, "system", "Review Auto Sell filters", warning)
+				end
 			end
 		elseif key == "equipBest" and on then
 			task.spawn(STATE.equipBestNow)
@@ -3676,6 +3851,7 @@ local function installHub()
 			end
 		end
 	end
+	STATE.syncToggle = syncToggle
 
 	local popupBlock = Instance.new("TextButton")
 	popupBlock.BackgroundTransparency = 1
@@ -3827,11 +4003,13 @@ local function installHub()
 		popupBlock.Visible = true
 	end
 
-	local function makeDropdown(parentBox, name, getValue, options, callback, stacked)
+	local dropdownRefreshers = {}
+	local function makeDropdown(parentBox, name, getValue, options, callback, stacked, hint)
+		local hasHint = type(hint) == "string" and hint ~= ""
 		local row = Instance.new("Frame")
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, stacked and 52 or 30)
+		row.Size = UDim2.new(1, 0, 0, stacked and (hasHint and 82 or 52) or (hasHint and 58 or 30))
 		row.ZIndex = 6
 		row.Parent = parentBox
 		local title = Instance.new("TextLabel")
@@ -3843,9 +4021,26 @@ local function installHub()
 		title.TextSize = 14
 		title.TextXAlignment = Enum.TextXAlignment.Left
 		title.TextTruncate = Enum.TextTruncate.AtEnd
-		title.Size = stacked and UDim2.new(1, 0, 0, 18) or UDim2.new(0.48, 0, 1, 0)
+		title.Size = stacked and UDim2.new(1, 0, 0, 18)
+			or (hasHint and UDim2.new(0.55, -8, 0, 18) or UDim2.new(0.48, 0, 1, 0))
 		title.ZIndex = 6
 		title.Parent = row
+		if hasHint then
+			local note = Instance.new("TextLabel")
+			note.BackgroundTransparency = 1
+			note.Font = Enum.Font.Gotham
+			note.Text = hint
+			note.TextColor3 = muted
+			role(note, "muted")
+			note.TextSize = 11
+			note.TextWrapped = true
+			note.TextXAlignment = Enum.TextXAlignment.Left
+			note.TextYAlignment = Enum.TextYAlignment.Top
+			note.Position = UDim2.fromOffset(0, 19)
+			note.Size = stacked and UDim2.new(1, 0, 0, 32) or UDim2.new(0.55, -8, 0, 36)
+			note.ZIndex = 6
+			note.Parent = row
+		end
 		local pick = Instance.new("TextButton")
 		pick.AutoButtonColor = false
 		pick.Font = Enum.Font.Gotham
@@ -3877,18 +4072,24 @@ local function installHub()
 				pick.Text = stacked and (" " .. getValue()) or getValue()
 			end)
 		end)
-		remember(row, parentBox, name)
+		table.insert(dropdownRefreshers, function()
+			if pick.Parent then
+				pick.Text = stacked and (" " .. getValue()) or getValue()
+			end
+		end)
+		remember(row, parentBox, name .. " " .. (hint or ""))
 		return pick
 	end
 
-	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName, labelOf)
+	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName, labelOf, hint)
+		local hasHint = type(hint) == "string" and hint ~= ""
 		local showList = labelOf or function(list)
 			return tostring(type(list) == "table" and #list or 0) .. " selected"
 		end
 		local row = Instance.new("Frame")
 		row.BackgroundTransparency = 1
 		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, 30)
+		row.Size = UDim2.new(1, 0, 0, hasHint and 58 or 30)
 		row.ZIndex = 6
 		row.Parent = parentBox
 		local title = Instance.new("TextLabel")
@@ -3899,9 +4100,25 @@ local function installHub()
 		role(title, "ink")
 		title.TextSize = 14
 		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Size = UDim2.new(0.42, 0, 1, 0)
+		title.Size = hasHint and UDim2.new(0.55, -8, 0, 18) or UDim2.new(0.42, 0, 1, 0)
 		title.ZIndex = 6
 		title.Parent = row
+		if hasHint then
+			local note = Instance.new("TextLabel")
+			note.BackgroundTransparency = 1
+			note.Font = Enum.Font.Gotham
+			note.Text = hint
+			note.TextColor3 = muted
+			role(note, "muted")
+			note.TextSize = 11
+			note.TextWrapped = true
+			note.TextXAlignment = Enum.TextXAlignment.Left
+			note.TextYAlignment = Enum.TextYAlignment.Top
+			note.Position = UDim2.fromOffset(0, 19)
+			note.Size = UDim2.new(0.55, -8, 0, 36)
+			note.ZIndex = 6
+			note.Parent = row
+		end
 		local pick = Instance.new("TextButton")
 		pick.AutoButtonColor = false
 		pick.Font = Enum.Font.Gotham
@@ -3933,7 +4150,12 @@ local function installHub()
 				pick.Text = " " .. showList(getList())
 			end, true)
 		end)
-		remember(row, parentBox, name)
+		table.insert(dropdownRefreshers, function()
+			if pick.Parent then
+				pick.Text = " " .. showList(getList())
+			end
+		end)
+		remember(row, parentBox, name .. " " .. (hint or ""))
 		return pick
 	end
 
@@ -3966,99 +4188,166 @@ local function installHub()
 		STATE[key] = ordered
 		if key == "espRarities" then
 			task.defer(STATE.refreshEsp)
-		else
+		elseif key == "sellRarities" or key == "protectedMutations" then
 			nextSellAt = 0
 		end
 		saveConfig()
 	end
+	local function refreshDropdowns()
+		for _, refresh in ipairs(dropdownRefreshers) do
+			pcall(refresh)
+		end
+	end
+	STATE.refreshDropdowns = refreshDropdowns
 
 	STATE.uiStatusLabels = {}
-	local throwCard = card(pages.Farming, "AUTO THROW", 1)
-	makeSwitch(throwCard, "Auto Throw", "autoThrow", "Runs the game's native throw remotes repeatedly")
-	makeSwitch(throwCard, "Perfect Meter", "perfectMeter", "Submits the native meter's maximum result")
-	makeSwitch(throwCard, "Auto Skip Reveals", "autoSkip", "Uses the game's AutoSkip setting")
-	makeSwitch(throwCard, "Use Super Throws", "autoSuper", "Uses stored Super Throws when available")
+	do
+	local throwCard = card(pages.Farming, "THROW FARMING", 1)
+	makeSwitch(throwCard, "Auto Throw", "autoThrow", "Repeats the game's normal food throw and catch cycle")
+	makeSwitch(throwCard, "Always Land Perfect Throws", "perfectMeter", "Uses the maximum result on the game's throw meter")
+	makeSwitch(throwCard, "Skip Catch Animation", "autoSkip", "Skips the animal reveal animation so the next throw starts sooner")
+	makeSwitch(throwCard, "Use Super Throws Automatically", "autoSuper", "Uses Super Throws only while your chosen reserve remains untouched")
+	makeDropdown(throwCard, "Super Throw Reserve", function()
+		return STATE.superThrowReserve > 0 and ("Keep " .. tostring(STATE.superThrowReserve)) or "Use all"
+	end, SUPER_RESERVE_OPTIONS, function(option)
+		STATE.superThrowReserve = tonumber(option:match("%d+")) or 0
+		saveConfig()
+	end, false, "Example: Keep 10 means Auto Throw never spends your last 10 Super Throws")
 	STATE.uiStatusLabels.throw = label(throwCard, "Status · " .. tostring(STATE.throwStatus), 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.throw.LayoutOrder = 90
+	end
 
+	do
 	local trainCard = card(pages.Farming, "TRAINING", 2)
-	makeSwitch(trainCard, "Auto Train", "autoTrain", "Trains throw power through the native training session")
-	makeSwitch(trainCard, "Auto Tap Bonus", "autoTapBonus", "Claims training tap bonuses while Auto Train is active")
+	makeSwitch(trainCard, "Auto Train Throw Power", "autoTrain", "Auto Throw pauses while training is active")
+	makeSwitch(trainCard, "Claim Training Bonuses", "autoTapBonus", "Claims the game's timed tap bonuses during Auto Train")
+	makeSwitch(trainCard, "Stop at Target Power", "trainToTarget", "Stops training when the Throw Power shown on your HUD reaches the selected target")
+	makeDropdown(trainCard, "Target Throw Power", function()
+		return STATE.trainTargetPower
+	end, TRAIN_TARGET_OPTIONS, function(option)
+		STATE.trainTargetPower = option
+		saveConfig()
+	end, false, "Only used when Stop at Target Power is enabled")
+	makeSwitch(trainCard, "Resume Auto Throw After Target", "resumeThrowAfterTraining", "Automatically returns to throwing after the target is reached")
 	STATE.uiStatusLabels.training = label(trainCard, "Status · " .. tostring(STATE.trainingStatus), 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.training.LayoutOrder = 90
+	end
 
+	do
+	local targetCard = card(pages.Farming, "STOP ON TARGET CATCH", 3)
+	makeSwitch(targetCard, "Stop on Minimum Rarity", "stopOnRarity", "Turns Auto Throw off when a new animal meets or exceeds your target rarity")
+	makeDropdown(targetCard, "Minimum Target Rarity", function()
+		return STATE.stopTargetRarity
+	end, RARITY_OPTIONS, function(option)
+		STATE.stopTargetRarity = option
+		saveConfig()
+	end, false, "Example: Mythic also stops for Secret, Divine and every higher rarity")
+	makeSwitch(targetCard, "Stop on Selected Mutations", "stopOnMutation", "Turns Auto Throw off when a new animal has any selected mutation")
+	makeMultiDropdown(targetCard, "Mutations That Stop Farming", function()
+		return STATE.stopTargetMutations
+	end, MUTATION_OPTIONS, function(option)
+		toggleSelection("stopTargetMutations", option, MUTATION_OPTIONS)
+	end, function(list)
+		return selectedLabel(list, MUTATION_OPTIONS)
+	end, "Rarity and mutation targets use OR: either match stops Auto Throw")
+	end
+
+	do
 	local animalCard = card(pages.Animals, "ANIMALS", 1)
-	makeSwitch(animalCard, "Auto Equip Best", "equipBest", "Keeps the strongest animals placed on your plot")
+	makeSwitch(animalCard, "Keep Best Animals Equipped", "equipBest", "Keeps the strongest available animals earning money on your plot")
 	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals only on your screen; nothing is unequipped or sold")
 	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 56)
 	STATE.uiStatusLabels.animals.LayoutOrder = 90
+	end
 
+	do
 	local espCard = card(pages.Animals, "ANIMAL ESP", 2)
 	makeSwitch(espCard, "Animal ESP", "espEnabled", "Shows names, rarity, mutation, income, distance and owner through walls")
-	makeSwitch(espCard, "My Plot Only", "espOwnOnly", "Only show animals owned by your account")
-	makeSwitch(espCard, "Show Every Animal", "espAllAnimals", "Off keeps one strongest animal per plot so labels stay readable")
-	makeMultiDropdown(espCard, "ESP Rarities", function()
+	makeSwitch(espCard, "Only Show My Animals", "espOwnOnly", "Hides ESP labels belonging to other players")
+	makeSwitch(espCard, "Show All Matching Animals", "espAllAnimals", "Off shows only the strongest matching animal per plot to prevent label clutter")
+	makeMultiDropdown(espCard, "Rarities to Display", function()
 		return STATE.espRarities
 	end, RARITY_OPTIONS, function(option)
 		toggleSelection("espRarities", option, RARITY_OPTIONS)
 	end, function(list)
 		return selectedLabel(list, RARITY_OPTIONS)
-	end)
-	makeDropdown(espCard, "ESP Distance", function()
+	end, "Only selected rarities receive ESP labels")
+	makeDropdown(espCard, "Maximum Display Distance", function()
 		return STATE.espMaxDistance
 	end, ESP_DISTANCE_OPTIONS, function(option)
 		STATE.espMaxDistance = option
 		saveConfig()
 		task.defer(STATE.refreshEsp)
-	end)
+	end, false, "Animals farther away than this are hidden from ESP")
 	STATE.uiStatusLabels.esp = label(espCard, STATE.espStatus or "ESP off", 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.esp.LayoutOrder = 90
+	end
 
+	do
+	local historyCard = card(pages.Animals, "RECENT CATCHES", 3)
+	STATE.uiStatusLabels.history = label(historyCard, "No new animals caught during this session.", 12, ink, Enum.Font.Gotham, 48)
+	STATE.uiStatusLabels.history.LayoutOrder = 1
+	STATE.uiStatusLabels.history.AutomaticSize = Enum.AutomaticSize.Y
+	STATE.uiStatusLabels.history.Size = UDim2.new(1, 0, 0, 0)
+	end
+
+	do
 	local progressCard = card(pages.Progress, "UPGRADES", 1)
-	makeSwitch(progressCard, "Auto Buy Best Food", "autoFood", "Buys and equips the next affordable food")
-	makeSwitch(progressCard, "Auto Upgrade Stand", "autoStand", "Buys the next affordable training stand")
-	makeSwitch(progressCard, "Auto Upgrade Fence", "autoFence", "Adds plot slots when the next fence is affordable")
+	makeSwitch(progressCard, "Auto Buy Food Upgrades", "autoFood", "Buys the next affordable food and equips your best owned food")
+	makeSwitch(progressCard, "Auto Buy Training Stands", "autoStand", "Buys the next affordable training stand")
+	makeSwitch(progressCard, "Auto Buy Plot Slots", "autoFence", "Upgrades the fence when affordable to unlock another animal slot")
+	makeDropdown(progressCard, "Keep Cash Reserve", function()
+		return STATE.cashReserve
+	end, CASH_RESERVE_OPTIONS, function(option)
+		STATE.cashReserve = option
+		saveConfig()
+	end, false, "Automatic upgrades never spend money below this amount")
 	STATE.uiStatusLabels.upgrade = label(progressCard, "Status · " .. tostring(STATE.upgradeStatus), 12, accent, Enum.Font.GothamMedium, 38)
 	STATE.uiStatusLabels.upgrade.LayoutOrder = 90
+	end
 
-	local sellCard = card(pages.Selling, "SMART SELL", 1)
-	makeSwitch(sellCard, "Auto Sell Filtered Animals", "autoSell", "Sells only unplaced animals matching your selected rarities")
-	makeMultiDropdown(sellCard, "Sell Rarities", function()
+	do
+	local sellCard = card(pages.Selling, "SAFE AUTO SELL", 1)
+	makeSwitch(sellCard, "Auto Sell Matching Backpack Animals", "autoSell", "Placed animals are always safe; only backpack animals passing every filter can be sold")
+	makeMultiDropdown(sellCard, "Rarities Allowed to Sell", function()
 		return STATE.sellRarities
 	end, RARITY_OPTIONS, function(option)
 		toggleSelection("sellRarities", option, RARITY_OPTIONS)
 	end, function(list)
 		return selectedLabel(list, RARITY_OPTIONS)
-	end)
-	makeMultiDropdown(sellCard, "Protect Mutations", function()
+	end, "Checked means allowed to sell. Unchecked rarities are always protected")
+	makeMultiDropdown(sellCard, "Never Sell These Mutations", function()
 		return STATE.protectedMutations
 	end, MUTATION_OPTIONS, function(option)
 		toggleSelection("protectedMutations", option, MUTATION_OPTIONS)
 	end, function(list)
 		return selectedLabel(list, MUTATION_OPTIONS)
-	end)
-	makeDropdown(sellCard, "Keep Best Animals", function()
-		return tostring(STATE.keepBest)
-	end, { "0", "5", "10", "15", "20", "30" }, function(option)
-		STATE.keepBest = tonumber(option) or STATE.keepBest
+	end, "Selected mutations are protected even when their rarity is allowed to sell")
+	makeDropdown(sellCard, "Keep Best Backpack Animals", function()
+		return "Keep " .. tostring(STATE.keepBest)
+	end, KEEP_BACKUP_OPTIONS, function(option)
+		STATE.keepBest = tonumber(option:match("%d+")) or STATE.keepBest
 		saveConfig()
-	end)
-	makeDropdown(sellCard, "Sell Every (min)", function()
-		return tostring(STATE.sellMinutes)
-	end, SELL_MINUTE_OPTIONS, function(option)
-		STATE.sellMinutes = tonumber(option) or STATE.sellMinutes
+	end, false, "Protects this many highest-income backpack animals in addition to every placed animal")
+	makeDropdown(sellCard, "Auto Sell Interval", function()
+		return "Every " .. tostring(STATE.sellMinutes) .. (STATE.sellMinutes == 1 and " minute" or " minutes")
+	end, SELL_INTERVAL_OPTIONS, function(option)
+		STATE.sellMinutes = tonumber(option:match("%d+")) or STATE.sellMinutes
 		saveConfig()
-	end)
-	STATE.uiStatusLabels.sell = label(sellCard, "Checking protected animals...", 12, accent, Enum.Font.GothamMedium, 38)
+	end, false, "How often Auto Sell checks for matching backpack animals")
+	STATE.uiStatusLabels.sell = label(sellCard, "Checking protected animals...", 12, accent, Enum.Font.GothamMedium, 62)
 	STATE.uiStatusLabels.sell.LayoutOrder = 90
+	end
 
+	do
 	local rewardCard = card(pages.Progress, "REWARDS", 2)
-	makeSwitch(rewardCard, "Auto Offline Claim", "autoOffline", "Claims pending offline animal income")
-	makeSwitch(rewardCard, "Auto Free Animal", "autoFree", "Claims the free shop animal when available")
+	makeSwitch(rewardCard, "Claim Offline Earnings", "autoOffline", "Automatically claims pending offline animal income")
+	makeSwitch(rewardCard, "Claim Free Animal", "autoFree", "Automatically claims the free shop animal when available")
 	STATE.uiStatusLabels.reward = label(rewardCard, "Status · " .. tostring(STATE.rewardStatus), 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.reward.LayoutOrder = 90
+	end
 
-	local notificationCard = card(pages.Settings, "NOTIFICATIONS", 2)
+	local notificationCard = card(pages.Settings, "NOTIFICATIONS", 1)
 	makeSwitch(notificationCard, "Hub Notifications", "notifications", "Shows clean on-screen updates even while the dashboard is closed")
 	makeSwitch(notificationCard, "Catch Notifications", "notifyCatches", "Shows the animal, mutation, rarity and income you just received")
 	makeSwitch(notificationCard, "Sale Notifications", "notifySales", "Shows how many filtered animals Smart Sell removed")
@@ -4072,11 +4361,11 @@ local function installHub()
 			notificationNote.Text = option == "All" and "Catch filter · All catches" or ("Catch filter · " .. tostring(option) .. " and above")
 		end
 		saveConfig()
-	end)
+	end, false, "Only catch notifications at or above this rarity are shown")
 	notificationNote = label(notificationCard, STATE.notifyMinRarity == "All" and "Catch filter · All catches" or ("Catch filter · " .. tostring(STATE.notifyMinRarity) .. " and above"), 12, accent, Enum.Font.GothamMedium, 18)
 	notificationNote.LayoutOrder = 90
 
-	local screenCard = card(pages.Settings, "DISPLAY", 3)
+	local screenCard = card(pages.Settings, "DISPLAY", 2)
 	makeDropdown(screenCard, "Hub Size", function()
 		return STATE.hubSize or "Compact"
 	end, { "Compact", "Normal", "Large" }, function(option)
@@ -4090,7 +4379,7 @@ local function installHub()
 				pcall(STATE.clampHub)
 			end
 		end)
-	end, true)
+	end, true, "Changes the dashboard size without affecting the game")
 
 	local function statChip(parentFrame, title, order)
 		local chip = Instance.new("Frame")
@@ -4137,7 +4426,7 @@ local function installHub()
 		return chipValue
 	end
 
-	local lookCard = card(pages.Settings, "THEME", 4)
+	local lookCard = card(pages.Settings, "THEME", 3)
 	local themeNote = label(lookCard, "Paste a theme and import it. It saves on this account.", 12, muted, Enum.Font.Gotham, 32)
 	themeNote.LayoutOrder = 1
 	local themeBox = Instance.new("TextBox")
@@ -4264,8 +4553,14 @@ local function installHub()
 	local refreshHealth = nil
 	STATE.refreshHealth = nil
 
+	local sessionCard = card(homePage, "SESSION RESULTS", 6)
+	STATE.uiStatusLabels.session = label(sessionCard, "No new animals caught during this session.", 12, ink, Enum.Font.Gotham, 54)
+	STATE.uiStatusLabels.session.LayoutOrder = 1
+	STATE.uiStatusLabels.session.AutomaticSize = Enum.AutomaticSize.Y
+	STATE.uiStatusLabels.session.Size = UDim2.new(1, 0, 0, 0)
+
 	local note = card(homePage, "HOW IT WORKS", 7)
-	local noteBody = label(note, "Auto Throw uses the game's native server contract. Upgrades only buy when affordable. Smart Sell follows your rarity filter and protects placed animals, your best group, and selected mutations.", 13, ink, Enum.Font.Gotham, 56)
+	local noteBody = label(note, "Auto Throw repeats normal throws. Automatic upgrades respect your cash reserve. Safe Auto Sell only sells matching backpack animals after protecting placed animals, your best backups and selected mutations.", 13, ink, Enum.Font.Gotham, 72)
 	noteBody.LayoutOrder = 1
 
 	local activityCard = card(homePage, "ACTIVITY", 8)
@@ -4275,6 +4570,16 @@ local function installHub()
 	activityBody.Size = UDim2.new(1, 0, 0, 0)
 	activityBody.TextWrapped = true
 	remember(activityBody, activityCard, "activity status solves")
+	local function countSummary(counts, order)
+		local parts = {}
+		for _, name in ipairs(order) do
+			local count = tonumber(counts[name]) or 0
+			if count > 0 then
+				table.insert(parts, tostring(name) .. " " .. tostring(count))
+			end
+		end
+		return #parts > 0 and table.concat(parts, " · ") or "None yet"
+	end
 	local function refreshActivity()
 		local lines = {
 			"Status · " .. tostring(STATE.status),
@@ -4283,10 +4588,10 @@ local function installHub()
 			"Upgrades · " .. tostring(STATE.upgradeStatus),
 			"Selling · " .. tostring(STATE.sellStatus),
 			"Rewards · " .. tostring(STATE.rewardStatus),
-			string.format("Session · %d throws, %d training starts, %d bonuses, %d foods, %d stands, %d fences, %d sold", stats.throws, stats.trained, stats.bonuses, stats.foods, stats.stands, stats.fences, stats.sold),
+			string.format("Session · %d throws, %d catches, %d training starts, %d bonuses, %d upgrades, %d sold", stats.throws, stats.catches, stats.trained, stats.bonuses, stats.foods + stats.stands + stats.fences, stats.sold),
 		}
 		if STATE.antiAfk == true then
-			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK working through VirtualUser" or "Anti AFK waiting for idle"
+			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK active" or "Anti AFK waiting for idle"
 		end
 		if #STATE.activity > 0 then
 			lines[#lines + 1] = table.concat(STATE.activity, "\n")
@@ -4305,10 +4610,35 @@ local function installHub()
 		local preview = STATE.sellPreview()
 		elevate()
 		if preview then
-			STATE.uiStatusLabels.sell.Text = string.format("%s\n%d eligible · %d rarities selected\n%d best · %d mutations · %d placed protected", publicStatus(STATE.sellStatus), preview.eligible, #STATE.sellRarities, preview.protectedBest, preview.protectedMutation, preview.placed)
+			local warning = STATE.sellRiskWarning()
+			STATE.uiStatusLabels.sell.Text = string.format(
+				"%s\n%d ready to sell · %d allowed rarities\n%d best backups safe · %d mutations safe · placed animals always safe%s",
+				publicStatus(STATE.sellStatus),
+				preview.eligible,
+				#STATE.sellRarities,
+				preview.protectedBest,
+				preview.protectedMutation,
+				warning and ("\n" .. warning) or ""
+			)
+			STATE.uiStatusLabels.sell.TextColor3 = warning and risky or accent
 		else
 			STATE.uiStatusLabels.sell.Text = publicStatus(STATE.sellStatus)
 		end
+		local historyLines = {}
+		for index = 1, math.min(6, #STATE.catchHistory) do
+			local catch = STATE.catchHistory[index]
+			historyLines[#historyLines + 1] = string.format("%d. %s · %s", index, tostring(catch.title), tostring(catch.message))
+		end
+		STATE.uiStatusLabels.history.Text = #historyLines > 0
+			and table.concat(historyLines, "\n")
+			or "No new animals caught during this session."
+		STATE.uiStatusLabels.session.Text = string.format(
+			"%d new animals · %d target stops\nRarities: %s\nMutations: %s",
+			stats.catches,
+			stats.targetStops,
+			countSummary(stats.rarityCounts, RARITY_OPTIONS),
+			countSummary(stats.mutationCounts, MUTATION_OPTIONS)
+		)
 		local animals = DataController:GetValue("Animals")
 		elevate()
 		local animalCount, placedCount = 0, 0
@@ -4390,16 +4720,16 @@ local function installHub()
 	playerBlurb.LayoutOrder = 1
 
 	local movement = card(playerPage, "MOVEMENT", 2)
-	makeSwitch(movement, "WalkSpeed", "walkSpeed")
-	makeDropdown(movement, "Speed", function()
+	makeSwitch(movement, "Custom Walk Speed", "walkSpeed", "Overrides your normal walking speed while enabled")
+	makeDropdown(movement, "Walk Speed", function()
 		return tostring(STATE.speed)
 	end, SPEED_OPTIONS, function(option)
 		STATE.speed = tonumber(option) or STATE.speed
 		saveConfig()
-	end)
-	makeSwitch(movement, "Infinite Jump", "infiniteJump")
-	makeSwitch(movement, "Noclip", "noclip")
-	makeSwitch(movement, "Instant ProximityPrompt", "instantPrompts", "Prompts fire without holding the key")
+	end, false, "16 is the game's normal walking speed")
+	makeSwitch(movement, "Infinite Jump", "infiniteJump", "Allows another jump while you are already in the air")
+	makeSwitch(movement, "Noclip", "noclip", "Lets your character move through walls and objects")
+	makeSwitch(movement, "Instant Interactions", "instantPrompts", "Removes the hold time from proximity prompts")
 
 	local flyCard = card(playerPage, "FLY", 3)
 	makeSwitch(flyCard, "Fly", "fly", "WASD to move, Space up, Left Ctrl down")
@@ -4408,13 +4738,13 @@ local function installHub()
 	end, FLY_SPEED_OPTIONS, function(option)
 		STATE.flySpeed = tonumber(option) or STATE.flySpeed
 		saveConfig()
-	end)
+	end, false, "Higher values move your character faster while Fly is enabled")
 
 	local clientCard = card(playerPage, "CLIENT", 4)
 	makeSwitch(clientCard, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
-	makeSwitch(clientCard, "No Gameplay Paused", "noPausePopup", "Hides the Gameplay Paused popup")
+	makeSwitch(clientCard, "Hide Roblox Pause Popup", "noPausePopup", "Hides the Gameplay Paused message while Roblox is unfocused")
 	makeSwitch(clientCard, "Auto Reconnect on Kick", "autoReconnect", "Rejoins the game when you get disconnected")
-	makeSwitch(clientCard, "Disable 3D Rendering", "disable3d", "Big FPS saver while you AFK")
+	makeSwitch(clientCard, "AFK Black Screen — Maximum FPS", "disable3d", "Stops rendering the 3D world while automation continues; turn it off to see the game again")
 	makeSwitch(clientCard, "Potato Mode", "fpsBoost", "Reversible low-detail mode: strips textures, smooths materials, disables effects, clouds, environment lighting, water effects and shadows")
 	makeSwitch(clientCard, "Hide UI On Start", "hideOnStart", "Starts hidden. Press the toggle key to show it")
 	makeDropdown(clientCard, "Toggle Key", function()
@@ -4422,7 +4752,7 @@ local function installHub()
 	end, KEY_OPTIONS, function(option)
 		STATE.toggleKey = option
 		saveConfig()
-	end)
+	end, false, "Keyboard key used to open or hide the dashboard")
 	STATE.uiStatusLabels.potato = label(clientCard, STATE.potatoStatus or "Potato Mode off", 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.potato.LayoutOrder = 90
 
@@ -4958,7 +5288,7 @@ local function installHub()
 	local quickCard = card(homePage, "QUICK START", 5)
 	local quickNote = label(quickCard, "Choose a safe starting point. You can still change every option afterwards.", 12, muted, Enum.Font.Gotham, 34)
 	quickNote.LayoutOrder = 1
-	actionButton(quickCard, "Safe AFK", 2, true, function()
+	actionButton(quickCard, "Safe AFK — No Auto Sell", 2, true, function()
 		applyPreset({
 			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = false,
 			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
@@ -4967,14 +5297,14 @@ local function installHub()
 		}, "Safe AFK")
 		quickNote.Text = "Safe AFK enabled · protected selling remains off"
 	end)
-	actionButton(quickCard, "Fast Progress", 3, false, function()
+	actionButton(quickCard, "Fast Progress — No Auto Sell", 3, false, function()
 		applyPreset({
 			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = true,
 			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
-			autoFence = true, equipBest = true, autoSell = true,
+			autoFence = true, equipBest = true, autoSell = false,
 			autoOffline = true, autoFree = true,
 		}, "Fast Progress")
-		quickNote.Text = "Fast Progress enabled · best, placed and selected mutations stay protected"
+		quickNote.Text = "Fast Progress enabled · review Safe Auto Sell filters before turning selling on"
 	end)
 	actionButton(quickCard, "Stop Automation", 4, false, function()
 		applyPreset({
@@ -4988,10 +5318,28 @@ local function installHub()
 	local actionsCard = card(homePage, "MANUAL ACTIONS", 9)
 	local actionsNote = label(actionsCard, "Run these now instead of waiting for the next pass.", 12, muted, Enum.Font.Gotham, 16)
 	actionsNote.LayoutOrder = 1
-	actionButton(actionsCard, "Sell Junk Now", 2, true, function()
+	local sellConfirmUntil = 0
+	actionButton(actionsCard, "Sell Matching Animals Now", 2, true, function()
+		local preview = STATE.sellPreview()
+		if not preview or preview.eligible <= 0 then
+			sellConfirmUntil = 0
+			actionsNote.Text = "Nothing matches your current Safe Auto Sell filters"
+			return
+		end
+		if os.clock() > sellConfirmUntil then
+			sellConfirmUntil = os.clock() + 6
+			local warning = STATE.sellRiskWarning()
+			actionsNote.Text = string.format(
+				"Preview: %d backpack animals will be sold. Click again within 6 seconds to confirm.%s",
+				preview.eligible,
+				warning and (" " .. warning) or ""
+			)
+			return
+		end
+		sellConfirmUntil = 0
 		task.spawn(function()
 			local sold = STATE.sellJunkNow(true)
-			actionsNote.Text = sold > 0 and ("Sold " .. sold .. " junk items") or tostring(STATE.sellStatus)
+			actionsNote.Text = sold > 0 and ("Sold " .. sold .. " matching backpack animals") or tostring(STATE.sellStatus)
 		end)
 	end)
 	actionButton(actionsCard, "Equip Best Now", 3, false, function()
@@ -5015,7 +5363,7 @@ local function installHub()
 	end
 	do
 		local discordInvite = "https://discord.gg/94pC3T6NZG"
-		local communityCard = card(pages.Settings, "COMMUNITY", 5)
+		local communityCard = card(pages.Settings, "COMMUNITY", 4)
 		local communityNote = label(communityCard, "Join the ZinoosHub Discord for updates, support and new games.", 13, muted, Enum.Font.Gotham, 36)
 		communityNote.LayoutOrder = 1
 		local communityResult = label(communityCard, "", 13, accent, Enum.Font.Gotham, 18)
@@ -5030,7 +5378,7 @@ local function installHub()
 	end
 
 	do
-	local compatibilityCard = card(pages.Settings, "COMPATIBILITY", 1)
+	local compatibilityCard = card(pages.Settings, "DIAGNOSTICS", 6)
 	local capabilityLines = {
 		"Executor · connected",
 		"Config saving · " .. ((typeof(writefile) == "function" and typeof(readfile) == "function") and "available" or "unavailable"),
@@ -5042,14 +5390,64 @@ local function installHub()
 	end
 
 	do
-	local saveCard = card(pages.Settings, "CONFIG", 6)
-	local saveNote = label(saveCard, "Saves the toggles, timings and theme for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
+	local saveCard = card(pages.Settings, "CONFIG & RESET", 5)
+	local saveNote = label(saveCard, "Changes save automatically for this Roblox account. Save Again forces an immediate write.", 13, muted, Enum.Font.Gotham, 40)
 	saveNote.LayoutOrder = 1
 	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
-	saveResult.LayoutOrder = 3
-	actionButton(saveCard, "Save Config", 2, true, function()
+	saveResult.LayoutOrder = 4
+	actionButton(saveCard, "Save Again", 2, true, function()
 		saveConfig()
 		saveResult.Text = "Saved for " .. LocalPlayer.DisplayName
+		saveResult.TextColor3 = accent
+	end)
+	local resetConfirmUntil = 0
+	actionButton(saveCard, "Reset to Safe Defaults", 3, false, function()
+		if os.clock() > resetConfirmUntil then
+			resetConfirmUntil = os.clock() + 6
+			saveResult.Text = "Click Reset again within 6 seconds to confirm"
+			saveResult.TextColor3 = risky
+			return
+		end
+		resetConfirmUntil = 0
+		local safeValues = {
+			autoThrow = true, perfectMeter = true, autoSkip = true, autoTrain = false,
+			autoTapBonus = true, autoFood = true, autoStand = true, autoFence = false,
+			equipBest = true, autoSell = false, autoOffline = true, autoFree = true,
+			autoSuper = false, stopOnRarity = false, stopOnMutation = false,
+			trainToTarget = false, resumeThrowAfterTraining = true,
+			walkSpeed = false, antiAfk = true, infiniteJump = false, noclip = false,
+			instantPrompts = false, fly = false, noPausePopup = true, autoReconnect = false,
+			disable3d = false, fpsBoost = false, hidePets = true,
+			notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
+			espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
+		}
+		for key, value in pairs(safeValues) do
+			STATE[key] = value
+			if syncToggle then syncToggle(key) end
+		end
+		STATE.keepBest = 10
+		STATE.sellMinutes = 2
+		STATE.sellRarities = { "Common", "Uncommon", "Rare" }
+		STATE.protectedMutations = table.clone(MUTATION_OPTIONS)
+		STATE.stopTargetRarity = "Supreme"
+		STATE.stopTargetMutations = { "Rainbow" }
+		STATE.trainTargetPower = "10K"
+		STATE.cashReserve = "$0"
+		STATE.superThrowReserve = 0
+		STATE.notifyMinRarity = "All"
+		STATE.espRarities = table.clone(RARITY_OPTIONS)
+		STATE.espMaxDistance = "500"
+		task.spawn(stopTraining)
+		pcall(STATE.apply3d)
+		pcall(STATE.applyFpsBoost)
+		pcall(STATE.applyHidePets)
+		pcall(STATE.refreshEsp)
+		local hum = humanoid()
+		if hum then hum.WalkSpeed = 16 end
+		refreshDropdowns()
+		nextSellAt = 0
+		saveConfig()
+		saveResult.Text = "Safe defaults restored · Auto Sell is off"
 		saveResult.TextColor3 = accent
 	end)
 	end
