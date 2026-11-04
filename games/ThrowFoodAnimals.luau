@@ -75,7 +75,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.5.1",
+	version = "2.5.2",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -1058,6 +1058,12 @@ STATE.throwController = require(controllers.ThrowController)
 elevate()
 STATE.throwMeter = require(controllers.ThrowMeter)
 elevate()
+STATE.throwMeterOriginalNew = STATE.throwMeter.new
+hubCleanup(function()
+	if STATE.throwMeter and STATE.throwMeterOriginalNew then
+		STATE.throwMeter.new = STATE.throwMeterOriginalNew
+	end
+end)
 
 local function readAll()
 	local ok, value = pcall(DataReplicator.Read, dataFolder)
@@ -1463,9 +1469,23 @@ local function stepThrow()
 		-- Keep our prep token until Start is called so its line detector cannot
 		-- start a second copy between the teleport and the controller call.
 		local previousAutoTap = STATE.throwMeter.TestAutoTap
-		STATE.throwMeter.TestAutoTap = STATE.perfectMeter == true and 1.05 or 0.9
+		local previousMeterNew = STATE.throwMeter.new
+		if STATE.perfectMeter == true then
+			-- The game's "Perfect" band begins below a full meter, so timing an
+			-- automatic tap can display +19. Locking the native meter makes its
+			-- own Run method return exactly 1 and award the maximum +20 power.
+			STATE.throwMeter.new = function(...)
+				local meter = previousMeterNew(...)
+				meter:SetLocked(true)
+				return meter
+			end
+			STATE.throwMeter.TestAutoTap = 0.5
+		else
+			STATE.throwMeter.TestAutoTap = 0.9
+		end
 		releaseBusy(throwToken)
 		local sequenceOk, sequenceError = pcall(STATE.throwController.Start)
+		STATE.throwMeter.new = previousMeterNew
 		STATE.throwMeter.TestAutoTap = previousAutoTap
 		elevate()
 		local after = tonumber(getData("Throws")) or lastObservedThrows
@@ -4301,7 +4321,7 @@ local function installHub()
 	do
 	local throwCard = card(pages.Farming, "THROW FARMING", 1)
 	makeSwitch(throwCard, "Auto Throw", "autoThrow", "Repeats the game's normal food throw and catch cycle")
-	makeSwitch(throwCard, "Always Land Perfect Throws", "perfectMeter", "Uses the maximum result on the game's throw meter")
+	makeSwitch(throwCard, "Always Land Maximum Throws (+20)", "perfectMeter", "Locks the game's throw meter at its full +20 power result")
 	makeSwitch(throwCard, "Skip Catch Animation", "autoSkip", "Skips the animal reveal animation so the next throw starts sooner")
 	makeSwitch(throwCard, "Use Super Throws Automatically", "autoSuper", "Uses Super Throws only while your chosen reserve remains untouched")
 	makeDropdown(throwCard, "Super Throw Reserve", function()
