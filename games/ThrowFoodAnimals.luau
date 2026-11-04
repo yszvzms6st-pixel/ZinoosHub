@@ -75,7 +75,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.5.3",
+	version = "2.5.4",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -1659,7 +1659,7 @@ local function bestOwnedFood(data)
 	local owned = type(data.OwnedFoods) == "table" and data.OwnedFoods or {}
 	local best = 1
 	for _, food in ipairs(FoodsConfig.All or FoodsConfig.List or {}) do
-		if owned[food.Index] == true then
+		if owned[food.Index] == true or owned[tostring(food.Index)] == true then
 			best = math.max(best, food.Index)
 		end
 	end
@@ -1677,9 +1677,13 @@ local function stepUpgrades()
 	local spendable = math.max(0, money - reserve)
 	local reserveBlocked = false
 	local changed = false
+	local selectedUpgrades = 0
+	local maxedUpgrades = 0
 	STATE.upgradeStatus = "Checking upgrades"
 	if STATE.autoFood == true then
+		selectedUpgrades += 1
 		local best = bestOwnedFood(data)
+		local equipped = tonumber(data.EquippedFood) or 0
 		local nextFood = FoodsConfig.Get and FoodsConfig.Get(best + 1) or (FoodsConfig.All or {})[best + 1]
 		local nextFoodPrice = nextFood and (tonumber(nextFood.Price) or math.huge) or math.huge
 		if nextFood and nextFoodPrice <= spendable then
@@ -1697,7 +1701,9 @@ local function stepUpgrades()
 			if nextFood and nextFoodPrice <= money then
 				reserveBlocked = true
 			end
-			local equipped = tonumber(data.EquippedFood) or 0
+			if not nextFood and best <= equipped then
+				maxedUpgrades += 1
+			end
 			if best > equipped then
 				local result = invokeNear("Food", foodShopTarget(), "Shop_Equip", best)
 				if result.Ok then
@@ -1710,48 +1716,64 @@ local function stepUpgrades()
 			end
 		end
 	end
-	if not changed and STATE.autoStand == true then
-		local stand = tonumber(data.Stand) or 0
-		local nextStand = StandsConfig.Get and StandsConfig.Get(stand + 1) or (StandsConfig.All or {})[stand + 1]
-		local nextStandPrice = nextStand and (tonumber(nextStand.Price) or math.huge) or math.huge
-		if nextStand and nextStandPrice <= spendable then
-			local result = invokeNear("Stand", standTarget(), "Stand_Upgrade")
-			if result.Ok then
-				stats.stands += 1
-				changed = true
-				STATE.upgradeStatus = "Bought " .. tostring(nextStand.Name)
-				noteActivity(STATE.upgradeStatus)
-				notify("progress", "Stand upgraded", tostring(nextStand.Name))
-			else
-				STATE.upgradeStatus = "Stand: " .. tostring(result.Reason or "rejected")
+	if STATE.autoStand == true then
+		selectedUpgrades += 1
+		if not changed then
+			local stand = tonumber(data.Stand) or 0
+			local nextStand = StandsConfig.Get and StandsConfig.Get(stand + 1) or (StandsConfig.All or {})[stand + 1]
+			local nextStandPrice = nextStand and (tonumber(nextStand.Price) or math.huge) or math.huge
+			if not nextStand then
+				maxedUpgrades += 1
+			elseif nextStandPrice <= spendable then
+				local result = invokeNear("Stand", standTarget(), "Stand_Upgrade")
+				if result.Ok then
+					stats.stands += 1
+					changed = true
+					STATE.upgradeStatus = "Bought " .. tostring(nextStand.Name)
+					noteActivity(STATE.upgradeStatus)
+					notify("progress", "Stand upgraded", tostring(nextStand.Name))
+				else
+					STATE.upgradeStatus = "Stand: " .. tostring(result.Reason or "rejected")
+				end
+			elseif nextStandPrice <= money then
+				reserveBlocked = true
 			end
-		elseif nextStand and nextStandPrice <= money then
-			reserveBlocked = true
 		end
 	end
-	if not changed and STATE.autoFence == true then
-		local level = tonumber(data.FenceLevel) or 0
-		local upgrade = FenceConfig.Get and FenceConfig.Get(level + 1) or (FenceConfig.Upgrades or {})[level + 1]
-		local fencePrice = upgrade and (tonumber(upgrade.Price) or math.huge) or math.huge
-		if upgrade and fencePrice <= spendable then
-			local result = invokeNear("Fence", fenceTarget(), "Plot_UpgradeFence")
-			if result.Ok then
-				stats.fences += 1
-				changed = true
-				STATE.upgradeStatus = "Fence upgraded"
-				noteActivity(STATE.upgradeStatus)
-				notify("progress", "Fence upgraded", "A new plot slot is available")
-			else
-				STATE.upgradeStatus = "Fence: " .. tostring(result.Reason or "rejected")
+	if STATE.autoFence == true then
+		selectedUpgrades += 1
+		if not changed then
+			local level = tonumber(data.FenceLevel) or 0
+			local upgrade = FenceConfig.Get and FenceConfig.Get(level + 1) or (FenceConfig.Upgrades or {})[level + 1]
+			local fencePrice = upgrade and (tonumber(upgrade.Price) or math.huge) or math.huge
+			if not upgrade then
+				maxedUpgrades += 1
+			elseif fencePrice <= spendable then
+				local result = invokeNear("Fence", fenceTarget(), "Plot_UpgradeFence")
+				if result.Ok then
+					stats.fences += 1
+					changed = true
+					STATE.upgradeStatus = "Fence upgraded"
+					noteActivity(STATE.upgradeStatus)
+					notify("progress", "Fence upgraded", "A new plot slot is available")
+				else
+					STATE.upgradeStatus = "Fence: " .. tostring(result.Reason or "rejected")
+				end
+			elseif fencePrice <= money then
+				reserveBlocked = true
 			end
-		elseif upgrade and fencePrice <= money then
-			reserveBlocked = true
 		end
 	end
 	if not changed and STATE.upgradeStatus == "Checking upgrades" then
-		STATE.upgradeStatus = reserveBlocked
-			and ("Keeping " .. tostring(STATE.cashReserve) .. " cash reserve")
-			or "Waiting for money, release, or maxed"
+		if reserveBlocked then
+			STATE.upgradeStatus = "Keeping " .. tostring(STATE.cashReserve) .. " cash reserve"
+		elseif selectedUpgrades == 0 then
+			STATE.upgradeStatus = "Automatic upgrades off"
+		elseif maxedUpgrades == selectedUpgrades then
+			STATE.upgradeStatus = "All selected upgrades maxed"
+		else
+			STATE.upgradeStatus = "Waiting for money or release"
+		end
 	end
 end
 
