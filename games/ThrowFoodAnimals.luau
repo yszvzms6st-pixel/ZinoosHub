@@ -75,7 +75,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.5.0",
+	version = "2.5.1",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -1054,6 +1054,10 @@ elevate()
 local controllers = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client"):WaitForChild("Controllers")
 local ClientState = require(controllers.ClientState)
 elevate()
+STATE.throwController = require(controllers.ThrowController)
+elevate()
+STATE.throwMeter = require(controllers.ThrowMeter)
+elevate()
 
 local function readAll()
 	local ok, value = pcall(DataReplicator.Read, dataFolder)
@@ -1447,10 +1451,37 @@ local function stepThrow()
 	end
 	STATE.status = "Throwing food"
 	STATE.throwStatus = STATE.perfectMeter and "Perfect throw running" or "Throw running"
-	task.wait(0.25)
+	-- Give the server enough time to receive the line teleport. A quarter-second
+	-- was unreliable on lower FPS clients and caused valid throws to return TooFar.
+	task.wait(0.8)
 	if STATE.autoSuper == true
 		and (tonumber(getData("SuperThrows")) or 0) > (tonumber(STATE.superThrowReserve) or 0) then
 		invoke("Throw_UseSuper")
+	end
+	if STATE.autoSkip ~= true then
+		-- The game's controller owns the complete throw, POV and animal reveal.
+		-- Keep our prep token until Start is called so its line detector cannot
+		-- start a second copy between the teleport and the controller call.
+		local previousAutoTap = STATE.throwMeter.TestAutoTap
+		STATE.throwMeter.TestAutoTap = STATE.perfectMeter == true and 1.05 or 0.9
+		releaseBusy(throwToken)
+		local sequenceOk, sequenceError = pcall(STATE.throwController.Start)
+		STATE.throwMeter.TestAutoTap = previousAutoTap
+		elevate()
+		local after = tonumber(getData("Throws")) or lastObservedThrows
+		if after > lastObservedThrows then
+			stats.throws += after - lastObservedThrows
+			STATE.throwStatus = "Completed visible throw " .. tostring(after)
+			noteActivity("Completed catch animation " .. tostring(after))
+		elseif not sequenceOk then
+			STATE.throwStatus = "Throw animation error: " .. tostring(sequenceError)
+		else
+			STATE.throwStatus = "Visible throw ended without a catch"
+		end
+		lastObservedThrows = after
+		STATE.status = "Waiting for next throw"
+		nextThrowTrigger = os.clock() + 0.35
+		return 0.25
 	end
 	local started = invoke("Throw_Start")
 	local result = nil
@@ -1945,32 +1976,64 @@ end))
 
 local noclipParts = {}
 trackConnection(RunService.Stepped:Connect(function()
+	if STATE.noclip ~= true then
+		if next(noclipParts) then
+			for part, original in pairs(noclipParts) do
+				if part.Parent then
+					part.CanCollide = original
+				end
+			end
+			table.clear(noclipParts)
+		end
+		return
+	end
 	local character = LocalPlayer.Character
 	if not character then
 		return
 	end
-	if STATE.noclip == true then
-		for _, part in ipairs(character:GetDescendants()) do
-			if part:IsA("BasePart") and part.CanCollide then
-				noclipParts[part] = true
-				part.CanCollide = false
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart") and part.CanCollide then
+			if noclipParts[part] == nil then
+				noclipParts[part] = part.CanCollide
 			end
+			part.CanCollide = false
 		end
-	elseif next(noclipParts) then
-		for part in pairs(noclipParts) do
-			if part.Parent then
-				part.CanCollide = true
-			end
-		end
-		table.clear(noclipParts)
 	end
 end))
 
+STATE.promptDurations = setmetatable({}, { __mode = "k" })
+function STATE.applyInstantPrompts()
+	if STATE.instantPrompts == true then
+		for _, prompt in ipairs(workspace:GetDescendants()) do
+			if prompt:IsA("ProximityPrompt") then
+				if STATE.promptDurations[prompt] == nil then
+					STATE.promptDurations[prompt] = prompt.HoldDuration
+				end
+				prompt.HoldDuration = 0
+			end
+		end
+		return
+	end
+	for prompt, duration in pairs(STATE.promptDurations) do
+		if prompt.Parent then
+			prompt.HoldDuration = duration
+		end
+	end
+	table.clear(STATE.promptDurations)
+end
+
 trackConnection(ProximityPromptService.PromptShown:Connect(function(prompt)
 	if STATE.instantPrompts == true then
+		if STATE.promptDurations[prompt] == nil then
+			STATE.promptDurations[prompt] = prompt.HoldDuration
+		end
 		prompt.HoldDuration = 0
 	end
 end))
+hubCleanup(function()
+	STATE.instantPrompts = false
+	STATE.applyInstantPrompts()
+end)
 
 local flyMover = nil
 local function stopFly()
@@ -2029,30 +2092,46 @@ trackConnection(RunService.RenderStepped:Connect(function()
 end))
 
 -- Client helpers.
-local function hidePausePopup()
-	if STATE.noPausePopup ~= true then
-		return
-	end
-	local robloxGui = CoreGui:FindFirstChild("RobloxGui")
-	local pause = robloxGui and robloxGui:FindFirstChild("CoreScripts/NetworkPause")
-	if pause then
+STATE.pausePopupOriginal = nil
+local function restorePausePopup()
+	local saved = STATE.pausePopupOriginal
+	STATE.pausePopupOriginal = nil
+	if saved and saved.object and saved.object.Parent then
 		pcall(function()
-			if pause:IsA("ScreenGui") then
-				pause.Enabled = false
-			else
-				pause.Visible = false
-			end
+			saved.object[saved.property] = saved.value
 		end)
 	end
 end
+
+local function hidePausePopup()
+	if STATE.noPausePopup ~= true then
+		restorePausePopup()
+		return
+	end
+	local robloxGui = CoreGui:FindFirstChild("RobloxGui")
+	local pause = robloxGui and (robloxGui:FindFirstChild("NetworkPause", true) or robloxGui:FindFirstChild("CoreScripts/NetworkPause"))
+	if pause then
+		pcall(function()
+			local property = pause:IsA("ScreenGui") and "Enabled" or "Visible"
+			if not STATE.pausePopupOriginal or STATE.pausePopupOriginal.object ~= pause then
+				restorePausePopup()
+				STATE.pausePopupOriginal = { object = pause, property = property, value = pause[property] }
+			end
+			pause[property] = false
+		end)
+	end
+end
+hubCleanup(restorePausePopup)
 
 pcall(function()
 	trackConnection(GuiService.ErrorMessageChanged:Connect(function(message)
 		if STATE.autoReconnect == true and type(message) == "string" and message ~= "" then
 			task.wait(2)
-			pcall(function()
-				TeleportService:Teleport(game.PlaceId, LocalPlayer)
-			end)
+			if STATE.autoReconnect == true then
+				pcall(function()
+					TeleportService:Teleport(game.PlaceId, LocalPlayer)
+				end)
+			end
 		end
 	end))
 end)
@@ -2328,6 +2407,13 @@ local function hidePetRoot(root)
 	if STATE.hidePets ~= true or not root or not root:IsDescendantOf(workspace) then
 		return
 	end
+	local current = root
+	while current and current ~= workspace do
+		if current.Name == "NewAnimalView" or string.sub(current.Name, 1, 14) == "ThrowSequence_" then
+			return
+		end
+		current = current.Parent
+	end
 	hidePetVisual(root)
 	for _, object in ipairs(root:GetDescendants()) do
 		hidePetVisual(object)
@@ -2374,10 +2460,6 @@ function STATE.applyHidePets()
 			hidePetRoot(root)
 		end
 	end
-	local viewFolder = workspace:FindFirstChild("NewAnimalView")
-	if viewFolder then
-		hidePetRoot(viewFolder)
-	end
 	STATE.petVisibilityStatus = "Animal models hidden locally"
 end
 
@@ -2398,11 +2480,6 @@ end
 
 trackConnection(CollectionService:GetInstanceAddedSignal("PlotAnimal"):Connect(hideNewPet))
 trackConnection(CollectionService:GetInstanceAddedSignal("Animal"):Connect(hideNewPet))
-trackConnection(workspace.ChildAdded:Connect(function(child)
-	if child.Name == "NewAnimalView" and STATE.hidePets == true then
-		hidePetRoot(child)
-	end
-end))
 hubCleanup(function()
 	STATE.hidePets = false
 	restorePetVisuals()
@@ -3733,10 +3810,18 @@ local function installHub()
 			task.defer(pulseAntiAfk)
 		elseif key == "disable3d" then
 			STATE.apply3d()
+		elseif key == "autoSkip" then
+			lastSkip = nil
+			task.spawn(syncAutoSkip)
+			task.defer(notify, "system", on and "Catch animation skipped" or "Catch animation enabled", on and "Auto Throw will use the fast catch path" or "Auto Throw will show the full game reveal")
 		elseif key == "fpsBoost" then
 			STATE.applyFpsBoost()
 		elseif key == "hidePets" then
 			STATE.applyHidePets()
+		elseif key == "instantPrompts" then
+			STATE.applyInstantPrompts()
+		elseif key == "noPausePopup" then
+			hidePausePopup()
 		elseif key == "espEnabled" or key == "espOwnOnly" or key == "espAllAnimals" then
 			task.defer(STATE.refreshEsp)
 		elseif key == "notifications" and on then
@@ -4267,7 +4352,7 @@ local function installHub()
 	do
 	local animalCard = card(pages.Animals, "ANIMALS", 1)
 	makeSwitch(animalCard, "Keep Best Animals Equipped", "equipBest", "Keeps the strongest available animals earning money on your plot")
-	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals only on your screen; nothing is unequipped or sold")
+	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals locally but keeps catch reveals visible; nothing is unequipped or sold")
 	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 56)
 	STATE.uiStatusLabels.animals.LayoutOrder = 90
 	end
@@ -5548,6 +5633,7 @@ end)
 pcall(STATE.apply3d)
 pcall(STATE.applyFpsBoost)
 pcall(STATE.applyHidePets)
+pcall(STATE.applyInstantPrompts)
 pcall(stepAnimalNotifications)
 pcall(STATE.refreshEsp)
 
