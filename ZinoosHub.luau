@@ -40,4 +40,4 @@ if not chunk then
 	warn("[Zinoos hub] The " .. entry.name .. " hub did not compile: " .. tostring(err))
 	return
 end
-return chunk(...)
+return chunk()
