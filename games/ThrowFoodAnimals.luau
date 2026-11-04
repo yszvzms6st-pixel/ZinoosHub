@@ -178,6 +178,7 @@ local function unloadHub()
 end
 
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowFoodAnimals_" .. tostring(LocalPlayer.UserId) .. ".rfld"
+local CONFIG_VERSION = 3
 local SPEED_OPTIONS = { "16", "24", "32", "50", "75", "100" }
 
 local FLAG_KEYS = {
@@ -878,6 +879,16 @@ local function loadSaved()
 	if type(saved.ProtectedMutations) ~= "table" and saved.KeepMutations == false then
 		STATE.protectedMutations = {}
 	end
+	-- v2.4 defaulted to every sell rarity. On the first v2.5+ load, replace that
+	-- legacy default with the safer low-rarity filter and require Auto Sell to be
+	-- turned back on deliberately. A versioned config prevents repeat migration.
+	if (tonumber(saved.ConfigVersion) or 0) < CONFIG_VERSION
+		and type(saved.SellRarities) == "table"
+		and #STATE.sellRarities == #RARITY_OPTIONS then
+		STATE.autoSell = false
+		STATE.sellRarities = { "Common", "Uncommon", "Rare" }
+		STATE.configMigratedSellSafety = true
+	end
 	if saved.HubSize == "Compact" or saved.HubSize == "Normal" or saved.HubSize == "Large" then
 		STATE.hubSize = saved.HubSize
 	end
@@ -907,6 +918,7 @@ local function saveConfig()
 		pcall(makefolder, "Rayfield/Configurations/ZinoosHub")
 	end
 	local payload = {
+		ConfigVersion = CONFIG_VERSION,
 		Speed = STATE.speed,
 		HubSize = STATE.hubSize or "Compact",
 		MenuX = STATE.menuX,
@@ -5468,6 +5480,10 @@ local function installHub()
 	}
 end
 loadSaved()
+if STATE.configMigratedSellSafety == true then
+	STATE.sellStatus = "Safety update: old all-rarity Auto Sell was turned off"
+	saveConfig()
+end
 
 if running() then
 	elevate()
