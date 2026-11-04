@@ -75,7 +75,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.5.2",
+	version = "2.5.3",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -1023,16 +1023,6 @@ local pulseAntiAfk = function()
 	return ok
 end
 
-local dataFolder = ReplicatedStorage:WaitForChild("PlayerData", 30)
-dataFolder = dataFolder and dataFolder:WaitForChild(tostring(LocalPlayer.UserId), 30)
-if not dataFolder then
-	warn("[Zinoos hub] Player data did not replicate.")
-	shutdownHub()
-	return
-end
-
-local DataReplicator = require(ReplicatedStorage.Shared.DataReplicator)
-elevate()
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 elevate()
 local LevelConfig = require(ReplicatedStorage.Config.LevelConfig)
@@ -1052,6 +1042,23 @@ elevate()
 local AreaUtil = require(ReplicatedStorage.Shared.AreaUtil)
 elevate()
 local controllers = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client"):WaitForChild("Controllers")
+local GameDataController = require(controllers.DataController)
+elevate()
+local dataReady = false
+for _ = 1, 300 do
+	local ok, ready = pcall(GameDataController.IsReady, GameDataController)
+	if ok and ready == true then
+		dataReady = true
+		break
+	end
+	task.wait(0.1)
+end
+if not dataReady then
+	warn("[Zinoos hub] Player data did not replicate through DataController.")
+	shutdownHub()
+	return
+end
+
 local ClientState = require(controllers.ClientState)
 elevate()
 STATE.throwController = require(controllers.ThrowController)
@@ -1066,16 +1073,12 @@ hubCleanup(function()
 end)
 
 local function readAll()
-	local ok, value = pcall(DataReplicator.Read, dataFolder)
+	local ok, value = pcall(GameDataController.GetData, GameDataController)
 	return ok and type(value) == "table" and value or {}
 end
 
 local function getData(key)
-	local child = dataFolder:FindFirstChild(key)
-	if not child then
-		return nil
-	end
-	local ok, value = pcall(DataReplicator.Read, child)
+	local ok, value = pcall(GameDataController.Get, GameDataController, key)
 	return ok and value or nil
 end
 
