@@ -75,7 +75,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.5.4",
+	version = "2.5.5",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -959,6 +959,7 @@ local Workspace = game:GetService("Workspace")
 
 STATE.status = "Starting"
 STATE.throwStatus = "Waiting"
+STATE.superThrowStatus = "Waiting"
 STATE.trainingStatus = "Off"
 STATE.upgradeStatus = "Checking"
 STATE.sellStatus = "Off"
@@ -1064,6 +1065,8 @@ elevate()
 STATE.throwController = require(controllers.ThrowController)
 elevate()
 STATE.throwMeter = require(controllers.ThrowMeter)
+elevate()
+STATE.superThrowController = require(controllers.SuperThrow)
 elevate()
 STATE.throwMeterOriginalNew = STATE.throwMeter.new
 hubCleanup(function()
@@ -1419,6 +1422,35 @@ end
 
 local lastObservedThrows = tonumber(getData("Throws")) or 0
 local nextThrowTrigger = 0
+local function shouldUseSuperThrow()
+	if STATE.autoSuper ~= true then
+		STATE.superThrowStatus = "Off"
+		return false
+	end
+	local available = tonumber(getData("SuperThrows")) or 0
+	local reserve = tonumber(STATE.superThrowReserve) or 0
+	if available <= reserve then
+		STATE.superThrowStatus = available <= 0
+			and "No saved Super Throws"
+			or ("Reserve protected - " .. tostring(available) .. " saved")
+		return false
+	end
+	STATE.superThrowStatus = "Ready - " .. tostring(available) .. " saved"
+	return true
+end
+
+local function useSuperThrow()
+	local before = tonumber(getData("SuperThrows")) or 0
+	local result = invoke("Throw_UseSuper")
+	if result.Ok then
+		STATE.superThrowStatus = "Armed - " .. tostring(math.max(0, before - 1)) .. " saved"
+		noteActivity("Super Throw armed")
+	else
+		STATE.superThrowStatus = "Not armed: " .. tostring(result.Reason or "rejected")
+	end
+	return result
+end
+
 local function stepThrow()
 	if STATE.autoThrow ~= true or STATE.autoTrain == true then
 		if STATE.autoThrow ~= true then
@@ -1463,10 +1495,6 @@ local function stepThrow()
 	-- Give the server enough time to receive the line teleport. A quarter-second
 	-- was unreliable on lower FPS clients and caused valid throws to return TooFar.
 	task.wait(0.8)
-	if STATE.autoSuper == true
-		and (tonumber(getData("SuperThrows")) or 0) > (tonumber(STATE.superThrowReserve) or 0) then
-		invoke("Throw_UseSuper")
-	end
 	if STATE.autoSkip ~= true then
 		-- The game's controller owns the complete throw, POV and animal reveal.
 		-- Keep our prep token until Start is called so its line detector cannot
@@ -1486,8 +1514,35 @@ local function stepThrow()
 		else
 			STATE.throwMeter.TestAutoTap = 0.9
 		end
+		local wantsSuper = shouldUseSuperThrow()
+		local superBefore = tonumber(getData("SuperThrows")) or 0
+		local previousSuperBegin = STATE.superThrowController.Begin
+		local requestedSuper = false
+		if wantsSuper and type(previousSuperBegin) == "function" then
+			-- A visible throw creates its native SuperThrow offer only after
+			-- Throw_Start succeeds. Use that offer's own UseSaved flow so its
+			-- grant event, meter lock and visuals stay in the game's order.
+			STATE.superThrowController.Begin = function(context)
+				local superInstance = previousSuperBegin(context)
+				if type(superInstance) == "table"
+					and superInstance.SavedMode == true
+					and type(superInstance.UseSaved) == "function" then
+					requestedSuper = true
+					STATE.superThrowStatus = "Using native Super Throw offer"
+					task.defer(function()
+						if running() and not superInstance.Dead and superInstance.State == "Offer" then
+							superInstance:UseSaved()
+						end
+					end)
+				else
+					STATE.superThrowStatus = "Not offered for this throw"
+				end
+				return superInstance
+			end
+		end
 		releaseBusy(throwToken)
 		local sequenceOk, sequenceError = pcall(STATE.throwController.Start)
+		STATE.superThrowController.Begin = previousSuperBegin
 		STATE.throwMeter.new = previousMeterNew
 		STATE.throwMeter.TestAutoTap = previousAutoTap
 		elevate()
@@ -1501,6 +1556,17 @@ local function stepThrow()
 		else
 			STATE.throwStatus = "Visible throw ended without a catch"
 		end
+		if requestedSuper then
+			local superAfter = tonumber(getData("SuperThrows")) or superBefore
+			local superDeadline = os.clock() + 1
+			while running() and superAfter >= superBefore and os.clock() < superDeadline do
+				task.wait()
+				superAfter = tonumber(getData("SuperThrows")) or superBefore
+			end
+			STATE.superThrowStatus = superAfter < superBefore
+				and ("Used - " .. tostring(superAfter) .. " saved")
+				or "Server did not apply Super Throw"
+		end
 		lastObservedThrows = after
 		STATE.status = "Waiting for next throw"
 		nextThrowTrigger = os.clock() + 0.35
@@ -1508,10 +1574,25 @@ local function stepThrow()
 	end
 	local started = invoke("Throw_Start")
 	local result = nil
+	local superResult = nil
 	if started.Ok then
+		-- The skipped path has no native meter offer, but the server still
+		-- requires an active throw before it accepts Throw_UseSuper.
+		if shouldUseSuperThrow() then
+			if started.SuperOffer == true then
+				superResult = useSuperThrow()
+			else
+				STATE.superThrowStatus = "Not offered for this throw"
+			end
+		end
 		result = invoke("Throw_Resolve", STATE.perfectMeter == true and 1 or 0.75)
 		if result.Ok then
 			invoke("Throw_Complete")
+			if superResult and superResult.Ok then
+				STATE.superThrowStatus = result.SuperThrow
+					and ("Used - " .. tostring(tonumber(getData("SuperThrows")) or 0) .. " saved")
+					or "Server did not apply Super Throw"
+			end
 		else
 			invoke("Throw_Cancel")
 		end
@@ -3859,6 +3940,8 @@ local function installHub()
 			lastSkip = nil
 			task.spawn(syncAutoSkip)
 			task.defer(notify, "system", on and "Catch animation skipped" or "Catch animation enabled", on and "Auto Throw will use the fast catch path" or "Auto Throw will show the full game reveal")
+		elseif key == "autoSuper" then
+			shouldUseSuperThrow()
 		elseif key == "fpsBoost" then
 			STATE.applyFpsBoost()
 		elseif key == "hidePets" then
@@ -4357,6 +4440,8 @@ local function installHub()
 	end, false, "Example: Keep 10 means Auto Throw never spends your last 10 Super Throws")
 	STATE.uiStatusLabels.throw = label(throwCard, "Status · " .. tostring(STATE.throwStatus), 12, accent, Enum.Font.GothamMedium, 18)
 	STATE.uiStatusLabels.throw.LayoutOrder = 90
+	STATE.uiStatusLabels.superThrow = label(throwCard, "Super Throw - " .. tostring(STATE.superThrowStatus), 11, muted, Enum.Font.Gotham, 18)
+	STATE.uiStatusLabels.superThrow.LayoutOrder = 91
 	end
 
 	do
@@ -4743,6 +4828,7 @@ local function installHub()
 		activityBody.TextColor3 = STATE.hubThemeDef().ink
 		STATE.uiStatusLabels.throw.Text = "Status · " .. publicStatus(STATE.throwStatus)
 		STATE.uiStatusLabels.training.Text = "Status · " .. publicStatus(STATE.trainingStatus)
+		STATE.uiStatusLabels.superThrow.Text = "Super Throw - " .. publicStatus(STATE.superThrowStatus)
 		local foodLevel = DataController:GetValue("EquippedFood") or 0
 		local standLevel = DataController:GetValue("Stand") or 0
 		local fenceLevel = DataController:GetValue("FenceLevel") or 0
