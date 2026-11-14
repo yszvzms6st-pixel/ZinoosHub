@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.0.0",
+	version = "3.0.1",
 	trainOnBoost = true,
 	dreamHunt = true,
 	dreamClaim = true,
@@ -150,6 +150,7 @@ local STATE = {
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
+	autoReload = true,
 	infiniteJump = false,
 	noclip = false,
 	instantPrompts = false,
@@ -246,6 +247,7 @@ local FLAG_KEYS = {
 	ResumeThrowAfterTraining = "resumeThrowAfterTraining",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
+	AutoReload = "autoReload",
 	InfiniteJump = "infiniteJump",
 	Noclip = "noclip",
 	InstantPrompts = "instantPrompts",
@@ -1085,6 +1087,48 @@ local pulseAntiAfk = function()
 	end)
 	STATE.antiAfkOperational = ok
 	return ok
+end
+
+-- Auto reload: when this client is teleported (rejoin, server hop, update
+-- shutdown), queue a small script that loads this hub again in the new server.
+-- In a different place of the same game it re-queues itself and waits.
+do
+local queueTeleport = queue_on_teleport
+	or (syn and syn.queue_on_teleport)
+	or (fluxus and fluxus.queue_on_teleport)
+local RELOAD_BODY = [==[
+if not game:IsLoaded() then game.Loaded:Wait() end
+local env = getgenv()
+local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+if game.PlaceId ~= __PLACE__ then
+	if q and type(env.ZinoosReloadSrc) == "string" then
+		pcall(q, "getgenv().ZinoosReloadSrc = " .. string.format("%q", env.ZinoosReloadSrc) .. "\nloadstring(getgenv().ZinoosReloadSrc)()")
+	end
+	return
+end
+task.wait(4)
+if env.ZinoosThrowFoodGen ~= nil then return end
+local ok, source = pcall(function()
+	return game:HttpGet("https://raw.githubusercontent.com/yszvzms6st-pixel/ZinoosHub/refs/heads/main/games/ThrowFoodAnimals.luau")
+end)
+if not ok or type(source) ~= "string" or #source < 1000 or env.ZinoosThrowFoodGen ~= nil then return end
+local chunk = loadstring(source, "=ZinoosHub/ThrowFoodAnimals.luau")
+if chunk then chunk() end
+]==]
+RELOAD_BODY = string.gsub(RELOAD_BODY, "__PLACE__", tostring(game.PlaceId))
+STATE.autoReloadAvailable = typeof(queueTeleport) == "function"
+local reloadQueued = false
+local function queueReload()
+	if reloadQueued or not running() or STATE.autoReload ~= true or not STATE.autoReloadAvailable then
+		return
+	end
+	reloadQueued = pcall(queueTeleport, "getgenv().ZinoosReloadSrc = " .. string.format("%q", RELOAD_BODY) .. "\nloadstring(getgenv().ZinoosReloadSrc)()")
+end
+trackConnection(LocalPlayer.OnTeleport:Connect(function(teleportState)
+	if teleportState == Enum.TeleportState.Started or teleportState == Enum.TeleportState.InProgress then
+		queueReload()
+	end
+end))
 end
 
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
@@ -4258,6 +4302,7 @@ local function installHub()
 		local clientBox = section(playerTab, "Performance & AFK", "cpu", false)
 		toggle(clientBox, "Anti AFK", "antiAfk")
 		toggle(clientBox, "Auto Reconnect on Kick", "autoReconnect")
+		toggle(clientBox, "Reload Hub After Server Change", "autoReload", STATE.autoReloadAvailable and "Loads the hub again after a rejoin, server hop or update" or "Your executor can't do this (no queue_on_teleport)")
 		toggle(clientBox, "Hide Roblox Pause Popup", "noPausePopup")
 		toggle(clientBox, "Potato Mode", "fpsBoost", "Low detail for more FPS. Fully reversible")
 		toggle(clientBox, "AFK Black Screen", "disable3d", "Stops drawing the world for maximum FPS")
