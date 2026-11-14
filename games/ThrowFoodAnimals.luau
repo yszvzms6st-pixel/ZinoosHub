@@ -109,14 +109,17 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.0.1",
+	version = "3.1.0",
 	trainOnBoost = true,
-	dreamHunt = true,
-	dreamClaim = true,
 	dreamBuy = false,
-	indexClaim = true,
 	autoTrail = true,
+	-- Collection page: one Auto Collect switch for the world index and the
+	-- Dreamland collection. "indexHunt" keeps its old save key.
 	indexHunt = false,
+	collectClaim = true,
+	collectStop = true,
+	collectTarget = "Auto",
+	collectStatus = "Auto Collect is off",
 	aimStatus = "Maximum distance",
 	dreamStatus = "Checking Dreamland...",
 	indexStatus = "Checking index rewards...",
@@ -266,12 +269,11 @@ local FLAG_KEYS = {
 	EspAllAnimals = "espAllAnimals",
 	HideOnStart = "hideOnStart",
 	TrainOnBoost = "trainOnBoost",
-	DreamHunt = "dreamHunt",
-	DreamClaim = "dreamClaim",
 	DreamBuy = "dreamBuy",
-	IndexClaim = "indexClaim",
 	AutoTrail = "autoTrail",
 	IndexHunt = "indexHunt",
+	CollectClaim = "collectClaim",
+	CollectStop = "collectStop",
 }
 
 -- Shared between the boost-training step and config saving: temporary
@@ -287,6 +289,9 @@ local CHOICES = {
 	StopTargetRarity = { key = "stopTargetRarity", options = RARITY_OPTIONS },
 	TrainTargetPower = { key = "trainTargetPower", options = TRAIN_TARGET_OPTIONS },
 	CashReserve = { key = "cashReserve", options = CASH_RESERVE_OPTIONS },
+	-- "Auto", a world zone key, or "Dream:<area>"; checked against the game
+	-- when the Collection page is built.
+	CollectTarget = { key = "collectTarget" },
 	-- Any WindUI theme name; an unknown one falls back to Zinoos at load.
 	WindTheme = { key = "windTheme" },
 }
@@ -1633,78 +1638,158 @@ local function dreamCaught()
 	return type(data) == "table" and type(data.Caught) == "table" and data.Caught or {}
 end
 
-local function dreamAim()
-	if STATE.dreamHunt ~= true or not DreamlandConfig or type(DreamlandConfig.Zones) ~= "table" then
-		return nil
+-- Collection: the world index (one collection per zone) and the Dreamland
+-- collection (split into its five dream habitats) as one list. Each row:
+-- id ("Forest" or "Dream:Taiga"), area, name, found, total, dream, claimed,
+-- reachable (a throw at this level can land there).
+STATE.collectReach = { at = 0, level = nil, areas = {} }
+function STATE.collectReachable(area)
+	local cache = STATE.collectReach
+	local level = tonumber(getData("Level")) or 1
+	if os.clock() - cache.at > 20 or cache.level ~= level then
+		cache.at, cache.level, cache.areas = os.clock(), level, {}
 	end
-	local state = dreamState()
-	if not state or state.Active ~= true or not dreamEligible() then
-		return nil
+	if cache.areas[area] == nil then
+		cache.areas[area] = aimPowerFor(area, 0.5) ~= nil
 	end
-	local caught = dreamCaught()
-	local best = nil
-	for order, zone in ipairs(DreamlandConfig.Zones) do
-		if type(zone) == "table" and type(zone.Animals) == "table" then
-			local missing = 0
-			for _, name in ipairs(zone.Animals) do
-				if not caught[name] then
-					missing += 1
-				end
-			end
-			-- Deep throws can roll every animal in the habitat.
-			local power = aimPowerFor(zone.Area, 0.95)
-			if power and missing > 0 and (not best or missing > best.missing or (missing == best.missing and order > best.order)) then
-				best = { power = power, missing = missing, order = order, area = zone.Area }
-			end
-		end
-	end
-	if best then
-		return best.power, string.format("Dream hunt · %s (%d new to find)", displayAreaName(best.area), best.missing)
-	end
-	-- Every reachable dream animal is found: stay at maximum distance, which
-	-- still lands in the farthest habitat and keeps earning research tokens.
-	return 0, "Dream hunt · all reachable dream animals found"
+	return cache.areas[area]
 end
 
-local function indexAim()
-	if STATE.indexHunt ~= true or not IndexRewards then
-		return nil
-	end
-	local index = getData("Index")
-	local best = nil
-	local ok, collections = pcall(IndexRewards.Collections, "World")
-	if not ok or type(collections) ~= "table" then
-		return nil
-	end
-	for _, collection in ipairs(collections) do
-		if type(collection) == "table" and collection.Area then
-			local okProgress, found, total = pcall(IndexRewards.Progress, index, collection)
-			found, total = tonumber(found) or 0, tonumber(total) or 0
-			local missing = total - found
-			if okProgress and total > 0 and missing > 0 then
-				local power = aimPowerFor(collection.Area, 0.9)
-				if power and (not best or missing < best.missing or (missing == best.missing and found > best.found)) then
-					best = { power = power, missing = missing, found = found, total = total, area = collection.Area }
+function STATE.collectionRows()
+	local data = readAll()
+	local index = type(data.Index) == "table" and data.Index or {}
+	local rows = { world = {}, dream = {}, worldFound = 0, worldTotal = 0, dreamFound = 0, dreamTotal = 0 }
+	if IndexRewards then
+		local ok, collections = pcall(IndexRewards.Collections, "World")
+		for _, collection in ipairs(ok and type(collections) == "table" and collections or {}) do
+			if type(collection) == "table" and collection.Area and collection.Tab ~= "Limited" then
+				local okProgress, found, total = pcall(IndexRewards.Progress, index, collection)
+				found, total = tonumber(found) or 0, tonumber(total) or 0
+				if okProgress and total > 0 then
+					local okClaimed, claimed = pcall(IndexRewards.IsClaimed, data, collection.Key)
+					table.insert(rows.world, {
+						id = tostring(collection.Key),
+						area = collection.Area,
+						name = displayAreaName(collection.Area),
+						found = math.min(found, total),
+						total = total,
+						claimed = okClaimed and claimed == true,
+						reachable = STATE.collectReachable(collection.Area),
+					})
+					rows.worldFound += math.min(found, total)
+					rows.worldTotal += total
 				end
 			end
 		end
 	end
-	if best then
-		return best.power, string.format("Index hunt · %s %d/%d", displayAreaName(best.area), best.found, best.total)
+	if DreamlandConfig and type(DreamlandConfig.Zones) == "table" then
+		local caught = type(data.Dreamland) == "table" and type(data.Dreamland.Caught) == "table" and data.Dreamland.Caught or {}
+		for _, zone in ipairs(DreamlandConfig.Zones) do
+			if type(zone) == "table" and type(zone.Animals) == "table" and zone.Area then
+				local found = 0
+				for _, name in ipairs(zone.Animals) do
+					if caught[name] then
+						found += 1
+					end
+				end
+				table.insert(rows.dream, {
+					id = "Dream:" .. tostring(zone.Area),
+					area = zone.Area,
+					name = displayAreaName(zone.Area),
+					found = found,
+					total = #zone.Animals,
+					dream = true,
+					reachable = STATE.collectReachable(zone.Area),
+				})
+				rows.dreamFound += found
+				rows.dreamTotal += #zone.Animals
+			end
+		end
 	end
-	return nil
+	elevate()
+	return rows
 end
 
+-- Where Auto Collect wants the next throw to land. Returns the slider value
+-- (0 = maximum distance), a label, and the row id it is working on.
 function STATE.aimTarget()
-	local power, label = dreamAim()
-	if power then
-		return power, label
+	if STATE.indexHunt ~= true then
+		return nil
 	end
-	power, label = indexAim()
-	if power then
-		return power, label
+	local rows = STATE.collectionRows()
+	local state = dreamState()
+	local dreamLive = state ~= nil and state.Active == true and dreamEligible()
+	local function aimAt(row)
+		-- Deep throws can roll every animal in a dream habitat.
+		local power = aimPowerFor(row.area, row.dream and 0.95 or 0.9)
+		if power then
+			return power, string.format("Collecting %s%s · %d/%d", row.dream and "Dreamland " or "", row.name, row.found, row.total), row.id
+		end
+		return nil
+	end
+
+	local target = tostring(STATE.collectTarget or "Auto")
+	if target ~= "Auto" then
+		for _, list in ipairs({ rows.world, rows.dream }) do
+			for _, row in ipairs(list) do
+				if row.id == target then
+					if row.found >= row.total then
+						return nil
+					end
+					if row.dream and not dreamLive then
+						-- Dream animals only appear during a run; farm normally until then.
+						return 0, "Waiting for the next Dreamland run · " .. row.name, row.id
+					end
+					return aimAt(row)
+				end
+			end
+		end
+		return nil
+	end
+
+	-- Dream animals only show up for a few minutes, so they come first.
+	if dreamLive then
+		local best = nil
+		for order, row in ipairs(rows.dream) do
+			local missing = row.total - row.found
+			if missing > 0 and row.reachable and (not best or missing > best.total - best.found or (missing == best.total - best.found and order > best.order)) then
+				best = row
+				best.order = order
+			end
+		end
+		if best then
+			local power, label, id = aimAt(best)
+			if power then
+				return power, label, id
+			end
+		end
+	end
+	-- World: the zone closest to finishing, so rewards unlock sooner.
+	local best = nil
+	for _, row in ipairs(rows.world) do
+		local missing = row.total - row.found
+		if missing > 0 and row.reachable and (not best or missing < best.total - best.found or (missing == best.total - best.found and row.found > best.found)) then
+			best = row
+		end
+	end
+	if best then
+		return aimAt(best)
 	end
 	return nil
+end
+
+-- Is the thing Auto Collect is working on finished? "Auto" means every row
+-- in both lists.
+function STATE.collectComplete(rows)
+	local target = tostring(STATE.collectTarget or "Auto")
+	for _, list in ipairs({ rows.world, rows.dream }) do
+		for _, row in ipairs(list) do
+			if (target == "Auto" or row.id == target) and row.found < row.total then
+				return false
+			end
+		end
+	end
+	return #rows.world + #rows.dream > 0
 end
 
 local function setThrowPower(power)
@@ -1736,8 +1821,9 @@ hubCleanup(function()
 end)
 
 function STATE.applyAim()
-	local ok, power, label = pcall(STATE.aimTarget)
+	local ok, power, label, rowId = pcall(STATE.aimTarget)
 	elevate()
+	STATE.collectAimId = ok and type(power) == "number" and rowId or nil
 	if ok and type(power) == "number" then
 		if power ~= 0 or aim.applied then
 			if setThrowPower(power) then
@@ -2560,15 +2646,15 @@ local function stepDreamland()
 	local isActive = state.Active == true
 	if isActive ~= lastDreamActive then
 		if isActive and lastDreamActive ~= nil and eligible then
-			notify("progress", "Dreamland run started", STATE.dreamHunt == true
-				and "Dream Hunt is aiming at habitats with dream animals you still need"
+			notify("progress", "Dreamland run started", STATE.indexHunt == true
+				and "Auto Collect is aiming at dream habitats with animals you still need"
 				or "Dream habitats are open for 5 minutes")
 		end
 		lastDreamActive = isActive
 	end
 
 	if eligible and state.Open == true and os.clock() >= nextDreamAction then
-		if STATE.dreamClaim == true then
+		if STATE.collectClaim == true then
 			local ok, list = pcall(Dreamland.ClaimableMilestones, data)
 			if ok and type(list) == "table" and #list > 0 then
 				nextDreamAction = os.clock() + 10
@@ -2630,6 +2716,8 @@ local function stepDreamland()
 	else
 		timing = "Next dream run in " .. clockText((tonumber(state.NextStart) or now) - now)
 	end
+	STATE.dreamTiming = eligible and timing or "Locked for now"
+	STATE.dreamLive = isActive and eligible
 	local lines = {
 		timing,
 		string.format("%d/%d dream animals found · %s research tokens", unique, total, shortNumber(tokens)),
@@ -2657,7 +2745,7 @@ local function stepIndexRewards()
 	end
 	if os.clock() >= nextIndexAction then
 		nextIndexAction = os.clock() + 15
-		if STATE.indexClaim == true then
+		if STATE.collectClaim == true then
 			local ok, claimable = pcall(IndexRewards.Claimable, readAll())
 			elevate()
 			for _, key in ipairs(ok and type(claimable) == "table" and claimable or {}) do
@@ -2732,11 +2820,266 @@ local function stepIndexRewards()
 	STATE.indexStatus = table.concat(lines, "\n")
 end
 
+-- Collection page: keeps the list fresh, and turns Auto Collect off once
+-- what it was working on is complete (when Stop When Complete is on).
+function STATE.stepCollection()
+	local rows = STATE.collectionRows()
+	STATE.collectRows = rows
+	if STATE.indexHunt == true and STATE.collectStop == true and STATE.collectComplete(rows) then
+		STATE.indexHunt = false
+		if STATE.syncToggle then
+			STATE.syncToggle("indexHunt")
+		end
+		saveConfig()
+		local what = STATE.collectTarget == "Auto" and "Your whole collection" or "That zone"
+		noteActivity("Collection complete · Auto Collect turned off")
+		notify("progress", "Collection complete", what .. " is finished. Auto Collect is off and throws go back to maximum distance")
+	end
+	local found = rows.worldFound + rows.dreamFound
+	local total = rows.worldTotal + rows.dreamTotal
+	local doing
+	if STATE.indexHunt ~= true then
+		doing = "Auto Collect is off"
+	elseif STATE.autoThrow ~= true then
+		doing = "Auto Collect is on · turn on Auto Throw to start"
+	else
+		doing = tostring(STATE.aimStatus)
+	end
+	STATE.collectStatus = string.format("%d / %d animals found\n%s", found, total, doing)
+end
+
+-- The zone list on the Collection page. WindUI has no progress bars, so the
+-- list is drawn by hand inside a WindUI text box: one scrolling panel with a
+-- World group and a Dreamland group, a bar per zone, and the zone Auto
+-- Collect is aiming at picked out in the theme colour. Returns an update
+-- function, or nil when the box cannot be found.
+function STATE.buildCollectList(paragraph, title)
+	elevate()
+	local root = type(paragraph) == "table" and (paragraph.ElementFrame or (type(paragraph.UIElements) == "table" and paragraph.UIElements.Main)) or nil
+	if typeof(root) ~= "Instance" then
+		root = nil
+		local guiRoot = typeof(gethui) == "function" and gethui() or CoreGui
+		local windGui = guiRoot and guiRoot:FindFirstChild("WindUI")
+		for _, label in ipairs(windGui and windGui:GetDescendants() or {}) do
+			if label:IsA("TextLabel") and label.Text == title and label.Parent and label.Parent.Name == "TitleFrame" then
+				local node = label
+				while node and not node:IsA("ImageButton") do
+					node = node.Parent
+				end
+				root = node
+				break
+			end
+		end
+	end
+	local inner = nil
+	for _, child in ipairs(root and root:GetChildren() or {}) do
+		if child:IsA("Frame") and child:FindFirstChildOfClass("UIListLayout") and child:FindFirstChild("TitleFrame") then
+			inner = child
+			break
+		end
+	end
+	if not inner then
+		return nil
+	end
+	local fontFace = nil
+	for _, label in ipairs(inner:GetDescendants()) do
+		if label:IsA("TextLabel") then
+			fontFace = label.FontFace
+			break
+		end
+	end
+	local look = STATE.hubThemeDef()
+	local accent = look.accent or Color3.fromRGB(130, 104, 255)
+	local ink = look.ink or Color3.fromRGB(242, 236, 232)
+	local done = Color3.fromRGB(88, 214, 141)
+
+	local function text(parent, value, size, weight, align)
+		local label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.Text = value
+		label.TextSize = size
+		label.TextColor3 = ink
+		label.TextXAlignment = align or Enum.TextXAlignment.Left
+		label.TextYAlignment = Enum.TextYAlignment.Center
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		if fontFace then
+			label.FontFace = Font.new(fontFace.Family, weight or Enum.FontWeight.Medium)
+		end
+		label.Parent = parent
+		return label
+	end
+	local function round(parent, radius)
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, radius)
+		corner.Parent = parent
+	end
+
+	local panel = Instance.new("ScrollingFrame")
+	panel.Name = "ZinoosCollectList"
+	panel.LayoutOrder = 50
+	panel.Size = UDim2.new(1, 0, 0, 330)
+	panel.BackgroundColor3 = Color3.new(0, 0, 0)
+	panel.BackgroundTransparency = 0.55
+	panel.BorderSizePixel = 0
+	panel.ScrollBarThickness = 3
+	panel.ScrollBarImageColor3 = accent
+	panel.ScrollingDirection = Enum.ScrollingDirection.Y
+	panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	panel.CanvasSize = UDim2.new()
+	round(panel, 12)
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = accent
+	stroke.Transparency = 0.8
+	stroke.Parent = panel
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 10), UDim.new(0, 10)
+	pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 12), UDim.new(0, 14)
+	pad.Parent = panel
+	local layout = Instance.new("UIListLayout")
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 4)
+	layout.Parent = panel
+
+	local order = 0
+	local function bar(parent, height)
+		local track = Instance.new("Frame")
+		track.BackgroundColor3 = ink
+		track.BackgroundTransparency = 0.88
+		track.BorderSizePixel = 0
+		track.Size = UDim2.new(1, 0, 0, height)
+		round(track, height)
+		local fill = Instance.new("Frame")
+		fill.BackgroundColor3 = accent
+		fill.BorderSizePixel = 0
+		fill.Size = UDim2.new(0, 0, 1, 0)
+		round(fill, height)
+		fill.Parent = track
+		track.Parent = parent
+		return track, fill
+	end
+
+	local function header(name)
+		order += 1
+		local frame = Instance.new("Frame")
+		frame.BackgroundTransparency = 1
+		frame.LayoutOrder = order
+		frame.Size = UDim2.new(1, 0, 0, order == 1 and 34 or 44)
+		frame.Parent = panel
+		local top = order == 1 and 0 or 10
+		local label = text(frame, name, 12, Enum.FontWeight.Bold)
+		label.Position = UDim2.new(0, 0, 0, top)
+		label.Size = UDim2.new(0.5, 0, 0, 16)
+		label.TextColor3 = accent
+		local right = text(frame, "", 12, Enum.FontWeight.SemiBold, Enum.TextXAlignment.Right)
+		right.Position = UDim2.new(0.4, 0, 0, top)
+		right.Size = UDim2.new(0.6, 0, 0, 16)
+		local track, fill = bar(frame, 4)
+		track.Position = UDim2.new(0, 0, 0, top + 22)
+		return { right = right, fill = fill }
+	end
+
+	local rowsById = {}
+	local function row(id)
+		order += 1
+		local frame = Instance.new("Frame")
+		frame.LayoutOrder = order
+		frame.Size = UDim2.new(1, 0, 0, 34)
+		frame.BackgroundColor3 = accent
+		frame.BackgroundTransparency = 1
+		frame.BorderSizePixel = 0
+		round(frame, 8)
+		frame.Parent = panel
+		local dot = Instance.new("Frame")
+		dot.Size = UDim2.new(0, 6, 0, 6)
+		dot.Position = UDim2.new(0, 6, 0, 9)
+		dot.BorderSizePixel = 0
+		round(dot, 3)
+		dot.Parent = frame
+		local name = text(frame, "", 13, Enum.FontWeight.Medium)
+		name.Position = UDim2.new(0, 18, 0, 3)
+		name.Size = UDim2.new(1, -90, 0, 18)
+		local count = text(frame, "", 12, Enum.FontWeight.SemiBold, Enum.TextXAlignment.Right)
+		count.Position = UDim2.new(1, -86, 0, 3)
+		count.Size = UDim2.new(0, 80, 0, 18)
+		local track, fill = bar(frame, 3)
+		track.Position = UDim2.new(0, 18, 0, 25)
+		track.Size = UDim2.new(1, -24, 0, 3)
+		local entry = { frame = frame, dot = dot, name = name, count = count, fill = fill, track = track, last = nil }
+		rowsById[id] = entry
+		return entry
+	end
+
+	local worldHead, dreamHead = nil, nil
+	local built = false
+	local function build(rows)
+		worldHead = header("WORLD INDEX")
+		for _, item in ipairs(rows.world) do
+			row(item.id)
+		end
+		dreamHead = header("DREAMLAND")
+		for _, item in ipairs(rows.dream) do
+			row(item.id)
+		end
+		built = true
+	end
+
+	local function setFill(fill, found, total)
+		local share = total > 0 and math.clamp(found / total, 0, 1) or 0
+		fill.Size = UDim2.new(share, 0, 1, 0)
+		fill.Visible = share > 0
+		fill.BackgroundColor3 = share >= 1 and done or accent
+	end
+
+	local function update(rows)
+		if type(rows) ~= "table" or not panel.Parent then
+			return
+		end
+		elevate()
+		if not built then
+			build(rows)
+		end
+		worldHead.right.Text = string.format("%d / %d", rows.worldFound, rows.worldTotal)
+		setFill(worldHead.fill, rows.worldFound, rows.worldTotal)
+		local dreamText = string.format("%d / %d", rows.dreamFound, rows.dreamTotal)
+		dreamHead.right.Text = (STATE.dreamTiming and (tostring(STATE.dreamTiming) .. "  ·  ") or "") .. dreamText
+		dreamHead.right.TextColor3 = STATE.dreamLive and accent or ink
+		setFill(dreamHead.fill, rows.dreamFound, rows.dreamTotal)
+		local aiming = STATE.indexHunt == true and STATE.collectAimId or nil
+		for _, list in ipairs({ rows.world, rows.dream }) do
+			for _, item in ipairs(list) do
+				local entry = rowsById[item.id]
+				if entry then
+					local complete = item.found >= item.total
+					local targeted = aiming == item.id
+					local key = string.format("%d/%d/%s/%s/%s/%s", item.found, item.total, tostring(complete), tostring(targeted), tostring(item.reachable), tostring(item.claimed))
+					if entry.last ~= key then
+						entry.last = key
+						entry.name.Text = item.name .. (targeted and "  ·  collecting" or (not item.reachable and "  ·  out of reach" or ""))
+						entry.name.TextColor3 = targeted and accent or ink
+						entry.name.TextTransparency = (item.reachable or complete) and 0 or 0.5
+						entry.count.Text = complete and ((item.claimed == false and not item.dream) and "Reward ready" or "Done") or string.format("%d / %d", item.found, item.total)
+						entry.count.TextColor3 = complete and done or ink
+						entry.count.TextTransparency = complete and 0 or 0.25
+						entry.dot.BackgroundColor3 = complete and done or (targeted and accent or ink)
+						entry.dot.BackgroundTransparency = (complete or targeted) and 0 or 0.75
+						entry.frame.BackgroundTransparency = targeted and 0.86 or 1
+						setFill(entry.fill, item.found, item.total)
+					end
+				end
+			end
+		end
+	end
+
+	panel.Parent = inner
+	return update
+end
+
 local function stepEvents()
 	pcall(stepBoostTraining)
 	STATE.boostStatus = boostText()
 	pcall(stepDreamland)
 	pcall(stepIndexRewards)
+	pcall(STATE.stepCollection)
 	elevate()
 	-- Put the distance slider back once the hub is no longer throwing, so
 	-- the HUD and the game's own throws use full power again.
@@ -4082,6 +4425,7 @@ local function installHub()
 	-- Tabs -----------------------------------------------------------------
 	local homeTab = Window:Tab({ Title = "Home", Icon = "house" })
 	local farmTab = Window:Tab({ Title = "Farming", Icon = "target" })
+	local collectTab = Window:Tab({ Title = "Collection", Icon = "library" })
 	local animalTab = Window:Tab({ Title = "Animals", Icon = "paw-print" })
 	local progressTab = Window:Tab({ Title = "Progress", Icon = "trending-up" })
 	local playerTab = Window:Tab({ Title = "Player", Icon = "user" })
@@ -4144,8 +4488,6 @@ local function installHub()
 
 		local boostBox = section(farmTab, "Boosts & Aiming", "sparkles")
 		toggle(boostBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level")
-		toggle(boostBox, "Dream Hunt", "dreamHunt", "Aims into dream habitats with animals you still need")
-		toggle(boostBox, "Index Hunt", "indexHunt", "Aims at your closest unfinished collection. Weaker catches while on")
 		boostInfo = info(boostBox, "Boosts", tostring(STATE.boostStatus))
 		aimInfo = info(boostBox, "Aim", tostring(STATE.aimStatus))
 
@@ -4170,6 +4512,49 @@ local function installHub()
 		end)
 		toggle(stopBox, "Stop on Selected Mutations", "stopOnMutation")
 		multiChoice(stopBox, "Mutations That Stop Farming", nil, MUTATION_OPTIONS, "stopTargetMutations")
+	end
+
+	-- Collection -----------------------------------------------------------
+	-- One page for the world index and the Dreamland collection.
+	local collectInfo, collectUpdate
+	do
+		local box = section(collectTab, "Collection", "library")
+		toggle(box, "Auto Collect", "indexHunt", "Aims your throws at zones where you're still missing animals")
+		local firstRows = STATE.collectionRows()
+		STATE.collectRows = firstRows
+		local targetIds, targetNames = { "Auto" }, { "Auto" }
+		for _, item in ipairs(firstRows.world) do
+			table.insert(targetIds, item.id)
+			table.insert(targetNames, item.name)
+		end
+		for _, item in ipairs(firstRows.dream) do
+			table.insert(targetIds, item.id)
+			table.insert(targetNames, "Dreamland · " .. item.name)
+		end
+		if not table.find(targetIds, STATE.collectTarget) then
+			STATE.collectTarget = "Auto"
+		end
+		choice(box, "Target Zone", "Auto picks whatever you're missing, or choose one zone", targetNames, function()
+			return targetNames[table.find(targetIds, STATE.collectTarget) or 1]
+		end, function(option)
+			local at = table.find(targetNames, option)
+			STATE.collectTarget = at and targetIds[at] or "Auto"
+			task.defer(STATE.stepCollection)
+		end)
+		toggle(box, "Auto Claim Rewards", "collectClaim", "Zone trails and Dreamland research milestones")
+		toggle(box, "Stop When Complete", "collectStop", "Turns Auto Collect off once it's finished")
+		collectInfo = info(box, "Progress", tostring(STATE.collectStatus))
+
+		local listBox = section(collectTab, "Zones", "map")
+		local listTitle = "World & Dreamland"
+		local holder = info(listBox, listTitle, "Every zone's index. The one being collected is highlighted")
+		local okList, update = pcall(STATE.buildCollectList, holder, listTitle)
+		elevate()
+		if okList and type(update) == "function" then
+			collectUpdate = update
+			pcall(collectUpdate, firstRows)
+			elevate()
+		end
 	end
 
 	-- Animals --------------------------------------------------------------
@@ -4249,13 +4634,11 @@ local function installHub()
 		end)
 		upgradeInfo = info(upgradeBox, "Status", tostring(STATE.upgradeStatus))
 
-		local dreamBox = section(progressTab, "Dreamland", "moon")
-		toggle(dreamBox, "Claim Research Milestones", "dreamClaim", "Super Lucky Throws, potions, boosts and the Dream Dragon")
+		local dreamBox = section(progressTab, "Dreamland Research", "moon")
 		toggle(dreamBox, "Spend Tokens on Boosts", "dreamBuy", "2x Cash and 2x Training boosts. Never potions")
 		dreamInfo = info(dreamBox, "Dreamland", tostring(STATE.dreamStatus))
 
 		local indexBox = section(progressTab, "Index Trails", "book-open")
-		toggle(indexBox, "Claim Index Rewards", "indexClaim")
 		toggle(indexBox, "Wear Best Trail", "autoTrail")
 		indexInfo = info(indexBox, "Index", tostring(STATE.indexStatus))
 
@@ -4401,9 +4784,10 @@ local function installHub()
 					disable3d = false, fpsBoost = false, hidePets = true,
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
 					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
-					trainOnBoost = true, dreamHunt = true, dreamClaim = true, dreamBuy = false,
-					indexClaim = true, autoTrail = true, indexHunt = false,
+					trainOnBoost = true, dreamBuy = false, autoTrail = true,
+					indexHunt = false, collectClaim = true, collectStop = true,
 				}
+				STATE.collectTarget = "Auto"
 				for key, value in pairs(safeValues) do
 					STATE[key] = value
 					syncToggle(key)
@@ -4581,6 +4965,11 @@ local function installHub()
 		setInfo(rewardInfo, publicStatus(STATE.rewardStatus))
 		setInfo(dreamInfo, tostring(STATE.dreamStatus))
 		setInfo(indexInfo, tostring(STATE.indexStatus))
+		setInfo(collectInfo, tostring(STATE.collectStatus))
+		if collectUpdate and STATE.collectRows then
+			pcall(collectUpdate, STATE.collectRows)
+			elevate()
+		end
 		setInfo(animalInfo, string.format("Equip · %s\n%d animals · %d placed · %d backpack\n%s", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount, STATE.petVisibilityStatus or "Checking animal visibility"))
 		if preview then
 			setInfo(sellInfo, string.format(
