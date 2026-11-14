@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.6.1",
+	version = "3.0.0",
 	trainOnBoost = true,
 	dreamHunt = true,
 	dreamClaim = true,
@@ -285,6 +285,8 @@ local CHOICES = {
 	StopTargetRarity = { key = "stopTargetRarity", options = RARITY_OPTIONS },
 	TrainTargetPower = { key = "trainTargetPower", options = TRAIN_TARGET_OPTIONS },
 	CashReserve = { key = "cashReserve", options = CASH_RESERVE_OPTIONS },
+	-- Any WindUI theme name; an unknown one falls back to Zinoos at load.
+	WindTheme = { key = "windTheme" },
 }
 STATE.LIST_KEYS = {
 	SellRarities = "sellRarities",
@@ -3515,1057 +3517,225 @@ trackConnection(LocalPlayer.Idled:Connect(function()
 	pulseAntiAfk()
 end))
 
+-- The dashboard is built with WindUI (pinned release, so an upstream update
+-- can never break the hub). WindUI scales itself to the screen and shows a
+-- draggable open button on phones; PC players use the toggle key.
+local WINDUI_URL = "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
+
+local function loadWindUI()
+	local source = genv.ZinoosWindUISource
+	if type(source) ~= "string" or #source < 1000 then
+		local ok, body = pcall(function()
+			return game:HttpGet(WINDUI_URL)
+		end)
+		elevate()
+		if not ok or type(body) ~= "string" or #body < 1000 then
+			return nil, "download failed"
+		end
+		source = body
+		genv.ZinoosWindUISource = source
+	end
+	local chunk, compileError = loadstring(source, "=WindUI")
+	if not chunk then
+		genv.ZinoosWindUISource = nil
+		return nil, compileError
+	end
+	local ok, library = pcall(chunk)
+	elevate()
+	if not ok or type(library) ~= "table" then
+		return nil, tostring(library)
+	end
+	return library
+end
+
+local ZINOOS_THEME = {
+	Name = "Zinoos",
+	Accent = Color3.fromHex("#1c1733"),
+	Dialog = Color3.fromHex("#15111f"),
+	Outline = Color3.fromHex("#FFFFFF"),
+	Text = Color3.fromHex("#F5F7FB"),
+	Placeholder = Color3.fromHex("#9BA8BA"),
+	Background = Color3.fromHex("#0d0b14"),
+	Button = Color3.fromHex("#5b4bb5"),
+	Icon = Color3.fromHex("#b4a7ff"),
+	Toggle = Color3.fromHex("#8268FF"),
+	Slider = Color3.fromHex("#8268FF"),
+	Checkbox = Color3.fromHex("#8268FF"),
+	PanelBackground = Color3.fromHex("#FFFFFF"),
+	PanelBackgroundTransparency = 0.96,
+	SliderIcon = Color3.fromHex("#908F95"),
+	Primary = Color3.fromHex("#8268FF"),
+	LabelBackground = Color3.fromHex("#000000"),
+	LabelBackgroundTransparency = 0.83,
+	ElementBackground = Color3.fromHex("#1a1628"),
+	ElementBackgroundTransparency = 0,
+}
+
 local function installHub()
 	elevate()
 	destroyMenus()
 	STATE.themeSwitches = {}
+	STATE.uiStatusLabels = {}
 
-	local theme = STATE.hubThemeDef()
-	local accent = theme.accent
-	local ink = theme.ink
-	local muted = theme.muted
-	local panel = theme.panel
-	local side = theme.side
-	local cardColor = theme.card
-	local selected = theme.selected
-	local off = theme.off
-	local line = theme.stroke
-	local mint = theme.accent
-	local inkDark = theme.inkDark
-	local cardFade = theme.cardFade
-	local function role(object, kind)
-		object:SetAttribute("ZinoosRole", kind)
-		return object
+	local WindUI, loadError = loadWindUI()
+	if not WindUI then
+		-- Farming keeps running with the saved settings even without a menu.
+		warn("[Zinoos hub] Menu could not load (" .. tostring(loadError) .. "). Automation is still running with your saved settings.")
+		pcall(function()
+			game:GetService("StarterGui"):SetCore("SendNotification", {
+				Title = "Zinoos Hub",
+				Text = "Menu could not load. Farming still runs with your saved settings.",
+				Duration = 8,
+			})
+		end)
+		return
+	end
+	STATE.windUI = WindUI
+	pcall(WindUI.AddTheme, WindUI, ZINOOS_THEME)
+	pcall(WindUI.SetNotificationLower, WindUI, true)
+	elevate()
+
+	local camera = workspace.CurrentCamera
+	local view = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local touch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local small = touch or view.X < 900 or view.Y < 560
+	local themeName = type(STATE.windTheme) == "string" and STATE.windTheme ~= "" and STATE.windTheme or "Zinoos"
+	if type(WindUI.Themes) == "table" and WindUI.Themes[themeName] == nil then
+		themeName = "Zinoos"
 	end
 
-	local TweenService = game:GetService("TweenService")
-	local tweenInfo = {
-		open = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		fade = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		hover = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		toggle = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		card = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		drop = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-	}
-	local liveTweens = {}
-	local function playMotion(object, props, info)
-		local old = liveTweens[object]
-		if old then
-			pcall(function()
-				old:Cancel()
-			end)
+	local Window = WindUI:CreateWindow({
+		Title = "Zinoos Hub",
+		Icon = "sparkles",
+		Author = "Throw Food For Animals",
+		Folder = "ZinoosHub",
+		Size = small and UDim2.fromOffset(520, 330) or UDim2.fromOffset(720, 520),
+		MinSize = small and Vector2.new(420, 260) or Vector2.new(560, 360),
+		MaxSize = Vector2.new(900, 620),
+		Theme = themeName,
+		Resizable = true,
+		SideBarWidth = small and 150 or 190,
+		HideSearchBar = false,
+		ScrollBarEnabled = not small,
+		AutoScale = true,
+		ToggleKey = Enum.KeyCode[STATE.toggleKey] or Enum.KeyCode.RightControl,
+		User = { Enabled = true, Anonymous = false },
+		OpenButton = {
+			Title = "Zinoos Hub",
+			Icon = "sparkles",
+			CornerRadius = UDim.new(1, 0),
+			StrokeThickness = 2,
+			Color = ColorSequence.new(Color3.fromHex("8268FF"), Color3.fromHex("C084FC")),
+			OnlyMobile = false,
+			Enabled = true,
+			Draggable = true,
+		},
+	})
+	elevate()
+	if not Window then
+		warn("[Zinoos hub] Menu window could not be created.")
+		return
+	end
+	STATE.windWindow = Window
+
+	-- WindUI shrinks the window once so it fits the screen. Menu Size scales
+	-- from that fit, and never grows past the screen on a phone. Every tab
+	-- remembers the scale it was built at and sizes its boxes with it, so the
+	-- scale must be final BEFORE any tab exists; a later change rebuilds the
+	-- menu (see rebuildMenu) instead of leaving every box too short.
+	local okFit, fitScale = pcall(Window.GetUIScale, Window)
+	fitScale = okFit and tonumber(fitScale) or 1
+	local SIZE_FACTORS = { Compact = 0.94, Normal = 1, Large = 1.08 }
+	do
+		local scale = fitScale * (SIZE_FACTORS[STATE.hubSize] or 1)
+		if small then
+			scale = math.min(scale, fitScale)
 		end
-		local tween = TweenService:Create(object, info or tweenInfo.hover, props)
-		liveTweens[object] = tween
-		tween.Completed:Connect(function()
-			if liveTweens[object] == tween then
-				liveTweens[object] = nil
-			end
-		end)
-		tween:Play()
-		return tween
+		if math.abs(scale - fitScale) > 0.001 then
+			pcall(Window.SetUIScale, Window, scale)
+		end
+		elevate()
 	end
-	local function bindPress(gui)
-		local scale = Instance.new("UIScale")
-		scale.Name = "PressScale"
-		scale.Parent = gui
-		gui.MouseButton1Down:Connect(function()
-			playMotion(scale, { Scale = 0.98 }, tweenInfo.hover)
-		end)
-		gui.MouseButton1Up:Connect(function()
-			playMotion(scale, { Scale = 1 }, tweenInfo.hover)
-		end)
-		gui.MouseLeave:Connect(function()
-			if scale.Scale ~= 1 then
-				playMotion(scale, { Scale = 1 }, tweenInfo.hover)
-			end
-		end)
+	pcall(Window.Tag, Window, { Title = "v" .. tostring(STATE.version), Color = Color3.fromHex("#8268FF") })
+	if STATE.admin then
+		pcall(Window.Tag, Window, { Title = "Admin", Color = Color3.fromHex("#F6BE3A") })
 	end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "ZinoosThrowFoodMenu"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 220
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = CoreGui
+	local windowGone = false
+	hubCleanup(function()
+		if not windowGone then
+			windowGone = true
+			elevate()
+			pcall(Window.Destroy, Window)
+		end
+		-- Full unload: also remove WindUI's notification, dropdown and
+		-- tooltip layers.
+		for _, name in ipairs({ "ScreenGui", "NotificationGui", "DropdownGui", "TooltipGui" }) do
+			local layer = WindUI[name]
+			if typeof(layer) == "Instance" then
+				pcall(layer.Destroy, layer)
+			end
+		end
+		STATE.toast = nil
+		STATE.syncToggle = nil
+	end)
 
-	local toastHost = Instance.new("Frame")
-	toastHost.Name = "Notifications"
-	toastHost.BackgroundTransparency = 1
-	toastHost.AnchorPoint = Vector2.new(1, 0)
-	toastHost.Position = UDim2.new(1, -18, 0, 18)
-	toastHost.Size = UDim2.fromOffset(320, 420)
-	toastHost.ZIndex = 80
-	toastHost.Parent = gui
-	local toastLayout = Instance.new("UIListLayout")
-	toastLayout.Padding = UDim.new(0, 8)
-	toastLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-	toastLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	toastLayout.Parent = toastHost
-	local activeToasts = {}
-	local toastSerial = 0
-	local lastToastKey = nil
-	local lastToastAt = 0
+	-- Throw this window away and build a fresh one (used when the menu size
+	-- changes). The hub keeps running; only the menu is replaced.
+	local function rebuildMenu()
+		if windowGone then
+			return
+		end
+		windowGone = true
+		elevate()
+		pcall(Window.Destroy, Window)
+		task.delay(0.35, function()
+			if running() then
+				elevate()
+				local ok, err = pcall(installHub)
+				if not ok then
+					warn("[Zinoos hub] Menu rebuild failed: " .. tostring(err))
+				end
+			end
+		end)
+	end
+	pcall(Window.OnDestroy, Window, function()
+		-- The close button asks first, then removes the window: treat that as
+		-- unloading the hub so nothing keeps running invisibly.
+		if not windowGone then
+			windowGone = true
+			if running() then
+				task.defer(unloadHub)
+			end
+		end
+	end)
 
+	-- Notifications --------------------------------------------------------
+	local TOAST_ICONS = { catch = "paw-print", sale = "badge-dollar-sign", progress = "trending-up", system = "info" }
+	local lastToastKey, lastToastAt = nil, 0
 	STATE.toast = function(entry)
 		local key = tostring(entry.title) .. "\0" .. tostring(entry.message)
 		if key == lastToastKey and os.clock() - lastToastAt < 1.5 then
 			return true
 		end
-		lastToastKey = key
-		lastToastAt = os.clock()
-
-		-- Rendering must never hold up farming, selling, or upgrade loops. Some
-		-- executors can yield when a CoreGui tree is built from an event callback.
+		lastToastKey, lastToastAt = key, os.clock()
+		-- Rendering must never hold up the farming loops.
 		task.spawn(function()
-			local ok = pcall(function()
-				toastSerial += 1
-				while #activeToasts >= 4 do
-					local oldest = table.remove(activeToasts, 1)
-					if oldest and oldest.Parent then oldest:Destroy() end
-				end
-
-				local color = entry.rarity and ESP_COLORS[entry.rarity]
-					or (entry.category == "sale" and Color3.fromRGB(92, 230, 150))
-					or (entry.category == "progress" and Color3.fromRGB(255, 190, 80))
-					or accent
-				local toast = Instance.new("CanvasGroup")
-				toast.Name = "Toast"
-				toast.BackgroundColor3 = cardColor
-				toast.BackgroundTransparency = 0.04
-				toast.BorderSizePixel = 0
-				toast.GroupTransparency = 1
-				toast.LayoutOrder = -toastSerial
-				toast.Size = UDim2.fromOffset(310, 72)
-				toast.ZIndex = 81
-				toast:SetAttribute("ZinoosRole", "card")
-				toast.Parent = toastHost
-				local corner = Instance.new("UICorner")
-				corner.CornerRadius = UDim.new(0, 10)
-				corner.Parent = toast
-				local stroke = Instance.new("UIStroke")
-				stroke.Color = color
-				stroke.Transparency = 0.25
-				stroke.Thickness = 1
-				stroke.Parent = toast
-				local bar = Instance.new("Frame")
-				bar.BackgroundColor3 = color
-				bar.BorderSizePixel = 0
-				bar.Size = UDim2.fromOffset(4, 48)
-				bar.Position = UDim2.fromOffset(10, 12)
-				bar.ZIndex = 82
-				bar.Parent = toast
-				local barCorner = Instance.new("UICorner")
-				barCorner.CornerRadius = UDim.new(1, 0)
-				barCorner.Parent = bar
-				local title = Instance.new("TextLabel")
-				title.BackgroundTransparency = 1
-				title.Font = Enum.Font.GothamBold
-				title.Text = tostring(entry.title)
-				title.TextColor3 = ink
-				title.TextSize = 14
-				title.TextTruncate = Enum.TextTruncate.AtEnd
-				title.TextXAlignment = Enum.TextXAlignment.Left
-				title.Position = UDim2.fromOffset(24, 10)
-				title.Size = UDim2.new(1, -56, 0, 20)
-				title.ZIndex = 82
-				title:SetAttribute("ZinoosRole", "ink")
-				title.Parent = toast
-				local body = Instance.new("TextLabel")
-				body.BackgroundTransparency = 1
-				body.Font = Enum.Font.Gotham
-				body.Text = tostring(entry.message)
-				body.TextColor3 = muted
-				body.TextSize = 12
-				body.TextWrapped = true
-				body.TextXAlignment = Enum.TextXAlignment.Left
-				body.TextYAlignment = Enum.TextYAlignment.Top
-				body.Position = UDim2.fromOffset(24, 32)
-				body.Size = UDim2.new(1, -38, 0, 30)
-				body.ZIndex = 82
-				body:SetAttribute("ZinoosRole", "muted")
-				body.Parent = toast
-				local close = Instance.new("TextButton")
-				close.BackgroundTransparency = 1
-				close.Font = Enum.Font.GothamBold
-				close.Text = "×"
-				close.TextColor3 = muted
-				close.TextSize = 18
-				close.Position = UDim2.new(1, -30, 0, 5)
-				close.Size = UDim2.fromOffset(24, 24)
-				close.ZIndex = 83
-				close:SetAttribute("ZinoosRole", "muted")
-				close.Parent = toast
-				table.insert(activeToasts, toast)
-
-				local closing = false
-				local function dismiss()
-					if closing or not toast.Parent then return end
-					closing = true
-					TweenService:Create(toast, tweenInfo.fade, { GroupTransparency = 1 }):Play()
-					task.delay(0.22, function()
-						local index = table.find(activeToasts, toast)
-						if index then table.remove(activeToasts, index) end
-						if toast.Parent then toast:Destroy() end
-					end)
-				end
-				close.Activated:Connect(dismiss)
-				TweenService:Create(toast, tweenInfo.fade, { GroupTransparency = 0 }):Play()
-				task.delay(4.5, dismiss)
-			end)
-			if not ok then
-				-- Notifications are optional UI; never let a renderer failure stop automation.
-				return
-			end
+			elevate()
+			pcall(WindUI.Notify, WindUI, {
+				Title = tostring(entry.title),
+				Content = tostring(entry.message),
+				Icon = TOAST_ICONS[entry.category] or "bell",
+				Duration = 4.5,
+			})
 		end)
 		return true
 	end
 
-	local uiScale = Instance.new("UIScale")
-	uiScale.Parent = gui
-	local function viewSize()
-		local camera = workspace.CurrentCamera
-		return camera and camera.ViewportSize or Vector2.new(1280, 720)
-	end
-	local holder
-	local launcher
-	local fullMode = false
-	local applyHubLayout
-	local function fitScale()
-		local view = viewSize()
-		local phone = UserInputService.TouchEnabled and math.min(view.X, view.Y) < 820
-		local compact = phone or view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
-		local margin = (compact or fullMode) and 0 or 16
-		local baseW, baseH
-		local phoneScale = 1
-		if phone and not fullMode then
-			-- Phones get their own size table: scale, share of screen width, share of screen height.
-			local fit = STATE.phoneHubSizes[STATE.hubSize or "Compact"] or STATE.phoneHubSizes.Compact
-			phoneScale = fit[1]
-			local pixelsW = math.min(math.floor(view.X * fit[2]), view.X - 20)
-			local pixelsH = math.min(math.floor(view.Y * fit[3]), view.Y - 20)
-			baseW = math.max(280, math.floor(pixelsW / phoneScale))
-			baseH = math.max(300, math.floor(pixelsH / phoneScale))
-		elseif compact or fullMode then
-			baseW = math.max(320, view.X - margin * 2)
-			baseH = math.max(480, view.Y - margin * 2)
-		else
-			local wanted = STATE.hubScaleValue and STATE.hubScaleValue() or 1
-			baseW = math.min(972, math.max(640, math.floor((view.X - 32) / wanted)))
-			baseH = math.min(668, math.max(480, math.floor((view.Y - 32) / wanted)))
-		end
-		holder.Size = UDim2.fromOffset(baseW, baseH)
-		local desktopScale = (phone or compact or fullMode) and 1 or (STATE.hubScaleValue and STATE.hubScaleValue() or 1)
-		if phone and not fullMode then
-			desktopScale = phoneScale
-		end
-		uiScale.Scale = desktopScale
-		if launcher then
-			launcher.Size = phone and UDim2.fromOffset(232, 120) or UDim2.fromOffset(300, 136)
-		end
-		if applyHubLayout then
-			applyHubLayout(view, compact, baseW)
-		end
-	end
-
-	launcher = Instance.new("CanvasGroup")
-	launcher.Name = "Zinoos hub"
-	launcher.BackgroundColor3 = side
-	role(launcher, "side")
-	launcher.BorderSizePixel = 0
-	launcher.AnchorPoint = Vector2.new(0, 0.5)
-	launcher.Position = UDim2.new(0, 28, 0.58, 0)
-	launcher.Size = UDim2.fromOffset(300, 136)
-	launcher.GroupTransparency = 0
-	launcher.Active = true
-	launcher.Visible = true
-	launcher.Parent = gui
-	local launcherCorner = Instance.new("UICorner")
-	launcherCorner.CornerRadius = UDim.new(0, 16)
-	launcherCorner.Parent = launcher
-	local launcherStroke = Instance.new("UIStroke")
-	launcherStroke.Color = line
-	launcherStroke.Transparency = 0.45
-	launcherStroke.Thickness = 1
-	launcherStroke.Parent = launcher
-	local dockAvatar = Instance.new("ImageLabel")
-	dockAvatar.BackgroundColor3 = cardColor
-	dockAvatar.BorderSizePixel = 0
-	dockAvatar.Position = UDim2.fromOffset(14, 14)
-	dockAvatar.Size = UDim2.fromOffset(36, 36)
-	dockAvatar.Parent = launcher
-	local dockAvatarCorner = Instance.new("UICorner")
-	dockAvatarCorner.CornerRadius = UDim.new(1, 0)
-	dockAvatarCorner.Parent = dockAvatar
-	local dockName = Instance.new("TextLabel")
-	dockName.BackgroundTransparency = 1
-	dockName.Font = Enum.Font.GothamBold
-	dockName.Text = "ZinoosHub"
-	dockName.TextColor3 = ink
-	role(dockName, "ink")
-	dockName.TextSize = 15
-	dockName.TextXAlignment = Enum.TextXAlignment.Left
-	dockName.TextTruncate = Enum.TextTruncate.AtEnd
-	dockName.Position = UDim2.fromOffset(60, 14)
-	dockName.Size = UDim2.new(1, -150, 0, 18)
-	dockName.Parent = launcher
-	local dockGame = Instance.new("TextLabel")
-	dockGame.BackgroundTransparency = 1
-	dockGame.Font = Enum.Font.Gotham
-	dockGame.Text = "Throw Food For Animals · v" .. STATE.version
-	dockGame.TextColor3 = muted
-	role(dockGame, "muted")
-	dockGame.TextSize = 12
-	dockGame.TextXAlignment = Enum.TextXAlignment.Left
-	dockGame.Position = UDim2.fromOffset(60, 32)
-	dockGame.Size = UDim2.new(1, -150, 0, 16)
-	dockGame.Parent = launcher
-	local dockClock = Instance.new("TextLabel")
-	dockClock.BackgroundTransparency = 1
-	dockClock.Font = Enum.Font.GothamBold
-	dockClock.Text = "0:00"
-	dockClock.TextColor3 = ink
-	role(dockClock, "ink")
-	dockClock.TextSize = 14
-	dockClock.TextXAlignment = Enum.TextXAlignment.Right
-	dockClock.Position = UDim2.new(1, -126, 0, 16)
-	dockClock.Size = UDim2.fromOffset(100, 18)
-	dockClock.Parent = launcher
-	local dockStats = Instance.new("TextLabel")
-	dockStats.BackgroundTransparency = 1
-	dockStats.Font = Enum.Font.Gotham
-	dockStats.Text = "60 fps    0 ms"
-	dockStats.TextColor3 = mint
-	role(dockStats, "accentText")
-	dockStats.TextSize = 12
-	dockStats.TextXAlignment = Enum.TextXAlignment.Left
-	dockStats.Position = UDim2.fromOffset(14, 64)
-	dockStats.Size = UDim2.new(1, -28, 0, 16)
-	dockStats.Parent = launcher
-	local barTrack = Instance.new("Frame")
-	barTrack.BackgroundColor3 = accent
-	barTrack.BackgroundTransparency = 0.72
-	barTrack.BorderSizePixel = 0
-	barTrack.Position = UDim2.fromOffset(14, 86)
-	barTrack.Size = UDim2.new(1, -28, 0, 4)
-	barTrack.Parent = launcher
-	local barTrackCorner = Instance.new("UICorner")
-	barTrackCorner.CornerRadius = UDim.new(1, 0)
-	barTrackCorner.Parent = barTrack
-	local fpsBar = Instance.new("Frame")
-	fpsBar.BackgroundColor3 = mint
-	fpsBar.BorderSizePixel = 0
-	fpsBar.Size = UDim2.fromScale(0.7, 1)
-	fpsBar.Parent = barTrack
-	local fpsBarCorner = Instance.new("UICorner")
-	fpsBarCorner.CornerRadius = UDim.new(1, 0)
-	fpsBarCorner.Parent = fpsBar
-	local dockHint = Instance.new("TextLabel")
-	dockHint.BackgroundTransparency = 1
-	dockHint.Font = Enum.Font.Gotham
-	dockHint.Text = "Open dashboard  →"
-	dockHint.TextColor3 = muted
-	role(dockHint, "muted")
-	dockHint.TextSize = 12
-	dockHint.TextXAlignment = Enum.TextXAlignment.Left
-	dockHint.Position = UDim2.fromOffset(14, 100)
-	dockHint.Size = UDim2.new(1, -28, 0, 18)
-	dockHint.Parent = launcher
-	local launcherOpenButton = Instance.new("TextButton")
-	launcherOpenButton.Name = "Open"
-	launcherOpenButton.AutoButtonColor = false
-	launcherOpenButton.BackgroundTransparency = 1
-	launcherOpenButton.Text = ""
-	launcherOpenButton.Position = UDim2.fromOffset(8, 94)
-	launcherOpenButton.Size = UDim2.new(1, -16, 0, 34)
-	launcherOpenButton.ZIndex = 10
-	launcherOpenButton.Parent = launcher
-	local fpsCount = 0
-	trackConnection(RunService.Heartbeat:Connect(function()
-		fpsCount += 1
-	end))
-
-	holder = Instance.new("Frame")
-	holder.Name = "Holder"
-	holder.AnchorPoint = Vector2.new(0.5, 0.5)
-	holder.Position = UDim2.fromScale(0.5, 0.5)
-	holder.Size = UDim2.fromOffset(972, 668)
-	holder.BackgroundTransparency = 1
-	holder.Visible = false
-	holder.Parent = gui
-	fitScale()
-	local windowScale = Instance.new("UIScale")
-	windowScale.Name = "WindowMotion"
-	windowScale.Parent = holder
-
-	local shadow = Instance.new("Frame")
-	shadow.BackgroundColor3 = Color3.new(0, 0, 0)
-	shadow.BackgroundTransparency = 1
-	shadow.BorderSizePixel = 0
-	shadow.Position = UDim2.fromOffset(0, 8)
-	shadow.Size = UDim2.fromScale(1, 1)
-	shadow.ZIndex = 1
-	shadow.Parent = holder
-	local shadowCorner = Instance.new("UICorner")
-	shadowCorner.CornerRadius = UDim.new(0, 18)
-	shadowCorner.Parent = shadow
-
-	local window = Instance.new("Frame")
-	window.Name = "Window"
-	window.BackgroundColor3 = panel
-	role(window, "panel")
-	window.BorderSizePixel = 0
-	window.Size = UDim2.fromScale(1, 1)
-	window.ZIndex = 2
-	window.Parent = holder
-	local windowCorner = Instance.new("UICorner")
-	windowCorner.CornerRadius = UDim.new(0, 16)
-	windowCorner.Parent = window
-	local windowStroke = Instance.new("UIStroke")
-	windowStroke.Color = line
-	windowStroke.Transparency = 0.55
-	windowStroke.Thickness = 1
-	windowStroke.Parent = window
-	local wallpaper = Instance.new("CanvasGroup")
-	wallpaper.Name = "Wallpaper"
-	wallpaper.BackgroundTransparency = 1
-	wallpaper.BorderSizePixel = 0
-	wallpaper.Size = UDim2.fromScale(1, 1)
-	wallpaper.ZIndex = 1
-	wallpaper.Parent = window
-	local wallpaperCorner = Instance.new("UICorner")
-	wallpaperCorner.CornerRadius = UDim.new(0, 16)
-	wallpaperCorner.Parent = wallpaper
-	local wallpaperImage = Instance.new("ImageLabel")
-	wallpaperImage.BackgroundTransparency = 1
-	wallpaperImage.BorderSizePixel = 0
-	wallpaperImage.Size = UDim2.fromScale(1, 1)
-	wallpaperImage.ScaleType = Enum.ScaleType.Crop
-	wallpaperImage.ImageTransparency = 1
-	wallpaperImage.ZIndex = 1
-	wallpaperImage.Parent = wallpaper
-	local wallpaperScrim = Instance.new("Frame")
-	wallpaperScrim.Name = "Scrim"
-	wallpaperScrim.BackgroundColor3 = Color3.new(0, 0, 0)
-	wallpaperScrim.BackgroundTransparency = 0.38
-	wallpaperScrim.BorderSizePixel = 0
-	wallpaperScrim.Size = UDim2.fromScale(1, 1)
-	wallpaperScrim.ZIndex = 2
-	wallpaperScrim.Parent = wallpaper
-
-	local sideWrap = Instance.new("CanvasGroup")
-	sideWrap.Name = "SideWrap"
-	sideWrap.BackgroundTransparency = 1
-	sideWrap.BorderSizePixel = 0
-	sideWrap.Size = UDim2.new(0.25, 0, 1, 0)
-	sideWrap.GroupTransparency = 1
-	sideWrap.ZIndex = 3
-	sideWrap.Parent = window
-	local sidebar = Instance.new("Frame")
-	sidebar.Name = "Sidebar"
-	sidebar.BackgroundColor3 = side
-	role(sidebar, "side")
-	sidebar.BackgroundTransparency = 0
-	sidebar.BorderSizePixel = 0
-	sidebar.Size = UDim2.fromScale(1, 1)
-	sidebar.ZIndex = 3
-	sidebar.Parent = sideWrap
-	local sideCorner = Instance.new("UICorner")
-	sideCorner.CornerRadius = UDim.new(0, 16)
-	sideCorner.Parent = sidebar
-	local sideFill = Instance.new("Frame")
-	sideFill.BackgroundColor3 = side
-	role(sideFill, "side")
-	sideFill.BackgroundTransparency = 0
-	sideFill.BorderSizePixel = 0
-	sideFill.Position = UDim2.new(1, -16, 0, 0)
-	sideFill.Size = UDim2.new(0, 16, 1, 0)
-	sideFill.ZIndex = 3
-	sideFill.Parent = sidebar
-
-	local mark = Instance.new("Frame")
-	mark.BackgroundColor3 = accent
-	mark.BorderSizePixel = 0
-	mark.Position = UDim2.fromOffset(16, 16)
-	mark.Size = UDim2.fromOffset(28, 28)
-	mark.ZIndex = 4
-	mark.Parent = sidebar
-	local markCorner = Instance.new("UICorner")
-	markCorner.CornerRadius = UDim.new(1, 0)
-	markCorner.Parent = mark
-	local markText = Instance.new("TextLabel")
-	markText.BackgroundTransparency = 1
-	markText.Font = Enum.Font.GothamBlack
-	markText.Text = "Z"
-	markText.TextColor3 = inkDark
-	role(markText, "inkDark")
-	markText.TextSize = 16
-	markText.Size = UDim2.fromScale(1, 1)
-	markText.ZIndex = 5
-	markText.Parent = mark
-	local markImage = Instance.new("ImageLabel")
-	markImage.BackgroundTransparency = 1
-	markImage.BorderSizePixel = 0
-	markImage.Size = UDim2.fromScale(1, 1)
-	markImage.ScaleType = Enum.ScaleType.Crop
-	markImage.ZIndex = 6
-	markImage.Parent = mark
-	local markImageCorner = Instance.new("UICorner")
-	markImageCorner.CornerRadius = UDim.new(1, 0)
-	markImageCorner.Parent = markImage
-	task.spawn(STATE.loadThemeImages)
-
-	local brand = Instance.new("TextLabel")
-	brand.BackgroundTransparency = 1
-	brand.Font = Enum.Font.GothamBold
-	brand.Text = "ZinoosHub"
-	brand.TextColor3 = ink
-	role(brand, "ink")
-	brand.TextSize = 16
-	brand.TextXAlignment = Enum.TextXAlignment.Left
-	brand.Position = UDim2.fromOffset(52, 14)
-	brand.Size = UDim2.new(1, -60, 0, 20)
-	brand.ZIndex = 4
-	brand.Parent = sidebar
-	local brandSub = Instance.new("TextLabel")
-	brandSub.BackgroundTransparency = 1
-	brandSub.Font = Enum.Font.Gotham
-	brandSub.Text = "Throw Food · v" .. STATE.version
-	brandSub.TextColor3 = muted
-	role(brandSub, "muted")
-	brandSub.TextSize = 12
-	brandSub.TextXAlignment = Enum.TextXAlignment.Left
-	brandSub.Position = UDim2.fromOffset(52, 32)
-	brandSub.Size = UDim2.new(1, -60, 0, 16)
-	brandSub.ZIndex = 4
-	brandSub.Parent = sidebar
-
-	local content = Instance.new("Frame")
-	content.BackgroundTransparency = 1
-	content.Position = UDim2.new(0.25, 0, 0, 0)
-	content.Size = UDim2.new(0.75, 0, 1, 0)
-	content.ZIndex = 3
-	content.Parent = window
-	local headWrap = Instance.new("CanvasGroup")
-	headWrap.Name = "HeadWrap"
-	headWrap.BackgroundTransparency = 1
-	headWrap.BorderSizePixel = 0
-	headWrap.Size = UDim2.new(1, 0, 0, 64)
-	headWrap.GroupTransparency = 1
-	headWrap.ZIndex = 4
-	headWrap.Parent = content
-	local header = Instance.new("Frame")
-	header.Name = "DragBar"
-	header.Active = true
-	header.BackgroundColor3 = panel
-	header.BackgroundTransparency = 1
-	header.BorderSizePixel = 0
-	header.Size = UDim2.fromScale(1, 1)
-	header.ZIndex = 4
-	header.Parent = headWrap
-	local pageTitle = Instance.new("TextLabel")
-	pageTitle.BackgroundTransparency = 1
-	pageTitle.Font = Enum.Font.GothamBold
-	pageTitle.Text = "Home"
-	pageTitle.TextColor3 = ink
-	role(pageTitle, "ink")
-	pageTitle.TextSize = 18
-	pageTitle.TextXAlignment = Enum.TextXAlignment.Left
-	pageTitle.Position = UDim2.fromOffset(28, 0)
-	pageTitle.Size = UDim2.new(0.42, 0, 1, 0)
-	pageTitle.ZIndex = 4
-	pageTitle.Parent = header
-
-	local search = Instance.new("TextBox")
-	search.Name = "Search"
-	search.BackgroundColor3 = cardColor
-	search.BackgroundTransparency = cardFade
-	search.BorderSizePixel = 0
-	search.ClearTextOnFocus = false
-	search.Font = Enum.Font.Gotham
-	search.PlaceholderText = "Search"
-	search.PlaceholderColor3 = muted
-	search.Text = ""
-	search.TextColor3 = ink
-	role(search, "field")
-	search.TextSize = 14
-	search.TextXAlignment = Enum.TextXAlignment.Left
-	search.AnchorPoint = Vector2.new(1, 0.5)
-	search.Position = UDim2.new(1, -96, 0.5, 0)
-	search.Size = UDim2.fromOffset(200, 34)
-	search.ZIndex = 5
-	search.Parent = header
-	local searchCorner = Instance.new("UICorner")
-	searchCorner.CornerRadius = UDim.new(0, 8)
-	searchCorner.Parent = search
-	local searchStroke = Instance.new("UIStroke")
-	searchStroke.Color = accent
-	searchStroke.Transparency = 0.58
-	searchStroke.Thickness = 1
-	searchStroke.Parent = search
-	local searchPad = Instance.new("UIPadding")
-	searchPad.PaddingLeft = UDim.new(0, 10)
-	searchPad.Parent = search
-
-	local fullButton = Instance.new("TextButton")
-	fullButton.Name = "Fullscreen"
-	fullButton.AutoButtonColor = false
-	fullButton.Text = "⛶"
-	fullButton.Font = Enum.Font.Gotham
-	fullButton.TextSize = 16
-	fullButton.TextColor3 = muted
-	role(fullButton, "muted")
-	fullButton.BackgroundTransparency = 1
-	fullButton.AnchorPoint = Vector2.new(1, 0.5)
-	fullButton.Position = UDim2.new(1, -48, 0.5, 0)
-	fullButton.Size = UDim2.fromOffset(32, 32)
-	fullButton.ZIndex = 5
-	fullButton.Parent = header
-	local closeButton = Instance.new("TextButton")
-	closeButton.AutoButtonColor = false
-	closeButton.Text = "X"
-	closeButton.Font = Enum.Font.GothamBold
-	closeButton.TextSize = 14
-	closeButton.TextColor3 = muted
-	role(closeButton, "muted")
-	closeButton.BackgroundTransparency = 1
-	closeButton.AnchorPoint = Vector2.new(1, 0.5)
-	closeButton.Position = UDim2.new(1, -12, 0.5, 0)
-	closeButton.Size = UDim2.fromOffset(28, 28)
-	closeButton.ZIndex = 5
-	closeButton.Parent = header
-
-	local pageWrap = Instance.new("CanvasGroup")
-	pageWrap.Name = "PageWrap"
-	pageWrap.BackgroundTransparency = 1
-	pageWrap.BorderSizePixel = 0
-	pageWrap.Position = UDim2.fromOffset(0, 64)
-	pageWrap.Size = UDim2.new(1, 0, 1, -64)
-	pageWrap.GroupTransparency = 1
-	pageWrap.ZIndex = 4
-	pageWrap.Parent = content
-	local pageHost = Instance.new("Frame")
-	pageHost.BackgroundTransparency = 1
-	pageHost.Size = UDim2.fromScale(1, 1)
-	pageHost.ZIndex = 4
-	pageHost.Parent = pageWrap
-
-	local pages = {}
-	local navButtons = {}
-	local function newPage(name)
-		local page = Instance.new("ScrollingFrame")
-		page.Name = name
-		page.BackgroundTransparency = 1
-		page.BorderSizePixel = 0
-		page.Size = UDim2.fromScale(1, 1)
-		page.ScrollBarThickness = 3
-		page.ScrollBarImageColor3 = muted
-		page.ScrollBarImageTransparency = 0.35
-		page.CanvasSize = UDim2.new()
-		page.AutomaticCanvasSize = Enum.AutomaticSize.Y
-		page.Visible = false
-		page.ZIndex = 4
-		page.Parent = pageHost
-		local pad = Instance.new("UIPadding")
-		pad.PaddingLeft = UDim.new(0, 28)
-		pad.PaddingRight = UDim.new(0, 28)
-		pad.PaddingTop = UDim.new(0, 8)
-		pad.PaddingBottom = UDim.new(0, 28)
-		pad.Parent = page
-		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 12)
-		layout.SortOrder = Enum.SortOrder.LayoutOrder
-		layout.Parent = page
-		pages[name] = page
-		return page
-	end
-
-	local homePage = newPage("Dashboard")
-	newPage("Farming")
-	newPage("Animals")
-	newPage("Progress")
-	newPage("Selling")
-	local playerPage = newPage("Player")
-	newPage("Settings")
-
-	local currentPage = "Dashboard"
-	local pageToken = 0
-	local function playCards(page)
-		if not page then
-			return
-		end
-		pageToken += 1
-		local token = pageToken
-		local index = 0
-		local function visit(root)
-			local kids = root:GetChildren()
-			table.sort(kids, function(a, b)
-				local aOrder = a:IsA("GuiObject") and a.LayoutOrder or 0
-				local bOrder = b:IsA("GuiObject") and b.LayoutOrder or 0
-				return aOrder < bOrder
-			end)
-			for _, child in ipairs(kids) do
-				if child:GetAttribute("ZinoosSlot") == true then
-					local motion = child:FindFirstChild("Motion")
-					if motion and motion:IsA("CanvasGroup") then
-						index += 1
-						local step = index
-						motion.Position = UDim2.fromOffset(0, 12)
-						motion.GroupTransparency = 1
-						task.delay((step - 1) * 0.035, function()
-							if token ~= pageToken or not motion.Parent then
-								return
-							end
-							playMotion(motion, {
-								Position = UDim2.fromOffset(0, 0),
-								GroupTransparency = 0,
-							}, tweenInfo.card)
-						end)
-					end
-				elseif child:IsA("Frame") and child.BackgroundTransparency >= 1 and child:FindFirstChildOfClass("UIListLayout") then
-					visit(child)
-				end
-			end
-		end
-		visit(page)
-	end
-	local function showPage(name)
-		local targetPage = pages[name]
-		if not targetPage then
-			return
-		end
-		currentPage = name
-		for pageName, page in pairs(pages) do
-			page.Visible = pageName == name
-		end
-		pageTitle.Text = name
-		targetPage.CanvasPosition = Vector2.zero
-		local themeNow = STATE.hubThemeDef()
-		for buttonName, button in pairs(navButtons) do
-			local on = buttonName == name
-			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
-			playMotion(button, { BackgroundTransparency = on and themeNow.selectedFade or 1 }, tweenInfo.hover)
-		end
-		if holder.Visible then
-			playCards(pages[name])
-		end
-		if name == "Player" then
-			STATE.webhookReveal = false
-			if STATE.applyWebhookMask then
-				STATE.applyWebhookMask()
-			end
-		end
-	end
-
-	local function onActivate(control, callback, selectable)
-		control.Active = true
-		control.Selectable = selectable ~= false
-		control.Activated:Connect(callback)
-	end
-
-	local function navIcon(parent, kind)
-		local icon = Instance.new("Frame")
-		icon.BackgroundTransparency = 1
-		icon.BorderSizePixel = 0
-		icon.Position = UDim2.fromOffset(12, 10)
-		icon.Size = UDim2.fromOffset(16, 16)
-		icon.ZIndex = 6
-		icon.Parent = parent
-		local function mark(w, h, x, y, round)
-			local part = Instance.new("Frame")
-			part.BackgroundTransparency = 1
-			part.BorderSizePixel = 0
-			part.Position = UDim2.fromOffset(x, y)
-			part.Size = UDim2.fromOffset(w, h)
-			part.ZIndex = 6
-			part.Parent = icon
-			local stroke = Instance.new("UIStroke")
-			stroke.Color = ink
-			stroke:SetAttribute("ZinoosRole", "iconStroke")
-			stroke.Thickness = 1.25
-			stroke.Parent = part
-			local corner = Instance.new("UICorner")
-			corner.CornerRadius = UDim.new(round and 1 or 0, round and 0 or 2)
-			corner.Parent = part
-			return part
-		end
-		if kind == "Dashboard" then
-			mark(10, 7, 3, 8, false)
-			local roof = mark(2, 8, 7, 1, false)
-			roof.Rotation = 40
-		elseif kind == "Farming" then
-			mark(6, 6, 0, 0, false)
-			mark(6, 6, 9, 0, false)
-			mark(6, 6, 0, 9, false)
-			mark(6, 6, 9, 9, false)
-		elseif kind == "Animals" then
-			mark(3, 3, 0, 2, true)
-			mark(3, 3, 4, 0, true)
-			mark(3, 3, 9, 0, true)
-			mark(3, 3, 13, 2, true)
-			mark(10, 7, 3, 8, true)
-		elseif kind == "Progress" then
-			mark(3, 5, 1, 10, false)
-			mark(3, 9, 6, 6, false)
-			mark(3, 13, 11, 2, false)
-		elseif kind == "Selling" then
-			mark(12, 5, 2, 1, true)
-			mark(12, 5, 2, 6, true)
-			mark(12, 5, 2, 11, true)
-		elseif kind == "Player" then
-			mark(6, 6, 5, 1, true)
-			mark(12, 6, 2, 9, true)
-		elseif kind == "Settings" then
-			mark(12, 2, 2, 2, false)
-			mark(3, 3, 4, 1, true)
-			mark(12, 2, 2, 7, false)
-			mark(3, 3, 10, 6, true)
-			mark(12, 2, 2, 12, false)
-			mark(3, 3, 6, 11, true)
-		else
-			mark(10, 10, 3, 3, true)
-		end
-	end
-	local function addNav(name, order)
-		local button = Instance.new("TextButton")
-		button.Name = name
-		button.AutoButtonColor = false
-		button.Text = ""
-		button.Font = Enum.Font.GothamMedium
-		button.TextSize = 15
-		button.TextColor3 = ink
-		button.TextXAlignment = Enum.TextXAlignment.Left
-		local navLabel = Instance.new("TextLabel")
-		navLabel.Name = "Label"
-		navLabel.BackgroundTransparency = 1
-		navLabel.Font = Enum.Font.GothamMedium
-		navLabel.Text = name
-		navLabel.TextSize = 15
-		navLabel.TextColor3 = ink
-		role(navLabel, "ink")
-		navLabel.TextXAlignment = Enum.TextXAlignment.Left
-		navLabel.TextTruncate = Enum.TextTruncate.AtEnd
-		navLabel.Position = UDim2.fromOffset(36, 0)
-		navLabel.Size = UDim2.new(1, -44, 1, 0)
-		navLabel.ZIndex = 6
-		navLabel.Parent = button
-		button.BackgroundColor3 = selected
-		button.BackgroundTransparency = 1
-		button.BorderSizePixel = 0
-		button.Position = UDim2.fromOffset(12, 78 + (order - 1) * 42)
-		button.Size = UDim2.new(1, -24, 0, 36)
-		button.ZIndex = 4
-		button.Parent = sidebar
-		local navCorner = Instance.new("UICorner")
-		navCorner.CornerRadius = UDim.new(0, 10)
-		navCorner.Parent = button
-		navIcon(button, name)
-		navButtons[name] = button
-		bindPress(button)
-		button.MouseEnter:Connect(function()
-			if currentPage ~= name then
-				local themeNow = STATE.hubThemeDef()
-				playMotion(button, { BackgroundColor3 = themeNow.hover, BackgroundTransparency = themeNow.hoverFade }, tweenInfo.hover)
-			end
-		end)
-		button.MouseLeave:Connect(function()
-			if currentPage ~= name then
-				local themeNow = STATE.hubThemeDef()
-				playMotion(button, { BackgroundColor3 = themeNow.hover, BackgroundTransparency = 1 }, tweenInfo.hover)
-			end
-		end)
-		onActivate(button, function()
-			showPage(name)
-		end)
-	end
-	addNav("Dashboard", 1)
-	addNav("Farming", 2)
-	addNav("Animals", 3)
-	addNav("Progress", 4)
-	addNav("Selling", 5)
-	addNav("Player", 6)
-	addNav("Settings", 7)
-
-	local profile = Instance.new("Frame")
-	profile.BackgroundColor3 = cardColor
-	profile.BackgroundTransparency = cardFade
-	role(profile, "card")
-	profile.BorderSizePixel = 0
-	profile.AnchorPoint = Vector2.new(0, 1)
-	profile.Position = UDim2.new(0, 12, 1, -14)
-	profile.Size = UDim2.new(1, -24, 0, 56)
-	profile.ZIndex = 4
-	profile.Parent = sidebar
-	local profileCorner = Instance.new("UICorner")
-	profileCorner.CornerRadius = UDim.new(0, 12)
-	profileCorner.Parent = profile
-	local profileStroke = Instance.new("UIStroke")
-	profileStroke.Color = accent
-	profileStroke.Transparency = 0.58
-	profileStroke.Thickness = 1
-	profileStroke.Parent = profile
-	local avatar = Instance.new("ImageLabel")
-	avatar.BackgroundColor3 = cardColor
-	avatar.BorderSizePixel = 0
-	avatar.Size = UDim2.fromOffset(32, 32)
-	avatar.Position = UDim2.fromOffset(10, 10)
-	avatar.ZIndex = 5
-	avatar.Parent = profile
-	local avatarCorner = Instance.new("UICorner")
-	avatarCorner.CornerRadius = UDim.new(1, 0)
-	avatarCorner.Parent = avatar
-	task.spawn(function()
-		local ok, image = pcall(function()
-			return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
-		end)
-		if ok and gui.Parent then
-			avatar.Image = image
-			dockAvatar.Image = image
-		end
-	end)
-	local profileName = Instance.new("TextLabel")
-	profileName.BackgroundTransparency = 1
-	profileName.Font = Enum.Font.GothamBold
-	profileName.Text = LocalPlayer.DisplayName
-	profileName.TextColor3 = ink
-	role(profileName, "ink")
-	profileName.TextSize = 13
-	profileName.TextXAlignment = Enum.TextXAlignment.Left
-	profileName.TextTruncate = Enum.TextTruncate.AtEnd
-	profileName.Position = UDim2.fromOffset(50, 10)
-	profileName.Size = UDim2.new(1, -60, 0, 16)
-	profileName.ZIndex = 5
-	profileName.Parent = profile
-	local profileGame = Instance.new("TextLabel")
-	profileGame.BackgroundTransparency = 1
-	profileGame.Font = Enum.Font.Gotham
-	profileGame.Text = STATE.admin and "Admin" or "Throw Food Animals"
-	profileGame.TextColor3 = STATE.admin and accent or muted
-	role(profileGame, STATE.admin and "accentText" or "muted")
-	profileGame.TextSize = 11
-	profileGame.TextXAlignment = Enum.TextXAlignment.Left
-	profileGame.Position = UDim2.fromOffset(50, 28)
-	profileGame.Size = UDim2.new(1, -60, 0, 14)
-	profileGame.ZIndex = 5
-	profileGame.Parent = profile
-
-	local function label(parent, text, size, color, font, height)
-		local item = Instance.new("TextLabel")
-		item.BackgroundTransparency = 1
-		item.Font = font or Enum.Font.Gotham
-		item.Text = text
-		item.TextColor3 = color or ink
-		if color == muted then
-			item:SetAttribute("ZinoosRole", "muted")
-		elseif color == accent then
-			item:SetAttribute("ZinoosRole", "accentText")
-		elseif color == inkDark then
-			item:SetAttribute("ZinoosRole", "inkDark")
-		else
-			item:SetAttribute("ZinoosRole", "ink")
-		end
-		item.TextSize = size or 14
-		item.TextWrapped = true
-		item.TextXAlignment = Enum.TextXAlignment.Left
-		item.TextYAlignment = Enum.TextYAlignment.Top
-		item.Size = UDim2.new(1, 0, 0, height or 20)
-		item.ZIndex = 5
-		item.Parent = parent
-		return item
-	end
-
-	local function card(parent, title, order)
-		local slot = Instance.new("Frame")
-		slot.Name = title
-		slot.BackgroundTransparency = 1
-		slot.BorderSizePixel = 0
-		slot.LayoutOrder = order
-		slot.AutomaticSize = Enum.AutomaticSize.Y
-		slot.Size = UDim2.new(1, 0, 0, 0)
-		slot.ZIndex = 5
-		slot:SetAttribute("ZinoosSlot", true)
-		slot.Parent = parent
-		local box = Instance.new("CanvasGroup")
-		box.Name = "Motion"
-		box.BackgroundColor3 = cardColor
-		box.BackgroundTransparency = cardFade
-		role(box, "card")
-		box.BorderSizePixel = 0
-		box.AutomaticSize = Enum.AutomaticSize.Y
-		box.Size = UDim2.new(1, 0, 0, 0)
-		box.GroupTransparency = 0
-		box.ZIndex = 5
-		box.Parent = slot
-		local boxCorner = Instance.new("UICorner")
-		boxCorner.CornerRadius = UDim.new(0, 12)
-		boxCorner.Parent = box
-		local boxStroke = Instance.new("UIStroke")
-		boxStroke.Color = line
-		boxStroke.Transparency = 0.62
-		boxStroke.Thickness = 1
-		boxStroke.Parent = box
-		local boxPad = Instance.new("UIPadding")
-		boxPad.PaddingTop = UDim.new(0, 12)
-		boxPad.PaddingBottom = UDim.new(0, 12)
-		boxPad.PaddingLeft = UDim.new(0, 14)
-		boxPad.PaddingRight = UDim.new(0, 14)
-		boxPad.Parent = box
-		local boxLayout = Instance.new("UIListLayout")
-		boxLayout.Padding = UDim.new(0, 6)
-		boxLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		boxLayout.Parent = box
-		local heading = label(box, title, 13, muted, Enum.Font.GothamBold, 16)
-		heading.LayoutOrder = 0
-		return box
-	end
-
-	local searchRows = {}
-	local function remember(row, cardFrame, text)
-		row:SetAttribute("ZinoosSearch", string.lower(text))
-		local page = "Dashboard"
-		local current = row
-		while current do
-			for pageName, pageObject in pairs(pages) do
-				if current == pageObject then
-					page = pageName
-					current = nil
-					break
-				end
-			end
-			if current then
-				current = current.Parent
-			end
-		end
-		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text), page = page }
-	end
-
-	local function paintSwitch(track, knob, on, instant)
-		local themeNow = STATE.hubThemeDef()
-		local goal = on and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 4, 0.5, 0)
-		local color = on and themeNow.accent or themeNow.off
-		local knobColor = on and themeNow.inkDark or themeNow.accent
-		local glow = track:FindFirstChild("Glow")
-		local glowFade = on and 0.82 or 0.35
-		if instant then
-			knob.Position = goal
-			knob.BackgroundColor3 = knobColor
-			track.BackgroundColor3 = color
-		if glow and glow:IsA("UIStroke") then
-			glow.Color = themeNow.accent
-			glow.Transparency = glowFade
-		end
-			return
-		end
-		playMotion(knob, { Position = goal, BackgroundColor3 = knobColor }, tweenInfo.toggle)
-		playMotion(track, { BackgroundColor3 = color }, tweenInfo.toggle)
-		if glow and glow:IsA("UIStroke") then
-			glow.Color = themeNow.accent
-			playMotion(glow, { Transparency = glowFade }, tweenInfo.toggle)
-		end
-	end
-
+	-- Control helpers ------------------------------------------------------
 	local syncToggle
+	local dropdowns = {}
+
 	local function onToggle(key, on)
 		STATE[key] = on
 		if key == "autoThrow" and on then
@@ -4617,862 +3787,649 @@ local function installHub()
 				hum.WalkSpeed = 16
 			end
 		end
+		elevate()
 		saveConfig()
 	end
 
-	local function makeSwitch(parentBox, name, key, hint)
-		local row = Instance.new("Frame")
-		row.Name = name
-		row.BackgroundTransparency = 1
-		row.LayoutOrder = 1
-		row.Size = UDim2.new(1, 0, 0, hint and 58 or 44)
-		row.Active = true
-		row.ZIndex = 6
-		row.Parent = parentBox
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamMedium
-		title.Text = name
-		title.TextColor3 = ink
-		role(title, "ink")
-		title.TextSize = 14
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Size = UDim2.new(1, -52, 0, 18)
-		title.ZIndex = 6
-		title.Parent = row
-		if hint then
-			local note = Instance.new("TextLabel")
-			note.BackgroundTransparency = 1
-			note.Font = Enum.Font.Gotham
-			note.Text = hint
-			note.TextColor3 = muted
-			role(note, "muted")
-			note.TextSize = 11
-			note.TextWrapped = true
-			note.TextXAlignment = Enum.TextXAlignment.Left
-			note.Position = UDim2.fromOffset(0, 18)
-			note.Size = UDim2.new(1, -60, 0, 34)
-			note.ZIndex = 6
-			note.Parent = row
-		end
-		local track = Instance.new("TextButton")
-		track.AutoButtonColor = false
-		track.Text = ""
-		track.AnchorPoint = Vector2.new(1, 0.5)
-		track.Position = UDim2.new(1, 0, 0.5, 0)
-		track.Size = UDim2.fromOffset(42, 24)
-		track.ZIndex = 7
-		track.Parent = row
-		local trackCorner = Instance.new("UICorner")
-		trackCorner.CornerRadius = UDim.new(1, 0)
-		trackCorner.Parent = track
-		local trackStroke = Instance.new("UIStroke")
-		trackStroke.Name = "Glow"
-		trackStroke:SetAttribute("ZinoosRole", "switchGlow")
-		trackStroke.Color = accent
-		trackStroke.Transparency = 0.35
-		trackStroke.Thickness = 1
-		trackStroke.Parent = track
-		local knob = Instance.new("Frame")
-		knob.AnchorPoint = Vector2.new(0, 0.5)
-		knob.Size = UDim2.fromOffset(16, 16)
-		knob.BackgroundColor3 = Color3.new(1, 1, 1)
-		knob.BorderSizePixel = 0
-		knob.ZIndex = 8
-		knob.Parent = track
-		local knobCorner = Instance.new("UICorner")
-		knobCorner.CornerRadius = UDim.new(1, 0)
-		knobCorner.Parent = knob
+	local function toggle(parent, title, key, desc)
+		local element = parent:Toggle({
+			Title = title,
+			Desc = desc,
+			Value = STATE[key] == true,
+			Callback = function(value)
+				value = value == true
+				if (STATE[key] == true) == value then
+					return
+				end
+				elevate()
+				onToggle(key, value)
+			end,
+		})
 		local control = STATE.toggleControls[key]
 		if type(control) ~= "table" then
 			control = {}
 			STATE.toggleControls[key] = control
 		end
 		control.value = STATE[key] == true
-		paintSwitch(track, knob, control.value, true)
-		local function toggleValue()
-			control.value = not control.value
-			paintSwitch(track, knob, control.value)
-			onToggle(key, control.value == true)
-		end
-		onActivate(track, toggleValue)
-		local rowButton = Instance.new("TextButton")
-		rowButton.Name = "RowButton"
-		rowButton.BackgroundTransparency = 1
-		rowButton.Text = ""
-		rowButton.Size = UDim2.fromScale(1, 1)
-		rowButton.ZIndex = 5
-		rowButton.Parent = row
-		onActivate(rowButton, toggleValue)
-		STATE.themeSwitches[#STATE.themeSwitches + 1] = { track = track, knob = knob, key = key }
-		remember(row, parentBox, name .. " " .. (hint or ""))
-		return row
+		control.element = element
+		return element
 	end
+
 	syncToggle = function(key)
 		local control = STATE.toggleControls[key]
-		if type(control) == "table" then
-			control.value = STATE[key] == true
+		if type(control) ~= "table" then
+			return
 		end
-		for _, entry in ipairs(STATE.themeSwitches) do
-			if entry.key == key and entry.track.Parent then
-				paintSwitch(entry.track, entry.knob, STATE[key] == true)
-			end
+		local value = STATE[key] == true
+		control.value = value
+		local element = control.element
+		if element and element.Value ~= value then
+			elevate()
+			-- Second argument false: move the switch without re-running it.
+			pcall(element.Set, element, value, false)
 		end
 	end
 	STATE.syncToggle = syncToggle
 
-	local popupBlock = Instance.new("TextButton")
-	popupBlock.BackgroundTransparency = 1
-	popupBlock.Text = ""
-	popupBlock.Size = UDim2.fromScale(1, 1)
-	popupBlock.Visible = false
-	popupBlock.ZIndex = 20
-	popupBlock.Parent = window
-	local popup = Instance.new("CanvasGroup")
-	popup.BackgroundColor3 = side
-	popup.BackgroundTransparency = 0.08
-	role(popup, "side")
-	popup.BorderSizePixel = 0
-	popup.ClipsDescendants = true
-	popup.Visible = false
-	popup.ZIndex = 21
-	popup.Size = UDim2.fromOffset(180, 0)
-	popup.Parent = window
-	local popupCorner = Instance.new("UICorner")
-	popupCorner.CornerRadius = UDim.new(0, 10)
-	popupCorner.Parent = popup
-	local popupStroke = Instance.new("UIStroke")
-	popupStroke.Color = line
-	popupStroke.Transparency = 0.45
-	popupStroke.Parent = popup
-	local popupScroll = Instance.new("ScrollingFrame")
-	popupScroll.BackgroundTransparency = 1
-	popupScroll.BorderSizePixel = 0
-	popupScroll.Size = UDim2.fromScale(1, 1)
-	popupScroll.CanvasSize = UDim2.fromOffset(0, 0)
-	popupScroll.ScrollBarThickness = 4
-	popupScroll.ScrollBarImageColor3 = accent
-	popupScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-	popupScroll.AutomaticCanvasSize = Enum.AutomaticSize.None
-	popupScroll.ZIndex = 22
-	popupScroll.Parent = popup
-	local popupLayout = Instance.new("UIListLayout")
-	popupLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	popupLayout.Parent = popupScroll
-	local popupPad = Instance.new("UIPadding")
-	popupPad.PaddingTop = UDim.new(0, 4)
-	popupPad.PaddingBottom = UDim.new(0, 4)
-	popupPad.Parent = popupScroll
+	local function optionName(value)
+		if type(value) == "table" then
+			return value.Title or value.Name
+		end
+		return value
+	end
 
-	local function closePopup()
-		popup.Visible = false
-		popupBlock.Visible = false
-		for _, child in ipairs(popupScroll:GetChildren()) do
-			if child:IsA("TextButton") then
-				child:Destroy()
-			end
+	local function choice(parent, title, desc, options, getValue, setValue)
+		local element = parent:Dropdown({
+			Title = title,
+			Desc = desc,
+			Values = options,
+			Value = getValue(),
+			Callback = function(value)
+				value = optionName(value)
+				if type(value) ~= "string" or value == getValue() then
+					return
+				end
+				elevate()
+				setValue(value)
+				saveConfig()
+			end,
+		})
+		table.insert(dropdowns, { element = element, get = getValue })
+		return element
+	end
+
+	local function multiChoice(parent, title, desc, options, key, after)
+		local element = parent:Dropdown({
+			Title = title,
+			Desc = desc,
+			Values = options,
+			Value = table.clone(type(STATE[key]) == "table" and STATE[key] or {}),
+			Multi = true,
+			AllowNone = true,
+			Callback = function(list)
+				local chosen = {}
+				for _, value in ipairs(type(list) == "table" and list or {}) do
+					local name = optionName(value)
+					if type(name) == "string" then
+						chosen[name] = true
+					end
+				end
+				local ordered = {}
+				for _, option in ipairs(options) do
+					if chosen[option] then
+						table.insert(ordered, option)
+					end
+				end
+				local current = type(STATE[key]) == "table" and STATE[key] or {}
+				if #ordered == #current then
+					local same = true
+					for index, value in ipairs(ordered) do
+						if current[index] ~= value then
+							same = false
+							break
+						end
+					end
+					if same then
+						return
+					end
+				end
+				elevate()
+				STATE[key] = ordered
+				saveConfig()
+				if after then
+					after(ordered)
+				end
+			end,
+		})
+		table.insert(dropdowns, {
+			element = element,
+			get = function()
+				return table.clone(type(STATE[key]) == "table" and STATE[key] or {})
+			end,
+		})
+		return element
+	end
+
+	local function refreshDropdowns()
+		for _, entry in ipairs(dropdowns) do
+			elevate()
+			pcall(entry.element.Select, entry.element, entry.get())
 		end
 	end
-	onActivate(popupBlock, closePopup, false)
 
-	local function openPopup(anchor, options, current, callback, multiple)
-		closePopup()
-		local rowHeight = 28
-		local picked = {}
-		if multiple and type(current) == "table" then
-			for _, name in ipairs(current) do
-				picked[name] = true
-			end
+	-- WindUI measures a box's height when it opens and never again, so a box
+	-- whose text grows would cut its last rows off. Re-measure open boxes
+	-- after the menu is built and whenever their text changes.
+	local sections = {}
+	local paragraphSection = {}
+	local pendingReflow = {}
+	-- A box on a tab that is not showing measures as zero high, so only ever
+	-- re-measure boxes that are actually on screen.
+	local function isShown(box)
+		local frame = typeof(box.ElementFrame) == "Instance" and box.ElementFrame or nil
+		if not frame or not frame.Parent then
+			return false
 		end
-		local selectedIndex = 1
-		local foundSelected = false
-		local function paintChoice(choice, option)
-			local themeNow = STATE.hubThemeDef()
-			local on = (multiple and picked[option] == true) or (not multiple and option == current)
-			choice.BackgroundColor3 = on and themeNow.selected or themeNow.side
-			choice.BackgroundTransparency = on and themeNow.selectedFade or 1
-			choice.TextColor3 = themeNow.ink
-			choice.Text = (on and "  ✓ " or "    ") .. option
-		end
-		for index, option in ipairs(options) do
-			if multiple and picked[option] and not foundSelected then
-				selectedIndex = index
-				foundSelected = true
-			elseif not multiple and option == current then
-				selectedIndex = index
+		local node = frame
+		while node and not node:IsA("ScreenGui") do
+			if node:IsA("GuiObject") and not node.Visible then
+				return false
 			end
-			local choice = Instance.new("TextButton")
-			choice.Name = "Choice"
-			choice.LayoutOrder = index
-			choice.AutoButtonColor = false
-			choice.Font = Enum.Font.Gotham
-			choice.TextSize = 13
-			choice.TextColor3 = ink
-			choice.TextXAlignment = Enum.TextXAlignment.Left
-			choice.Size = UDim2.new(1, -8, 0, rowHeight)
-			choice.ZIndex = 23
-			choice.Parent = popupScroll
-			paintChoice(choice, option)
-			onActivate(choice, function()
-				if multiple then
-					picked[option] = not picked[option]
-					paintChoice(choice, option)
-					callback(option)
-				else
-					callback(option)
-					closePopup()
+			node = node.Parent
+		end
+		return node ~= nil and node.Enabled
+	end
+	local function reflow(box)
+		if not box or windowGone or box.Opened ~= true or not isShown(box) then
+			return
+		end
+		elevate()
+		pcall(box.Open, box, true)
+	end
+	local function reflowShown()
+		for _, box in ipairs(sections) do
+			reflow(box)
+		end
+	end
+	local function queueReflow(box)
+		if not box or pendingReflow[box] then
+			return
+		end
+		pendingReflow[box] = true
+		task.delay(0.1, function()
+			pendingReflow[box] = nil
+			reflow(box)
+		end)
+	end
+
+	local liveText = {}
+	local function info(parent, title, text)
+		local paragraph = parent:Paragraph({ Title = title, Desc = text })
+		liveText[paragraph] = text
+		if type(parent) == "table" and parent.__type == "Section" then
+			paragraphSection[paragraph] = parent
+		end
+		return paragraph
+	end
+	local function setInfo(paragraph, text)
+		if paragraph and liveText[paragraph] ~= text then
+			liveText[paragraph] = text
+			elevate()
+			pcall(paragraph.SetDesc, paragraph, text)
+			queueReflow(paragraphSection[paragraph])
+		end
+	end
+
+	local function button(parent, title, desc, icon, callback)
+		return parent:Button({
+			Title = title,
+			Desc = desc,
+			Icon = icon,
+			Callback = function()
+				elevate()
+				local ok, err = pcall(callback)
+				if not ok then
+					notify("system", title .. " failed", tostring(err))
+				end
+			end,
+		})
+	end
+
+	local function section(tab, title, icon)
+		-- Every box starts open so nothing is hidden; players can fold any
+		-- box away with its arrow.
+		local box = tab:Section({ Title = title, Icon = icon, Box = true, Opened = true })
+		table.insert(sections, box)
+		return box
+	end
+
+	local function confirm(title, content, onYes)
+		local ok = pcall(Window.Dialog, Window, {
+			Title = title,
+			Content = content,
+			Buttons = {
+				{ Title = "Cancel", Variant = "Secondary", Callback = function() end },
+				{ Title = "Confirm", Variant = "Primary", Callback = function()
+					elevate()
+					onYes()
+				end },
+			},
+		})
+		if not ok then
+			onYes()
+		end
+	end
+
+	local function applyPreset(values, name)
+		for key, value in pairs(values) do
+			STATE[key] = value
+			syncToggle(key)
+		end
+		if STATE.autoTrain ~= true then
+			task.spawn(stopTraining)
+		end
+		nextSellAt = 0
+		saveConfig()
+		STATE.status = name .. " preset active"
+		noteActivity(STATE.status)
+		notify("system", name .. " enabled", "You can still change every option afterwards")
+	end
+
+	-- Tabs -----------------------------------------------------------------
+	local homeTab = Window:Tab({ Title = "Home", Icon = "house" })
+	local farmTab = Window:Tab({ Title = "Farming", Icon = "target" })
+	local animalTab = Window:Tab({ Title = "Animals", Icon = "paw-print" })
+	local progressTab = Window:Tab({ Title = "Progress", Icon = "trending-up" })
+	local playerTab = Window:Tab({ Title = "Player", Icon = "user" })
+	local settingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
+	elevate()
+
+	-- Home -----------------------------------------------------------------
+	local overview = info(homeTab, "Overview", "Loading your stats...")
+	button(homeTab, "Start / Stop Farming", "Turns Auto Throw on or off", "power", function()
+		local on = STATE.autoThrow ~= true
+		onToggle("autoThrow", on)
+		syncToggle("autoThrow")
+		notify("system", on and "Farming started" or "Farming stopped", on and "Auto Throw is on" or "Auto Throw is off")
+	end)
+	do
+		local quick = section(homeTab, "Quick Start", "zap", false)
+		button(quick, "Safe AFK", "Throws, upgrades and claims rewards. Never sells", "shield-check", function()
+			applyPreset({
+				autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = false,
+				autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
+				autoFence = true, equipBest = true, autoSell = false,
+				autoOffline = true, autoFree = true,
+			}, "Safe AFK")
+		end)
+		button(quick, "Fast Progress", "Same as Safe AFK and also spends Super Throws. Never sells", "rocket", function()
+			applyPreset({
+				autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = true,
+				autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
+				autoFence = true, equipBest = true, autoSell = false,
+				autoOffline = true, autoFree = true,
+			}, "Fast Progress")
+		end)
+		button(quick, "Stop Automation", "Turns every farming option off", "octagon-x", function()
+			applyPreset({
+				autoThrow = false, autoTrain = false, autoFood = false, autoStand = false,
+				autoFence = false, equipBest = false, autoSell = false,
+				autoOffline = false, autoFree = false,
+			}, "Stopped")
+		end)
+	end
+	local sessionInfo = info(homeTab, "This Session", "No new animals caught yet.")
+	local historyInfo = info(homeTab, "Recent Catches", "No new animals caught yet.")
+	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
+
+	-- Farming --------------------------------------------------------------
+	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo
+	do
+		local throwBox = section(farmTab, "Throwing", "target")
+		toggle(throwBox, "Auto Throw", "autoThrow", "Throws and catches on repeat")
+		toggle(throwBox, "Always Land Maximum Throws (+20)", "perfectMeter")
+		toggle(throwBox, "Skip Catch Animation", "autoSkip", "Starts the next throw sooner")
+		toggle(throwBox, "Use Super Throws Automatically", "autoSuper")
+		choice(throwBox, "Super Throw Reserve", "Never spends your last few Super Throws", SUPER_RESERVE_OPTIONS, function()
+			return STATE.superThrowReserve > 0 and ("Keep " .. tostring(STATE.superThrowReserve)) or "Use all"
+		end, function(option)
+			STATE.superThrowReserve = tonumber(option:match("%d+")) or 0
+		end)
+		throwInfo = info(throwBox, "Status", tostring(STATE.throwStatus))
+		superInfo = info(throwBox, "Super Throw", tostring(STATE.superThrowStatus))
+
+		local boostBox = section(farmTab, "Boosts & Aiming", "sparkles")
+		toggle(boostBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level")
+		toggle(boostBox, "Dream Hunt", "dreamHunt", "Aims into dream habitats with animals you still need")
+		toggle(boostBox, "Index Hunt", "indexHunt", "Aims at your closest unfinished collection. Weaker catches while on")
+		boostInfo = info(boostBox, "Boosts", tostring(STATE.boostStatus))
+		aimInfo = info(boostBox, "Aim", tostring(STATE.aimStatus))
+
+		local trainBox = section(farmTab, "Training", "dumbbell", false)
+		toggle(trainBox, "Auto Train Throw Power", "autoTrain", "Pauses Auto Throw while training")
+		toggle(trainBox, "Claim Training Bonuses", "autoTapBonus")
+		toggle(trainBox, "Stop at Target Power", "trainToTarget")
+		choice(trainBox, "Target Throw Power", nil, TRAIN_TARGET_OPTIONS, function()
+			return STATE.trainTargetPower
+		end, function(option)
+			STATE.trainTargetPower = option
+		end)
+		toggle(trainBox, "Resume Auto Throw After Target", "resumeThrowAfterTraining")
+		trainInfo = info(trainBox, "Status", tostring(STATE.trainingStatus))
+
+		local stopBox = section(farmTab, "Stop On Target Catch", "flag", false)
+		toggle(stopBox, "Stop on Minimum Rarity", "stopOnRarity")
+		choice(stopBox, "Minimum Target Rarity", "Also stops for every higher rarity", RARITY_OPTIONS, function()
+			return STATE.stopTargetRarity
+		end, function(option)
+			STATE.stopTargetRarity = option
+		end)
+		toggle(stopBox, "Stop on Selected Mutations", "stopOnMutation")
+		multiChoice(stopBox, "Mutations That Stop Farming", nil, MUTATION_OPTIONS, "stopTargetMutations")
+	end
+
+	-- Animals --------------------------------------------------------------
+	local animalInfo, sellInfo, espInfo
+	do
+		local animalBox = section(animalTab, "Your Animals", "paw-print")
+		toggle(animalBox, "Keep Best Animals Equipped", "equipBest")
+		toggle(animalBox, "Hide Animal Models (FPS)", "hidePets", "Hidden on your screen only. Nothing is unequipped")
+		button(animalBox, "Equip Best Now", nil, "crown", function()
+			local ok = STATE.equipBestNow()
+			notify("progress", ok and "Best animals equipped" or "Equip Best was rejected", ok and "Your strongest animals are placed" or "Try again in a moment")
+		end)
+		animalInfo = info(animalBox, "Status", "Checking your animals...")
+
+		local sellBox = section(animalTab, "Safe Auto Sell", "badge-dollar-sign", false)
+		toggle(sellBox, "Auto Sell Backpack Animals", "autoSell", "Placed animals, your best backups and protected mutations are never sold")
+		multiChoice(sellBox, "Rarities Allowed to Sell", "Unticked rarities are always kept", RARITY_OPTIONS, "sellRarities", function()
+			local warning = STATE.sellRiskWarning()
+			if warning then
+				notify("system", "Review Auto Sell filters", warning)
+			end
+		end)
+		multiChoice(sellBox, "Never Sell These Mutations", nil, MUTATION_OPTIONS, "protectedMutations")
+		choice(sellBox, "Keep Best Backpack Animals", nil, KEEP_BACKUP_OPTIONS, function()
+			return "Keep " .. tostring(STATE.keepBest)
+		end, function(option)
+			STATE.keepBest = tonumber(option:match("%d+")) or STATE.keepBest
+		end)
+		choice(sellBox, "Auto Sell Interval", nil, SELL_INTERVAL_OPTIONS, function()
+			return "Every " .. tostring(STATE.sellMinutes) .. (STATE.sellMinutes == 1 and " minute" or " minutes")
+		end, function(option)
+			STATE.sellMinutes = tonumber(option:match("%d+")) or STATE.sellMinutes
+		end)
+		button(sellBox, "Sell Matching Animals Now", "Shows what will be sold and asks first", "trash-2", function()
+			local preview = STATE.sellPreview()
+			if not preview or preview.eligible <= 0 then
+				notify("sale", "Nothing to sell", "Nothing matches your Safe Auto Sell filters")
+				return
+			end
+			local warning = STATE.sellRiskWarning()
+			confirm("Sell " .. tostring(preview.eligible) .. " animals?", "Only backpack animals that pass every filter are sold." .. (warning and ("\n" .. warning) or ""), function()
+				task.spawn(function()
+					local sold = STATE.sellJunkNow(true)
+					notify("sale", sold > 0 and ("Sold " .. sold .. " animals") or "Nothing sold", tostring(STATE.sellStatus))
+				end)
+			end)
+		end)
+		sellInfo = info(sellBox, "Status", "Checking protected animals...")
+
+		local espBox = section(animalTab, "Animal ESP", "eye", false)
+		toggle(espBox, "Animal ESP", "espEnabled", "Names, rarity and income through walls")
+		toggle(espBox, "Only Show My Animals", "espOwnOnly")
+		toggle(espBox, "Show All Matching Animals", "espAllAnimals", "Off shows only the best animal per plot")
+		multiChoice(espBox, "Rarities to Display", nil, RARITY_OPTIONS, "espRarities", function()
+			task.defer(STATE.refreshEsp)
+		end)
+		choice(espBox, "Maximum Display Distance", nil, ESP_DISTANCE_OPTIONS, function()
+			return STATE.espMaxDistance
+		end, function(option)
+			STATE.espMaxDistance = option
+			task.defer(STATE.refreshEsp)
+		end)
+		espInfo = info(espBox, "Status", STATE.espStatus or "ESP off")
+	end
+
+	-- Progress -------------------------------------------------------------
+	local upgradeInfo, rewardInfo, dreamInfo, indexInfo
+	do
+		local upgradeBox = section(progressTab, "Upgrades", "arrow-up-circle")
+		toggle(upgradeBox, "Auto Buy Food Upgrades", "autoFood")
+		toggle(upgradeBox, "Auto Buy Training Stands", "autoStand")
+		toggle(upgradeBox, "Auto Buy Plot Slots", "autoFence")
+		choice(upgradeBox, "Keep Cash Reserve", "Upgrades never spend below this", CASH_RESERVE_OPTIONS, function()
+			return STATE.cashReserve
+		end, function(option)
+			STATE.cashReserve = option
+		end)
+		upgradeInfo = info(upgradeBox, "Status", tostring(STATE.upgradeStatus))
+
+		local dreamBox = section(progressTab, "Dreamland", "moon")
+		toggle(dreamBox, "Claim Research Milestones", "dreamClaim", "Super Lucky Throws, potions, boosts and the Dream Dragon")
+		toggle(dreamBox, "Spend Tokens on Boosts", "dreamBuy", "2x Cash and 2x Training boosts. Never potions")
+		dreamInfo = info(dreamBox, "Dreamland", tostring(STATE.dreamStatus))
+
+		local indexBox = section(progressTab, "Index Trails", "book-open")
+		toggle(indexBox, "Claim Index Rewards", "indexClaim")
+		toggle(indexBox, "Wear Best Trail", "autoTrail")
+		indexInfo = info(indexBox, "Index", tostring(STATE.indexStatus))
+
+		local rewardBox = section(progressTab, "Rewards", "gift")
+		toggle(rewardBox, "Claim Offline Earnings", "autoOffline")
+		toggle(rewardBox, "Claim Free Animal", "autoFree")
+		rewardInfo = info(rewardBox, "Status", tostring(STATE.rewardStatus))
+	end
+
+	-- Player ---------------------------------------------------------------
+	local potatoInfo, serverInfo
+	do
+		local moveBox = section(playerTab, "Movement", "footprints")
+		toggle(moveBox, "Custom Walk Speed", "walkSpeed")
+		choice(moveBox, "Walk Speed", "16 is the normal speed", SPEED_OPTIONS, function()
+			return tostring(STATE.speed)
+		end, function(option)
+			STATE.speed = tonumber(option) or STATE.speed
+		end)
+		toggle(moveBox, "Infinite Jump", "infiniteJump")
+		toggle(moveBox, "Noclip", "noclip")
+		toggle(moveBox, "Instant Interactions", "instantPrompts", "No hold time on prompts")
+		toggle(moveBox, "Fly", "fly", "PC: WASD, Space up, Left Ctrl down")
+		choice(moveBox, "Fly Speed", nil, FLY_SPEED_OPTIONS, function()
+			return tostring(STATE.flySpeed)
+		end, function(option)
+			STATE.flySpeed = tonumber(option) or STATE.flySpeed
+		end)
+
+		local teleportBox = section(playerTab, "Teleport", "map-pin", false)
+		for _, spot in ipairs({
+			{ "Throw Line", "Throw", "target" },
+			{ "Food Shop", "Shop", "store" },
+			{ "Training", "Training", "dumbbell" },
+			{ "Sell Shop", "Sell", "badge-dollar-sign" },
+		}) do
+			button(teleportBox, spot[1], nil, spot[3], function()
+				if not STATE.teleportTo(spot[2]) then
+					notify("system", spot[1] .. " unavailable", "Try again in a moment")
 				end
 			end)
 		end
-		local popupWidth = 180
-		for _, option in ipairs(options) do
-			local estimate = 36 + #tostring(option) * 7
-			if estimate > popupWidth then
-				popupWidth = estimate
+
+		local clientBox = section(playerTab, "Performance & AFK", "cpu", false)
+		toggle(clientBox, "Anti AFK", "antiAfk")
+		toggle(clientBox, "Auto Reconnect on Kick", "autoReconnect")
+		toggle(clientBox, "Hide Roblox Pause Popup", "noPausePopup")
+		toggle(clientBox, "Potato Mode", "fpsBoost", "Low detail for more FPS. Fully reversible")
+		toggle(clientBox, "AFK Black Screen", "disable3d", "Stops drawing the world for maximum FPS")
+		potatoInfo = info(clientBox, "Status", STATE.potatoStatus or "Potato Mode off")
+
+		local serverBox = section(playerTab, "Server", "server", false)
+		serverInfo = info(serverBox, "This Server", "Job " .. string.sub(game.JobId, 1, 8) .. "... · Place " .. tostring(game.PlaceId))
+		button(serverBox, "Rejoin", nil, "rotate-ccw", function()
+			STATE.rejoin()
+		end)
+		button(serverBox, "Server Hop", nil, "shuffle", function()
+			if not STATE.hop(false) then
+				notify("system", "No other server found", "Try again in a moment")
 			end
-		end
-		if popupWidth > 280 then
-			popupWidth = 280
-		end
-		local contentHeight = #options * rowHeight + 8
-		local scale = uiScale.Scale
-		if scale < 0.05 then
-			scale = 1
-		end
-		local view = viewSize()
-		local origin = window.AbsolutePosition
-		local anchorPos = anchor.AbsolutePosition
-		local anchorHeight = anchor.AbsoluteSize.Y
-		local roomBelow = view.Y - (anchorPos.Y + anchorHeight + 8)
-		local roomAbove = anchorPos.Y - 8
-		local room = math.max(roomBelow, roomAbove)
-		room = math.clamp(room, rowHeight * scale + 8, math.max(rowHeight * scale + 8, view.Y - 16))
-		local popupPixels = math.min(contentHeight * scale, room)
-		local popupHeight = popupPixels / scale
-		popup.Size = UDim2.fromOffset(popupWidth, 0)
-		popup.GroupTransparency = 1
-		playMotion(popup, {
-			Size = UDim2.fromOffset(popupWidth, popupHeight),
-			GroupTransparency = 0,
-		}, tweenInfo.drop)
-		popupScroll.CanvasSize = UDim2.fromOffset(0, contentHeight)
-		local openAbove = roomBelow + 1 < popupPixels and roomAbove > roomBelow
-		local pixelY = openAbove and (anchorPos.Y - popupPixels - 6) or (anchorPos.Y + anchorHeight + 6)
-		pixelY = math.clamp(pixelY, 8, math.max(8, view.Y - popupPixels - 8))
-		local pixelX = math.clamp(anchorPos.X, 8, math.max(8, view.X - popupWidth * scale - 8))
-		popup.Position = UDim2.fromOffset((pixelX - origin.X) / scale, (pixelY - origin.Y) / scale)
-		local scrollY = math.max(0, (selectedIndex - 1) * rowHeight)
-		local visibleRows = math.max(popupHeight - 8, rowHeight)
-		if scrollY > contentHeight - visibleRows then
-			scrollY = math.max(0, contentHeight - visibleRows)
-		end
-		popupScroll.CanvasPosition = Vector2.new(0, scrollY)
-		popup.Visible = true
-		popupBlock.Visible = true
+		end)
+		button(serverBox, "Lowest Player Server", nil, "users", function()
+			if not STATE.hop(true) then
+				notify("system", "No other server found", "Try again in a moment")
+			end
+		end)
+		button(serverBox, "Copy Job ID", nil, "copy", function()
+			notify("system", STATE.copyJobId() and "Job ID copied" or "Copy is not available", game.JobId)
+		end)
 	end
 
-	local dropdownRefreshers = {}
-	local function makeDropdown(parentBox, name, getValue, options, callback, stacked, hint)
-		local hasHint = type(hint) == "string" and hint ~= ""
-		local row = Instance.new("Frame")
-		row.BackgroundTransparency = 1
-		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, stacked and (hasHint and 82 or 52) or (hasHint and 58 or 30))
-		row.ZIndex = 6
-		row.Parent = parentBox
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamMedium
-		title.Text = name
-		title.TextColor3 = ink
-		role(title, "ink")
-		title.TextSize = 14
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.TextTruncate = Enum.TextTruncate.AtEnd
-		title.Size = stacked and UDim2.new(1, 0, 0, 18)
-			or (hasHint and UDim2.new(0.55, -8, 0, 18) or UDim2.new(0.48, 0, 1, 0))
-		title.ZIndex = 6
-		title.Parent = row
-		if hasHint then
-			local note = Instance.new("TextLabel")
-			note.BackgroundTransparency = 1
-			note.Font = Enum.Font.Gotham
-			note.Text = hint
-			note.TextColor3 = muted
-			role(note, "muted")
-			note.TextSize = 11
-			note.TextWrapped = true
-			note.TextXAlignment = Enum.TextXAlignment.Left
-			note.TextYAlignment = Enum.TextYAlignment.Top
-			note.Position = UDim2.fromOffset(0, 19)
-			note.Size = stacked and UDim2.new(1, 0, 0, 32) or UDim2.new(0.55, -8, 0, 36)
-			note.ZIndex = 6
-			note.Parent = row
+	-- Settings -------------------------------------------------------------
+	do
+		local notifyBox = section(settingsTab, "Notifications", "bell")
+		toggle(notifyBox, "Hub Notifications", "notifications")
+		toggle(notifyBox, "Catch Notifications", "notifyCatches")
+		toggle(notifyBox, "Sale Notifications", "notifySales")
+		toggle(notifyBox, "Upgrade & Reward Notifications", "notifyProgress")
+		choice(notifyBox, "Minimum Catch Rarity", nil, NOTIFY_RARITY_OPTIONS, function()
+			return STATE.notifyMinRarity
+		end, function(option)
+			STATE.notifyMinRarity = option
+		end)
+		button(notifyBox, "Test Notification", nil, "bell-ring", function()
+			notify("system", "Notifications are working", "Catches, sales and progress show up here")
+		end)
+
+		local lookBox = section(settingsTab, "Look", "palette")
+		local themes = { "Zinoos" }
+		local okThemes, list = pcall(WindUI.GetThemes, WindUI)
+		if okThemes and type(list) == "table" then
+			for key, value in pairs(list) do
+				local name = type(key) == "string" and key or value
+				if type(name) == "string" and name ~= "Zinoos" and not table.find(themes, name) then
+					table.insert(themes, name)
+				end
+			end
+			table.sort(themes, function(a, b)
+				if a == "Zinoos" then return true end
+				if b == "Zinoos" then return false end
+				return a < b
+			end)
 		end
-		local pick = Instance.new("TextButton")
-		pick.AutoButtonColor = false
-		pick.Font = Enum.Font.Gotham
-		pick.TextSize = 13
-		pick.TextColor3 = ink
-		role(pick, "field")
-		pick.TextXAlignment = stacked and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
-		pick.TextTruncate = Enum.TextTruncate.AtEnd
-		pick.Text = stacked and (" " .. getValue()) or getValue()
-		pick.BackgroundColor3 = panel
-		pick.BackgroundTransparency = cardFade
-		pick.AnchorPoint = stacked and Vector2.new(0, 1) or Vector2.new(1, 0.5)
-		pick.Position = stacked and UDim2.new(0, 0, 1, 0) or UDim2.new(1, 0, 0.5, 0)
-		pick.Size = stacked and UDim2.new(1, 0, 0, 26) or UDim2.fromOffset(132, 26)
-		pick.ZIndex = 7
-		pick.Parent = row
-		local pickCorner = Instance.new("UICorner")
-		pickCorner.CornerRadius = UDim.new(0, 8)
-		pickCorner.Parent = pick
-		local pickStroke = Instance.new("UIStroke")
-		pickStroke.Color = accent
-		pickStroke.Transparency = 0.58
-		pickStroke.Thickness = 1
-		pickStroke.Parent = pick
-		bindPress(pick)
-		onActivate(pick, function()
-			openPopup(pick, options, getValue(), function(option)
-				callback(option)
-				pick.Text = stacked and (" " .. getValue()) or getValue()
+		choice(lookBox, "Theme", nil, themes, function()
+			return themeName
+		end, function(option)
+			themeName = option
+			STATE.windTheme = option
+			pcall(WindUI.SetTheme, WindUI, option)
+		end)
+		choice(lookBox, "Menu Size", nil, { "Compact", "Normal", "Large" }, function()
+			return STATE.hubSize or "Normal"
+		end, function(option)
+			STATE.hubSize = option
+			saveConfig()
+			rebuildMenu()
+		end)
+		choice(lookBox, "Open / Close Key (PC)", nil, KEY_OPTIONS, function()
+			return STATE.toggleKey
+		end, function(option)
+			STATE.toggleKey = option
+			pcall(Window.SetToggleKey, Window, Enum.KeyCode[option])
+		end)
+		toggle(lookBox, "Start Hidden", "hideOnStart", "Opens with the key or the Zinoos button")
+
+		local configBox = section(settingsTab, "Config", "save", false)
+		info(configBox, "Saving", "Changes save automatically for this Roblox account.")
+		button(configBox, "Save Now", nil, "save", function()
+			saveConfig()
+			notify("system", "Saved", "Settings saved for " .. LocalPlayer.DisplayName)
+		end)
+		button(configBox, "Reset to Safe Defaults", "Auto Sell is turned off", "rotate-ccw", function()
+			confirm("Reset every setting?", "All options go back to safe defaults and Auto Sell turns off.", function()
+				local safeValues = {
+					autoThrow = true, perfectMeter = true, autoSkip = true, autoTrain = false,
+					autoTapBonus = true, autoFood = true, autoStand = true, autoFence = false,
+					equipBest = true, autoSell = false, autoOffline = true, autoFree = true,
+					autoSuper = false, stopOnRarity = false, stopOnMutation = false,
+					trainToTarget = false, resumeThrowAfterTraining = true,
+					walkSpeed = false, antiAfk = true, infiniteJump = false, noclip = false,
+					instantPrompts = false, fly = false, noPausePopup = true, autoReconnect = false,
+					disable3d = false, fpsBoost = false, hidePets = true,
+					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
+					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
+					trainOnBoost = true, dreamHunt = true, dreamClaim = true, dreamBuy = false,
+					indexClaim = true, autoTrail = true, indexHunt = false,
+				}
+				for key, value in pairs(safeValues) do
+					STATE[key] = value
+					syncToggle(key)
+				end
+				STATE.keepBest = 10
+				STATE.sellMinutes = 2
+				STATE.sellRarities = { "Common", "Uncommon", "Rare" }
+				STATE.protectedMutations = table.clone(MUTATION_OPTIONS)
+				STATE.stopTargetRarity = "Supreme"
+				STATE.stopTargetMutations = { "Rainbow" }
+				STATE.trainTargetPower = "10K"
+				STATE.cashReserve = "$0"
+				STATE.superThrowReserve = 0
+				STATE.notifyMinRarity = "All"
+				STATE.espRarities = table.clone(RARITY_OPTIONS)
+				STATE.espMaxDistance = "500"
+				task.spawn(stopTraining)
+				pcall(STATE.apply3d)
+				pcall(STATE.applyFpsBoost)
+				pcall(STATE.applyHidePets)
+				pcall(STATE.refreshEsp)
+				local hum = humanoid()
+				if hum then hum.WalkSpeed = 16 end
+				refreshDropdowns()
+				nextSellAt = 0
+				saveConfig()
+				notify("system", "Safe defaults restored", "Auto Sell is off")
 			end)
 		end)
-		table.insert(dropdownRefreshers, function()
-			if pick.Parent then
-				pick.Text = stacked and (" " .. getValue()) or getValue()
+
+		local communityBox = section(settingsTab, "Community", "message-circle", false)
+		button(communityBox, "Copy Discord Invite", "discord.gg/94pC3T6NZG", "copy", function()
+			local invite = "https://discord.gg/94pC3T6NZG"
+			if typeof(setclipboard) == "function" and pcall(setclipboard, invite) then
+				notify("system", "Invite copied", "Paste it in your browser")
+			else
+				notify("system", "Discord invite", invite)
 			end
 		end)
-		remember(row, parentBox, name .. " " .. (hint or ""))
-		return pick
-	end
-
-	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName, labelOf, hint)
-		local hasHint = type(hint) == "string" and hint ~= ""
-		local showList = labelOf or function(list)
-			return tostring(type(list) == "table" and #list or 0) .. " selected"
-		end
-		local row = Instance.new("Frame")
-		row.BackgroundTransparency = 1
-		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, hasHint and 58 or 30)
-		row.ZIndex = 6
-		row.Parent = parentBox
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamMedium
-		title.Text = name
-		title.TextColor3 = ink
-		role(title, "ink")
-		title.TextSize = 14
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Size = hasHint and UDim2.new(0.55, -8, 0, 18) or UDim2.new(0.42, 0, 1, 0)
-		title.ZIndex = 6
-		title.Parent = row
-		if hasHint then
-			local note = Instance.new("TextLabel")
-			note.BackgroundTransparency = 1
-			note.Font = Enum.Font.Gotham
-			note.Text = hint
-			note.TextColor3 = muted
-			role(note, "muted")
-			note.TextSize = 11
-			note.TextWrapped = true
-			note.TextXAlignment = Enum.TextXAlignment.Left
-			note.TextYAlignment = Enum.TextYAlignment.Top
-			note.Position = UDim2.fromOffset(0, 19)
-			note.Size = UDim2.new(0.55, -8, 0, 36)
-			note.ZIndex = 6
-			note.Parent = row
-		end
-		local pick = Instance.new("TextButton")
-		pick.AutoButtonColor = false
-		pick.Font = Enum.Font.Gotham
-		pick.TextSize = 13
-		pick.TextColor3 = ink
-		role(pick, "field")
-		pick.TextXAlignment = Enum.TextXAlignment.Left
-		pick.TextTruncate = Enum.TextTruncate.AtEnd
-		pick.Text = " " .. showList(getList())
-		pick.BackgroundColor3 = panel
-		pick.BackgroundTransparency = cardFade
-		pick.AnchorPoint = Vector2.new(1, 0.5)
-		pick.Position = UDim2.new(1, 0, 0.5, 0)
-		pick.Size = UDim2.fromOffset(210, 26)
-		pick.ZIndex = 7
-		pick.Parent = row
-		local pickCorner = Instance.new("UICorner")
-		pickCorner.CornerRadius = UDim.new(0, 8)
-		pickCorner.Parent = pick
-		local pickStroke = Instance.new("UIStroke")
-		pickStroke.Color = accent
-		pickStroke.Transparency = 0.58
-		pickStroke.Thickness = 1
-		pickStroke.Parent = pick
-		bindPress(pick)
-		onActivate(pick, function()
-			openPopup(pick, options, getList(), function(option)
-				onToggleName(option)
-				pick.Text = " " .. showList(getList())
-			end, true)
+		info(communityBox, "Diagnostics", table.concat({
+			"Config saving · " .. ((typeof(writefile) == "function" and typeof(readfile) == "function") and "available" or "unavailable"),
+			"Clipboard · " .. (typeof(setclipboard) == "function" and "available" or "unavailable"),
+			"Reconnect queue · " .. ((typeof(queue_on_teleport) == "function" or (syn and typeof(syn.queue_on_teleport) == "function")) and "available" or "unavailable"),
+		}, "\n"))
+		button(communityBox, "Unload Hub", "Stops everything and removes the menu", "log-out", function()
+			confirm("Unload Zinoos Hub?", "All automation stops until you run the loader again.", function()
+				task.defer(unloadHub)
+			end)
 		end)
-		table.insert(dropdownRefreshers, function()
-			if pick.Parent then
-				pick.Text = " " .. showList(getList())
+	end
+
+	-- WindUI opens with no tab chosen; show Home.
+	pcall(Window.SelectTab, Window, 1)
+	-- Re-measure the boxes on screen once the layout has settled and each
+	-- time another tab is opened.
+	for _, delay in ipairs({ 0.2, 0.6, 1.5 }) do
+		task.delay(delay, reflowShown)
+	end
+	local tabModule = Window.TabModule
+	if type(tabModule) == "table" and type(tabModule.OnChange) == "function" then
+		local previous = tabModule.OnChangeFunc
+		pcall(tabModule.OnChange, tabModule, function(...)
+			if type(previous) == "function" then
+				pcall(previous, ...)
 			end
+			task.delay(0.15, reflowShown)
+			task.delay(0.5, reflowShown)
 		end)
-		remember(row, parentBox, name .. " " .. (hint or ""))
-		return pick
 	end
 
-	STATE.toggleControls = {}
-	local function selectedLabel(list, options)
-		local count = type(list) == "table" and #list or 0
-		if count == 0 then
-			return "None selected"
-		end
-		if count == #options then
-			return "All " .. tostring(count) .. " selected"
-		end
-		if count <= 2 then
-			return table.concat(list, ", ")
-		end
-		return tostring(count) .. " selected"
-	end
-	local function toggleSelection(key, option, options)
-		local selected = {}
-		for _, value in ipairs(STATE[key] or {}) do
-			selected[value] = true
-		end
-		selected[option] = not selected[option]
-		local ordered = {}
-		for _, value in ipairs(options) do
-			if selected[value] then
-				table.insert(ordered, value)
-			end
-		end
-		STATE[key] = ordered
-		if key == "espRarities" then
-			task.defer(STATE.refreshEsp)
-		elseif key == "sellRarities" or key == "protectedMutations" then
-			nextSellAt = 0
-		end
-		saveConfig()
-	end
-	local function refreshDropdowns()
-		for _, refresh in ipairs(dropdownRefreshers) do
-			pcall(refresh)
-		end
-	end
-	STATE.refreshDropdowns = refreshDropdowns
-
-	STATE.uiStatusLabels = {}
-	do
-	local throwCard = card(pages.Farming, "THROW FARMING", 1)
-	makeSwitch(throwCard, "Auto Throw", "autoThrow", "Repeats the game's normal food throw and catch cycle")
-	makeSwitch(throwCard, "Always Land Maximum Throws (+20)", "perfectMeter", "Locks the game's throw meter at its full +20 power result")
-	makeSwitch(throwCard, "Skip Catch Animation", "autoSkip", "Skips the animal reveal animation so the next throw starts sooner")
-	makeSwitch(throwCard, "Use Super Throws Automatically", "autoSuper", "Uses Super Throws only while your chosen reserve remains untouched")
-	makeDropdown(throwCard, "Super Throw Reserve", function()
-		return STATE.superThrowReserve > 0 and ("Keep " .. tostring(STATE.superThrowReserve)) or "Use all"
-	end, SUPER_RESERVE_OPTIONS, function(option)
-		STATE.superThrowReserve = tonumber(option:match("%d+")) or 0
-		saveConfig()
-	end, false, "Example: Keep 10 means Auto Throw never spends your last 10 Super Throws")
-	STATE.uiStatusLabels.throw = label(throwCard, "Status · " .. tostring(STATE.throwStatus), 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.throw.LayoutOrder = 90
-	STATE.uiStatusLabels.superThrow = label(throwCard, "Super Throw - " .. tostring(STATE.superThrowStatus), 11, muted, Enum.Font.Gotham, 18)
-	STATE.uiStatusLabels.superThrow.LayoutOrder = 91
-	end
-
-	do
-	local trainCard = card(pages.Farming, "TRAINING", 2)
-	makeSwitch(trainCard, "Auto Train Throw Power", "autoTrain", "Auto Throw pauses while training is active")
-	makeSwitch(trainCard, "Claim Training Bonuses", "autoTapBonus", "Claims the game's timed tap bonuses during Auto Train")
-	makeSwitch(trainCard, "Stop at Target Power", "trainToTarget", "Stops training when the Throw Power shown on your HUD reaches the selected target")
-	makeDropdown(trainCard, "Target Throw Power", function()
-		return STATE.trainTargetPower
-	end, TRAIN_TARGET_OPTIONS, function(option)
-		STATE.trainTargetPower = option
-		saveConfig()
-	end, false, "Only used when Stop at Target Power is enabled")
-	makeSwitch(trainCard, "Resume Auto Throw After Target", "resumeThrowAfterTraining", "Automatically returns to throwing after the target is reached")
-	STATE.uiStatusLabels.training = label(trainCard, "Status · " .. tostring(STATE.trainingStatus), 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.training.LayoutOrder = 90
-	end
-
-	do
-	local targetCard = card(pages.Farming, "STOP ON TARGET CATCH", 3)
-	makeSwitch(targetCard, "Stop on Minimum Rarity", "stopOnRarity", "Turns Auto Throw off when a new animal meets or exceeds your target rarity")
-	makeDropdown(targetCard, "Minimum Target Rarity", function()
-		return STATE.stopTargetRarity
-	end, RARITY_OPTIONS, function(option)
-		STATE.stopTargetRarity = option
-		saveConfig()
-	end, false, "Example: Mythic also stops for Secret, Divine and every higher rarity")
-	makeSwitch(targetCard, "Stop on Selected Mutations", "stopOnMutation", "Turns Auto Throw off when a new animal has any selected mutation")
-	makeMultiDropdown(targetCard, "Mutations That Stop Farming", function()
-		return STATE.stopTargetMutations
-	end, MUTATION_OPTIONS, function(option)
-		toggleSelection("stopTargetMutations", option, MUTATION_OPTIONS)
-	end, function(list)
-		return selectedLabel(list, MUTATION_OPTIONS)
-	end, "Rarity and mutation targets use OR: either match stops Auto Throw")
-	end
-
-	do
-	local boostCard = card(pages.Farming, "BOOSTS & AIMING", 4)
-	makeSwitch(boostCard, "Train During Training Boosts", "trainOnBoost", "When an admin or shop training boost is on, trains until it ends, then Auto Throw resumes. Skipped at max level")
-	makeSwitch(boostCard, "Dream Hunt", "dreamHunt", "During a Dreamland run, aims each throw deep into the dream habitat with the most dream animals you still need")
-	makeSwitch(boostCard, "Index Hunt", "indexHunt", "Outside Dreamland runs, aims at the unfinished area collection closest to done. Catches are weaker while this is on")
-	STATE.uiStatusLabels.boosts = label(boostCard, "Boosts · " .. tostring(STATE.boostStatus), 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.boosts.LayoutOrder = 90
-	STATE.uiStatusLabels.boosts.TextWrapped = true
-	STATE.uiStatusLabels.boosts.AutomaticSize = Enum.AutomaticSize.Y
-	STATE.uiStatusLabels.aim = label(boostCard, "Aim · " .. tostring(STATE.aimStatus), 11, muted, Enum.Font.Gotham, 18)
-	STATE.uiStatusLabels.aim.LayoutOrder = 91
-	end
-
-	do
-	local dreamCard = card(pages.Progress, "DREAMLAND", 3)
-	makeSwitch(dreamCard, "Claim Research Milestones", "dreamClaim", "Claims Mr. Hush's rewards (Super Lucky Throws, potions, cash boost, Dream Dragon) as soon as you unlock them")
-	makeSwitch(dreamCard, "Spend Tokens on Boosts", "dreamBuy", "Buys the shop's 2x Cash and 2x Training boosts with research tokens (daily limit). Potions are never bought")
-	STATE.uiStatusLabels.dream = label(dreamCard, tostring(STATE.dreamStatus), 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.dream.LayoutOrder = 90
-	STATE.uiStatusLabels.dream.TextWrapped = true
-	STATE.uiStatusLabels.dream.AutomaticSize = Enum.AutomaticSize.Y
-	end
-
-	do
-	local indexCard = card(pages.Progress, "INDEX TRAILS", 4)
-	makeSwitch(indexCard, "Claim Index Rewards", "indexClaim", "Claims the trail reward each time you complete an area's animal collection")
-	makeSwitch(indexCard, "Wear Best Trail", "autoTrail", "Equips the owned trail with the biggest XP and cash bonus")
-	STATE.uiStatusLabels.index = label(indexCard, tostring(STATE.indexStatus), 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.index.LayoutOrder = 90
-	STATE.uiStatusLabels.index.TextWrapped = true
-	STATE.uiStatusLabels.index.AutomaticSize = Enum.AutomaticSize.Y
-	end
-
-	do
-	local animalCard = card(pages.Animals, "ANIMALS", 1)
-	makeSwitch(animalCard, "Keep Best Animals Equipped", "equipBest", "Keeps the strongest available animals earning money on your plot")
-	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals locally but keeps catch reveals visible; nothing is unequipped or sold")
-	STATE.uiStatusLabels.animals = label(animalCard, "Checking your animals...", 12, accent, Enum.Font.GothamMedium, 56)
-	STATE.uiStatusLabels.animals.LayoutOrder = 90
-	end
-
-	do
-	local espCard = card(pages.Animals, "ANIMAL ESP", 2)
-	makeSwitch(espCard, "Animal ESP", "espEnabled", "Shows names, rarity, mutation, income, distance and owner through walls")
-	makeSwitch(espCard, "Only Show My Animals", "espOwnOnly", "Hides ESP labels belonging to other players")
-	makeSwitch(espCard, "Show All Matching Animals", "espAllAnimals", "Off shows only the strongest matching animal per plot to prevent label clutter")
-	makeMultiDropdown(espCard, "Rarities to Display", function()
-		return STATE.espRarities
-	end, RARITY_OPTIONS, function(option)
-		toggleSelection("espRarities", option, RARITY_OPTIONS)
-	end, function(list)
-		return selectedLabel(list, RARITY_OPTIONS)
-	end, "Only selected rarities receive ESP labels")
-	makeDropdown(espCard, "Maximum Display Distance", function()
-		return STATE.espMaxDistance
-	end, ESP_DISTANCE_OPTIONS, function(option)
-		STATE.espMaxDistance = option
-		saveConfig()
-		task.defer(STATE.refreshEsp)
-	end, false, "Animals farther away than this are hidden from ESP")
-	STATE.uiStatusLabels.esp = label(espCard, STATE.espStatus or "ESP off", 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.esp.LayoutOrder = 90
-	end
-
-	do
-	local historyCard = card(pages.Animals, "RECENT CATCHES", 3)
-	STATE.uiStatusLabels.history = label(historyCard, "No new animals caught during this session.", 12, ink, Enum.Font.Gotham, 48)
-	STATE.uiStatusLabels.history.LayoutOrder = 1
-	STATE.uiStatusLabels.history.AutomaticSize = Enum.AutomaticSize.Y
-	STATE.uiStatusLabels.history.Size = UDim2.new(1, 0, 0, 0)
-	end
-
-	do
-	local progressCard = card(pages.Progress, "UPGRADES", 1)
-	makeSwitch(progressCard, "Auto Buy Food Upgrades", "autoFood", "Buys the next affordable food and equips your best owned food")
-	makeSwitch(progressCard, "Auto Buy Training Stands", "autoStand", "Buys the next affordable training stand")
-	makeSwitch(progressCard, "Auto Buy Plot Slots", "autoFence", "Upgrades the fence when affordable to unlock another animal slot")
-	makeDropdown(progressCard, "Keep Cash Reserve", function()
-		return STATE.cashReserve
-	end, CASH_RESERVE_OPTIONS, function(option)
-		STATE.cashReserve = option
-		saveConfig()
-	end, false, "Automatic upgrades never spend money below this amount")
-	STATE.uiStatusLabels.upgrade = label(progressCard, "Status · " .. tostring(STATE.upgradeStatus), 12, accent, Enum.Font.GothamMedium, 38)
-	STATE.uiStatusLabels.upgrade.LayoutOrder = 90
-	end
-
-	do
-	local sellCard = card(pages.Selling, "SAFE AUTO SELL", 1)
-	makeSwitch(sellCard, "Auto Sell Matching Backpack Animals", "autoSell", "Placed animals are always safe; only backpack animals passing every filter can be sold")
-	makeMultiDropdown(sellCard, "Rarities Allowed to Sell", function()
-		return STATE.sellRarities
-	end, RARITY_OPTIONS, function(option)
-		toggleSelection("sellRarities", option, RARITY_OPTIONS)
-	end, function(list)
-		return selectedLabel(list, RARITY_OPTIONS)
-	end, "Checked means allowed to sell. Unchecked rarities are always protected")
-	makeMultiDropdown(sellCard, "Never Sell These Mutations", function()
-		return STATE.protectedMutations
-	end, MUTATION_OPTIONS, function(option)
-		toggleSelection("protectedMutations", option, MUTATION_OPTIONS)
-	end, function(list)
-		return selectedLabel(list, MUTATION_OPTIONS)
-	end, "Selected mutations are protected even when their rarity is allowed to sell")
-	makeDropdown(sellCard, "Keep Best Backpack Animals", function()
-		return "Keep " .. tostring(STATE.keepBest)
-	end, KEEP_BACKUP_OPTIONS, function(option)
-		STATE.keepBest = tonumber(option:match("%d+")) or STATE.keepBest
-		saveConfig()
-	end, false, "Protects this many highest-income backpack animals in addition to every placed animal")
-	makeDropdown(sellCard, "Auto Sell Interval", function()
-		return "Every " .. tostring(STATE.sellMinutes) .. (STATE.sellMinutes == 1 and " minute" or " minutes")
-	end, SELL_INTERVAL_OPTIONS, function(option)
-		STATE.sellMinutes = tonumber(option:match("%d+")) or STATE.sellMinutes
-		saveConfig()
-	end, false, "How often Auto Sell checks for matching backpack animals")
-	STATE.uiStatusLabels.sell = label(sellCard, "Checking protected animals...", 12, accent, Enum.Font.GothamMedium, 62)
-	STATE.uiStatusLabels.sell.LayoutOrder = 90
-	end
-
-	do
-	local rewardCard = card(pages.Progress, "REWARDS", 2)
-	makeSwitch(rewardCard, "Claim Offline Earnings", "autoOffline", "Automatically claims pending offline animal income")
-	makeSwitch(rewardCard, "Claim Free Animal", "autoFree", "Automatically claims the free shop animal when available")
-	STATE.uiStatusLabels.reward = label(rewardCard, "Status · " .. tostring(STATE.rewardStatus), 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.reward.LayoutOrder = 90
-	end
-
-	local notificationCard = card(pages.Settings, "NOTIFICATIONS", 1)
-	makeSwitch(notificationCard, "Hub Notifications", "notifications", "Shows clean on-screen updates even while the dashboard is closed")
-	makeSwitch(notificationCard, "Catch Notifications", "notifyCatches", "Shows the animal, mutation, rarity and income you just received")
-	makeSwitch(notificationCard, "Sale Notifications", "notifySales", "Shows how many filtered animals Smart Sell removed")
-	makeSwitch(notificationCard, "Upgrade & Reward Notifications", "notifyProgress", "Shows food, stand, fence, team and reward progress")
-	local notificationNote
-	makeDropdown(notificationCard, "Minimum Catch Rarity", function()
-		return STATE.notifyMinRarity
-	end, NOTIFY_RARITY_OPTIONS, function(option)
-		STATE.notifyMinRarity = option
-		if notificationNote then
-			notificationNote.Text = option == "All" and "Catch filter · All catches" or ("Catch filter · " .. tostring(option) .. " and above")
-		end
-		saveConfig()
-	end, false, "Only catch notifications at or above this rarity are shown")
-	notificationNote = label(notificationCard, STATE.notifyMinRarity == "All" and "Catch filter · All catches" or ("Catch filter · " .. tostring(STATE.notifyMinRarity) .. " and above"), 12, accent, Enum.Font.GothamMedium, 18)
-	notificationNote.LayoutOrder = 90
-
-	local screenCard = card(pages.Settings, "DISPLAY", 2)
-	makeDropdown(screenCard, "Hub Size", function()
-		return STATE.hubSize or "Compact"
-	end, { "Compact", "Normal", "Large" }, function(option)
-		if STATE.hubSizes[option] then
-			STATE.hubSize = option
-		end
-		saveConfig()
-		fitScale()
-		task.defer(function()
-			if typeof(STATE.clampHub) == "function" then
-				pcall(STATE.clampHub)
-			end
-		end)
-	end, true, "Changes the dashboard size without affecting the game")
-
-	local function statChip(parentFrame, title, order)
-		local chip = Instance.new("Frame")
-		chip.BackgroundColor3 = cardColor
-		chip.BackgroundTransparency = cardFade
-		role(chip, "card")
-		chip.BorderSizePixel = 0
-		chip.LayoutOrder = order
-		chip.Size = UDim2.new(0.5, -5, 0, 58)
-		chip.ZIndex = 5
-		chip.Parent = parentFrame
-		local chipCorner = Instance.new("UICorner")
-		chipCorner.CornerRadius = UDim.new(0, 12)
-		chipCorner.Parent = chip
-		local chipStroke = Instance.new("UIStroke")
-		chipStroke.Color = accent
-		chipStroke.Transparency = 0.62
-		chipStroke.Thickness = 1
-		chipStroke.Parent = chip
-		local chipTitle = Instance.new("TextLabel")
-		chipTitle.BackgroundTransparency = 1
-		chipTitle.Font = Enum.Font.Gotham
-		chipTitle.Text = title
-		chipTitle.TextColor3 = muted
-		role(chipTitle, "muted")
-		chipTitle.TextSize = 12
-		chipTitle.TextXAlignment = Enum.TextXAlignment.Left
-		chipTitle.Position = UDim2.fromOffset(12, 8)
-		chipTitle.Size = UDim2.new(1, -20, 0, 16)
-		chipTitle.ZIndex = 6
-		chipTitle.Parent = chip
-		local chipValue = Instance.new("TextLabel")
-		chipValue.BackgroundTransparency = 1
-		chipValue.Font = Enum.Font.GothamBold
-		chipValue.Text = "-"
-		chipValue.TextColor3 = ink
-		role(chipValue, "ink")
-		chipValue.TextSize = 18
-		chipValue.TextXAlignment = Enum.TextXAlignment.Left
-		chipValue.Position = UDim2.fromOffset(12, 26)
-		chipValue.Size = UDim2.new(1, -20, 0, 24)
-		chipValue.ZIndex = 6
-		chipValue.Parent = chip
-		return chipValue
-	end
-
-	local lookCard = card(pages.Settings, "THEME", 3)
-	local themeNote = label(lookCard, "Paste a theme and import it. It saves on this account.", 12, muted, Enum.Font.Gotham, 32)
-	themeNote.LayoutOrder = 1
-	local themeBox = Instance.new("TextBox")
-	themeBox.Name = "ThemeImport"
-	themeBox.BackgroundColor3 = panel
-	themeBox.BackgroundTransparency = cardFade
-	themeBox.BorderSizePixel = 0
-	themeBox.ClearTextOnFocus = false
-	themeBox.MultiLine = true
-	themeBox.TextWrapped = true
-	themeBox.Font = Enum.Font.Gotham
-	themeBox.PlaceholderText = "{\"Kind\":\"theme\",\"Name\":\"My theme\",\"Theme\":{...}}"
-	themeBox.PlaceholderColor3 = muted
-	themeBox.Text = ""
-	themeBox.TextColor3 = ink
-	themeBox.TextSize = 12
-	themeBox.TextXAlignment = Enum.TextXAlignment.Left
-	themeBox.TextYAlignment = Enum.TextYAlignment.Top
-	themeBox.LayoutOrder = 2
-	themeBox.Size = UDim2.new(1, 0, 0, 78)
-	themeBox.ZIndex = 6
-	themeBox.Parent = lookCard
-	role(themeBox, "field")
-	local themeBoxCorner = Instance.new("UICorner")
-	themeBoxCorner.CornerRadius = UDim.new(0, 8)
-	themeBoxCorner.Parent = themeBox
-	local themeBoxPad = Instance.new("UIPadding")
-	themeBoxPad.PaddingTop = UDim.new(0, 6)
-	themeBoxPad.PaddingBottom = UDim.new(0, 6)
-	themeBoxPad.PaddingLeft = UDim.new(0, 8)
-	themeBoxPad.PaddingRight = UDim.new(0, 8)
-	themeBoxPad.Parent = themeBox
-	local themeStatus = label(lookCard, STATE.themeName or "AstaTheme", 12, muted, Enum.Font.Gotham, 16)
-	themeStatus.Name = "ThemeStatus"
-	themeStatus.LayoutOrder = 3
-	local importButton = Instance.new("TextButton")
-	importButton.AutoButtonColor = false
-	importButton.Font = Enum.Font.GothamBold
-	importButton.Text = "Import Theme"
-	importButton.TextSize = 14
-	importButton.TextColor3 = inkDark
-	importButton.BackgroundColor3 = accent
-	importButton.LayoutOrder = 4
-	importButton.Size = UDim2.new(1, 0, 0, 34)
-	importButton.ZIndex = 6
-	importButton.Parent = lookCard
-	role(importButton, "accentFill")
-	importButton:SetAttribute("ZinoosTextRole", "inkDark")
-	local importCorner = Instance.new("UICorner")
-	importCorner.CornerRadius = UDim.new(0, 8)
-	importCorner.Parent = importButton
-	bindPress(importButton)
-	onActivate(importButton, function()
-		local imported, err = STATE.useTheme(themeBox.Text)
-		if imported then
-			themeBox.Text = ""
-			themeStatus.Text = "Imported " .. (STATE.themeName or "theme")
-			themeStatus.TextColor3 = STATE.hubThemeDef().accent
-		else
-			themeStatus.Text = err or "That is not a theme."
-			themeStatus.TextColor3 = Color3.fromRGB(255, 120, 150)
-		end
-	end)
-	remember(importButton, lookCard, "import theme")
-
-	local introSlot = Instance.new("Frame")
-	introSlot.BackgroundTransparency = 1
-	introSlot.BorderSizePixel = 0
-	introSlot.LayoutOrder = 1
-	introSlot.AutomaticSize = Enum.AutomaticSize.Y
-	introSlot.Size = UDim2.new(1, 0, 0, 0)
-	introSlot:SetAttribute("ZinoosSlot", true)
-	introSlot.Parent = homePage
-	local intro = Instance.new("CanvasGroup")
-	intro.Name = "Motion"
-	intro.BackgroundTransparency = 1
-	intro.AutomaticSize = Enum.AutomaticSize.Y
-	intro.Size = UDim2.new(1, 0, 0, 0)
-	intro.Parent = introSlot
-	local introLayout = Instance.new("UIListLayout")
-	introLayout.Padding = UDim.new(0, 4)
-	introLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	introLayout.Parent = intro
-	local welcome = label(intro, "ZinoosHub is ready", 22, ink, Enum.Font.GothamBold, 28)
-	welcome.LayoutOrder = 1
-	local blurb = label(intro, "Throw, train, upgrade and manage your animals from one clear dashboard.", 14, muted, Enum.Font.Gotham, 36)
-	blurb.LayoutOrder = 2
-	local sessionStarted = os.time()
-	local function sessionClock()
-		local elapsed = math.max(0, os.time() - sessionStarted)
-		local hours = math.floor(elapsed / 3600)
-		local minutes = math.floor((elapsed % 3600) / 60)
-		local seconds = elapsed % 60
-		if hours > 0 then
-			return string.format("%d:%02d:%02d", hours, minutes, seconds)
-		end
-		return string.format("%d:%02d", minutes, seconds)
-	end
-	local sessionText = label(intro, "Session 0:00", 14, ink, Enum.Font.GothamBold, 20)
-	sessionText.LayoutOrder = 3
-	local statSlot = Instance.new("Frame")
-	statSlot.BackgroundTransparency = 1
-	statSlot.BorderSizePixel = 0
-	statSlot.LayoutOrder = 4
-	statSlot.AutomaticSize = Enum.AutomaticSize.Y
-	statSlot.Size = UDim2.new(1, 0, 0, 0)
-	statSlot:SetAttribute("ZinoosSlot", true)
-	statSlot.Parent = homePage
-	local statGrid = Instance.new("CanvasGroup")
-	statGrid.Name = "Motion"
-	statGrid.BackgroundTransparency = 1
-	statGrid.Size = UDim2.new(1, 0, 0, 128)
-	statGrid.Parent = statSlot
-	local solvesText = statChip(statGrid, "Money", 1)
-	solvesText.Parent.Position = UDim2.fromOffset(0, 0)
-	local movesText = statChip(statGrid, "Animals", 2)
-	movesText.Parent.Position = UDim2.new(0.5, 5, 0, 0)
-	local tableText = statChip(statGrid, "Food", 3)
-	tableText.Parent.Position = UDim2.fromOffset(0, 68)
-	local statusText = statChip(statGrid, "Stand / Fence", 4)
-	statusText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
-	statusText.TextSize = 14
-	statusText.TextTruncate = Enum.TextTruncate.AtEnd
-	local refreshHealth = nil
-	STATE.refreshHealth = nil
-
-	local sessionCard = card(homePage, "SESSION RESULTS", 6)
-	STATE.uiStatusLabels.session = label(sessionCard, "No new animals caught during this session.", 12, ink, Enum.Font.Gotham, 54)
-	STATE.uiStatusLabels.session.LayoutOrder = 1
-	STATE.uiStatusLabels.session.AutomaticSize = Enum.AutomaticSize.Y
-	STATE.uiStatusLabels.session.Size = UDim2.new(1, 0, 0, 0)
-
-	local note = card(homePage, "HOW IT WORKS", 7)
-	local noteBody = label(note, "Auto Throw repeats normal throws. Automatic upgrades respect your cash reserve. Safe Auto Sell only sells matching backpack animals after protecting placed animals, your best backups and selected mutations.", 13, ink, Enum.Font.Gotham, 72)
-	noteBody.LayoutOrder = 1
-
-	local activityCard = card(homePage, "ACTIVITY", 8)
-	local activityBody = label(activityCard, "Waiting for the next thing the hub does.", 13, muted, Enum.Font.Gotham, 72)
-	activityBody.LayoutOrder = 1
-	activityBody.AutomaticSize = Enum.AutomaticSize.Y
-	activityBody.Size = UDim2.new(1, 0, 0, 0)
-	activityBody.TextWrapped = true
-	remember(activityBody, activityCard, "activity status solves")
+	-- Live text --------------------------------------------------------------
 	local function countSummary(counts, order)
 		local parts = {}
 		for _, name in ipairs(order) do
@@ -5483,45 +4440,105 @@ local function installHub()
 		end
 		return #parts > 0 and table.concat(parts, " · ") or "None yet"
 	end
-	local function refreshActivity()
+
+	local sessionStarted = os.time()
+	local fpsCount = 0
+	local fpsConnection = trackConnection(RunService.RenderStepped:Connect(function()
+		fpsCount += 1
+	end))
+	local lastFps, lastFpsAt = 0, os.clock()
+
+	local function refresh()
+		-- Read everything from the game first, then write the menu, so the
+		-- thread still has permission to touch the UI.
+		local money = getData("Money")
+		local animals = getData("Animals")
+		local food = getData("EquippedFood") or 0
+		local stand = getData("Stand") or 0
+		local fence = getData("FenceLevel") or 0
+		local animalCount, placedCount = 0, 0
+		if type(animals) == "table" then
+			for _, entry in pairs(animals) do
+				if type(entry) == "table" then
+					animalCount += 1
+					if entry.Placed then
+						placedCount += 1
+					end
+				end
+			end
+		end
+		local preview = STATE.sellPreview()
+		local warning = STATE.sellRiskWarning()
+		local ping = 0
+		pcall(function()
+			ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5)
+		end)
+		local now = os.clock()
+		if now - lastFpsAt >= 1 then
+			lastFps = math.floor(fpsCount / (now - lastFpsAt) + 0.5)
+			fpsCount, lastFpsAt = 0, now
+		end
+		local elapsed = math.max(0, os.time() - sessionStarted)
+		local clock = elapsed >= 3600
+			and string.format("%d:%02d:%02d", elapsed // 3600, elapsed % 3600 // 60, elapsed % 60)
+			or string.format("%d:%02d", elapsed // 60, elapsed % 60)
+		elevate()
+
+		setInfo(overview, string.format(
+			"%s  ·  %s\nMoney $%s  ·  %d animals (%d placed)\nFood %s · Stand %s · Fence %s\nSession %s  ·  %d fps  ·  %d ms",
+			STATE.autoThrow == true and "Farming ON" or "Farming OFF",
+			publicStatus(STATE.status),
+			shortNumber(money),
+			animalCount,
+			placedCount,
+			tostring(food),
+			tostring(stand),
+			tostring(fence),
+			clock,
+			lastFps,
+			ping
+		))
+		setInfo(sessionInfo, string.format(
+			"%d throws · %d new animals · %d target stops\nRarities: %s\nMutations: %s",
+			stats.throws,
+			stats.catches,
+			stats.targetStops,
+			countSummary(stats.rarityCounts, RARITY_OPTIONS),
+			countSummary(stats.mutationCounts, MUTATION_OPTIONS)
+		))
+		local history = {}
+		for index = 1, math.min(6, #STATE.catchHistory) do
+			local catch = STATE.catchHistory[index]
+			history[#history + 1] = string.format("%s · %s", tostring(catch.title), tostring(catch.message))
+		end
+		setInfo(historyInfo, #history > 0 and table.concat(history, "\n") or "No new animals caught yet.")
 		local lines = {
-			"Status · " .. tostring(STATE.status),
-			"Throwing · " .. tostring(STATE.throwStatus),
-			"Training · " .. tostring(STATE.trainingStatus),
-			"Upgrades · " .. tostring(STATE.upgradeStatus),
-			"Selling · " .. tostring(STATE.sellStatus),
-			"Rewards · " .. tostring(STATE.rewardStatus),
+			"Training · " .. publicStatus(STATE.trainingStatus),
+			"Upgrades · " .. publicStatus(STATE.upgradeStatus),
+			"Selling · " .. publicStatus(STATE.sellStatus),
+			"Rewards · " .. publicStatus(STATE.rewardStatus),
 			"Boosts · " .. tostring(STATE.boostStatus),
 			"Aim · " .. tostring(STATE.aimStatus),
-			string.format("Session · %d throws, %d catches, %d training starts, %d bonuses, %d upgrades, %d sold", stats.throws, stats.catches, stats.trained, stats.bonuses, stats.foods + stats.stands + stats.fences, stats.sold),
 		}
 		if STATE.antiAfk == true then
 			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK active" or "Anti AFK waiting for idle"
 		end
-		if #STATE.activity > 0 then
-			lines[#lines + 1] = table.concat(STATE.activity, "\n")
+		for _, item in ipairs(STATE.activity) do
+			lines[#lines + 1] = tostring(item)
 		end
-		local text = table.concat(lines, "\n")
-		if activityBody.Text ~= text then activityBody.Text = text end
-		activityBody.TextColor3 = STATE.hubThemeDef().ink
-		STATE.uiStatusLabels.throw.Text = "Status · " .. publicStatus(STATE.throwStatus)
-		STATE.uiStatusLabels.training.Text = "Status · " .. publicStatus(STATE.trainingStatus)
-		STATE.uiStatusLabels.superThrow.Text = "Super Throw - " .. publicStatus(STATE.superThrowStatus)
-		local foodLevel = DataController:GetValue("EquippedFood") or 0
-		local standLevel = DataController:GetValue("Stand") or 0
-		local fenceLevel = DataController:GetValue("FenceLevel") or 0
-		elevate()
-		STATE.uiStatusLabels.upgrade.Text = string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(foodLevel), tostring(standLevel), tostring(fenceLevel))
-		STATE.uiStatusLabels.reward.Text = "Status · " .. publicStatus(STATE.rewardStatus)
-		STATE.uiStatusLabels.boosts.Text = "Boosts · " .. tostring(STATE.boostStatus)
-		STATE.uiStatusLabels.aim.Text = "Aim · " .. tostring(STATE.aimStatus)
-		STATE.uiStatusLabels.dream.Text = tostring(STATE.dreamStatus)
-		STATE.uiStatusLabels.index.Text = tostring(STATE.indexStatus)
-		local preview = STATE.sellPreview()
-		elevate()
+		setInfo(activityInfo, table.concat(lines, "\n"))
+		setInfo(throwInfo, publicStatus(STATE.throwStatus))
+		setInfo(superInfo, publicStatus(STATE.superThrowStatus))
+		setInfo(trainInfo, publicStatus(STATE.trainingStatus))
+		setInfo(boostInfo, tostring(STATE.boostStatus))
+		setInfo(aimInfo, tostring(STATE.aimStatus))
+		setInfo(upgradeInfo, string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(food), tostring(stand), tostring(fence)))
+		setInfo(rewardInfo, publicStatus(STATE.rewardStatus))
+		setInfo(dreamInfo, tostring(STATE.dreamStatus))
+		setInfo(indexInfo, tostring(STATE.indexStatus))
+		setInfo(animalInfo, string.format("Equip · %s\n%d animals · %d placed · %d backpack\n%s", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount, STATE.petVisibilityStatus or "Checking animal visibility"))
 		if preview then
-			local warning = STATE.sellRiskWarning()
-			STATE.uiStatusLabels.sell.Text = string.format(
+			setInfo(sellInfo, string.format(
 				"%s\n%d ready to sell · %d allowed rarities\n%d best backups safe · %d mutations safe · placed animals always safe%s",
 				publicStatus(STATE.sellStatus),
 				preview.eligible,
@@ -5529,847 +4546,32 @@ local function installHub()
 				preview.protectedBest,
 				preview.protectedMutation,
 				warning and ("\n" .. warning) or ""
-			)
-			STATE.uiStatusLabels.sell.TextColor3 = warning and risky or accent
+			))
 		else
-			STATE.uiStatusLabels.sell.Text = publicStatus(STATE.sellStatus)
+			setInfo(sellInfo, publicStatus(STATE.sellStatus))
 		end
-		local historyLines = {}
-		for index = 1, math.min(6, #STATE.catchHistory) do
-			local catch = STATE.catchHistory[index]
-			historyLines[#historyLines + 1] = string.format("%d. %s · %s", index, tostring(catch.title), tostring(catch.message))
-		end
-		STATE.uiStatusLabels.history.Text = #historyLines > 0
-			and table.concat(historyLines, "\n")
-			or "No new animals caught during this session."
-		STATE.uiStatusLabels.session.Text = string.format(
-			"%d new animals · %d target stops\nRarities: %s\nMutations: %s",
-			stats.catches,
-			stats.targetStops,
-			countSummary(stats.rarityCounts, RARITY_OPTIONS),
-			countSummary(stats.mutationCounts, MUTATION_OPTIONS)
-		)
-		local animals = DataController:GetValue("Animals")
-		elevate()
-		local animalCount, placedCount = 0, 0
-		if type(animals) == "table" then
-			for _, entry in pairs(animals) do
-				if type(entry) == "table" then
-					animalCount += 1
-					if entry.Placed then placedCount += 1 end
-				end
-			end
-		end
-		STATE.uiStatusLabels.animals.Text = string.format("Equip · %s\n%d animals · %d placed · %d backpack\n%s", publicStatus(STATE.equipStatus or "Ready"), animalCount, placedCount, animalCount - placedCount, STATE.petVisibilityStatus or "Checking animal visibility")
-		if STATE.uiStatusLabels.esp then
-			STATE.uiStatusLabels.esp.Text = STATE.espStatus or "ESP off"
-		end
-		if STATE.uiStatusLabels.potato then
-			STATE.uiStatusLabels.potato.Text = STATE.potatoStatus or "Potato Mode off"
-		end
+		setInfo(espInfo, STATE.espStatus or "ESP off")
+		setInfo(potatoInfo, STATE.potatoStatus or "Potato Mode off")
 	end
-	STATE.refreshActivity = refreshActivity
+	STATE.refreshActivity = refresh
 
-	local function actionButton(parentFrame, text, order, filled, callback)
-		local button = Instance.new("TextButton")
-		button.AutoButtonColor = false
-		button.Font = Enum.Font.GothamBold
-		button.Text = text
-		button.TextSize = 14
-		button.TextColor3 = filled and inkDark or ink
-		button.BackgroundColor3 = filled and accent or panel
-		button.BackgroundTransparency = filled and 0 or cardFade
-		role(button, filled and "accentFill" or "card")
-		button:SetAttribute("ZinoosTextRole", filled and "inkDark" or "ink")
-		button.LayoutOrder = order
-		button.Size = UDim2.new(1, 0, 0, 34)
-		button.ZIndex = 6
-		button.Parent = parentFrame
-		local buttonCorner = Instance.new("UICorner")
-		buttonCorner.CornerRadius = UDim.new(0, 8)
-		buttonCorner.Parent = button
-		if not filled then
-			local buttonStroke = Instance.new("UIStroke")
-			buttonStroke.Color = accent
-			buttonStroke.Transparency = 0.5
-			buttonStroke.Thickness = 1
-			buttonStroke.Parent = button
-		end
-		bindPress(button)
-		button.MouseEnter:Connect(function()
-			local themeNow = STATE.hubThemeDef()
-			local base = filled and themeNow.accent or themeNow.card
-			playMotion(button, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
-		end)
-		button.MouseLeave:Connect(function()
-			local themeNow = STATE.hubThemeDef()
-			playMotion(button, { BackgroundColor3 = filled and themeNow.accent or themeNow.card }, tweenInfo.hover)
-		end)
-		onActivate(button, callback)
-		remember(button, parentFrame, text)
-		return button
-	end
-	actionButton(notificationCard, "Test Notification", 91, false, function()
-		notify("system", "Notifications are working", "ZinoosHub will show catches, sales and progress here")
-	end)
-	local playerSlot = Instance.new("Frame")
-	playerSlot.BackgroundTransparency = 1
-	playerSlot.BorderSizePixel = 0
-	playerSlot.LayoutOrder = 1
-	playerSlot.AutomaticSize = Enum.AutomaticSize.Y
-	playerSlot.Size = UDim2.new(1, 0, 0, 0)
-	playerSlot:SetAttribute("ZinoosSlot", true)
-	playerSlot.Parent = playerPage
-	local playerMotion = Instance.new("CanvasGroup")
-	playerMotion.Name = "Motion"
-	playerMotion.BackgroundTransparency = 1
-	playerMotion.AutomaticSize = Enum.AutomaticSize.Y
-	playerMotion.Size = UDim2.new(1, 0, 0, 0)
-	playerMotion.Parent = playerSlot
-	local playerBlurb = label(playerMotion, "Movement and client options. WalkSpeed is left alone while you are seated.", 14, muted, Enum.Font.Gotham, 36)
-	playerBlurb.LayoutOrder = 1
-
-	local movement = card(playerPage, "MOVEMENT", 2)
-	makeSwitch(movement, "Custom Walk Speed", "walkSpeed", "Overrides your normal walking speed while enabled")
-	makeDropdown(movement, "Walk Speed", function()
-		return tostring(STATE.speed)
-	end, SPEED_OPTIONS, function(option)
-		STATE.speed = tonumber(option) or STATE.speed
-		saveConfig()
-	end, false, "16 is the game's normal walking speed")
-	makeSwitch(movement, "Infinite Jump", "infiniteJump", "Allows another jump while you are already in the air")
-	makeSwitch(movement, "Noclip", "noclip", "Lets your character move through walls and objects")
-	makeSwitch(movement, "Instant Interactions", "instantPrompts", "Removes the hold time from proximity prompts")
-
-	local flyCard = card(playerPage, "FLY", 3)
-	makeSwitch(flyCard, "Fly", "fly", "WASD to move, Space up, Left Ctrl down")
-	makeDropdown(flyCard, "Fly Speed", function()
-		return tostring(STATE.flySpeed)
-	end, FLY_SPEED_OPTIONS, function(option)
-		STATE.flySpeed = tonumber(option) or STATE.flySpeed
-		saveConfig()
-	end, false, "Higher values move your character faster while Fly is enabled")
-
-	local clientCard = card(playerPage, "CLIENT", 4)
-	makeSwitch(clientCard, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
-	makeSwitch(clientCard, "Hide Roblox Pause Popup", "noPausePopup", "Hides the Gameplay Paused message while Roblox is unfocused")
-	makeSwitch(clientCard, "Auto Reconnect on Kick", "autoReconnect", "Rejoins the game when you get disconnected")
-	makeSwitch(clientCard, "AFK Black Screen — Maximum FPS", "disable3d", "Stops rendering the 3D world while automation continues; turn it off to see the game again")
-	makeSwitch(clientCard, "Potato Mode", "fpsBoost", "Reversible low-detail mode: strips textures, smooths materials, disables effects, clouds, environment lighting, water effects and shadows")
-	makeSwitch(clientCard, "Hide UI On Start", "hideOnStart", "Starts hidden. Press the toggle key to show it")
-	makeDropdown(clientCard, "Toggle Key", function()
-		return STATE.toggleKey
-	end, KEY_OPTIONS, function(option)
-		STATE.toggleKey = option
-		saveConfig()
-	end, false, "Keyboard key used to open or hide the dashboard")
-	STATE.uiStatusLabels.potato = label(clientCard, STATE.potatoStatus or "Potato Mode off", 12, accent, Enum.Font.GothamMedium, 18)
-	STATE.uiStatusLabels.potato.LayoutOrder = 90
-
-	local serverCard = card(playerPage, "SERVER", 5)
-	local serverNote = label(serverCard, "Job " .. string.sub(game.JobId, 1, 8) .. "...  ·  Place " .. tostring(game.PlaceId), 12, muted, Enum.Font.Gotham, 16)
-	serverNote.LayoutOrder = 1
-	actionButton(serverCard, "Rejoin", 2, false, function()
-		STATE.rejoin()
-	end)
-	actionButton(serverCard, "Server Hop", 3, false, function()
-		if not STATE.hop(false) then
-			serverNote.Text = "No other server found"
-		end
-	end)
-	actionButton(serverCard, "Lowest Server", 4, false, function()
-		if not STATE.hop(true) then
-			serverNote.Text = "No other server found"
-		end
-	end)
-	actionButton(serverCard, "Copy Job ID", 5, false, function()
-		serverNote.Text = STATE.copyJobId() and "Job ID copied" or "Copy is not available"
-	end)
-	actionButton(serverCard, "Unload", 6, true, function()
-		task.defer(unloadHub)
-	end)
-
-	local function applySearch()
-		local query = string.lower(search.Text)
-		local used = {}
-		local matchingPages = {}
-		for _, item in ipairs(searchRows) do
-			local show = query == "" or string.find(item.text, query, 1, true) ~= nil
-			item.row.Visible = show
-			if show and query ~= "" then
-				used[item.card] = true
-				matchingPages[item.page or "Dashboard"] = true
-			end
-		end
-		for _, item in ipairs(searchRows) do
-			item.card.Visible = query == "" or used[item.card] == true
-		end
-		if query == "" then
-			return
-		end
-		if matchingPages[currentPage] then
-			return
-		end
-		for _, name in ipairs({ "Dashboard", "Farming", "Animals", "Progress", "Selling", "Player", "Settings" }) do
-			if matchingPages[name] then
-				showPage(name)
-				break
-			end
-		end
-	end
-	trackConnection(search:GetPropertyChangedSignal("Text"):Connect(applySearch))
-	local function refreshHome()
-		local money = DataController:GetValue("Money")
-		local animals = DataController:GetValue("Animals")
-		local animalCount = 0
-		if type(animals) == "table" then
-			for _ in pairs(animals) do animalCount += 1 end
-		end
-		local food = DataController:GetValue("EquippedFood") or 0
-		local stand = DataController:GetValue("Stand") or 0
-		local fence = DataController:GetValue("FenceLevel") or 0
-		elevate()
-		solvesText.Text = "$" .. STATE.shortNumber(money)
-		movesText.Text = tostring(animalCount)
-		tableText.Text = "Level " .. tostring(food)
-		statusText.Text = tostring(stand) .. " / " .. tostring(fence)
-	end
-	refreshHome()
-	refreshActivity()
-	local function refreshSession()
-		local clockText = sessionClock()
-		sessionText.Text = "Session " .. clockText
-		dockClock.Text = clockText
-		local fps = fpsCount
-		fpsCount = 0
-		local ping = 0
-		pcall(function()
-			ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5)
-		end)
-		elevate()
-		dockStats.Text = string.format("%d fps    %d ms", fps, ping)
-		local fill = math.clamp(fps / 80, 0.08, 1)
-		fpsBar.Size = UDim2.fromScale(fill, 1)
-		local themeNow = STATE.hubThemeDef()
-		fpsBar.BackgroundColor3 = fps >= 30 and themeNow.accent or (themeNow.risky or Color3.new(1, 1, 1))
-	end
-	refreshSession()
 	task.spawn(function()
-		while running() and gui.Parent do
-			pcall(refreshHome)
-			pcall(refreshActivity)
-			pcall(refreshSession)
+		while running() and not windowGone do
+			pcall(refresh)
+			pcall(reflowShown)
 			task.wait(1)
 		end
-	end)
-
-	local function applyLook()
-		local themeNow = STATE.hubThemeDef()
-		for _, obj in ipairs(gui:GetDescendants()) do
-			if obj:IsA("UIStroke") and obj:GetAttribute("ZinoosRole") == nil then
-				obj:SetAttribute("ZinoosRole", "stroke")
-			end
-			local kind = obj:GetAttribute("ZinoosRole")
-			local textKind = obj:GetAttribute("ZinoosTextRole")
-			if kind == "panel" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.panel
-			elseif kind == "side" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.side
-			elseif kind == "card" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.card
-				obj.BackgroundTransparency = themeNow.cardFade
-			elseif kind == "field" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.card
-				obj.BackgroundTransparency = themeNow.cardFade
-				if obj:IsA("TextButton") or obj:IsA("TextBox") or obj:IsA("TextLabel") then
-					obj.TextColor3 = themeNow.ink
-				end
-				if obj:IsA("TextBox") then
-					obj.PlaceholderColor3 = themeNow.muted
-				end
-			elseif kind == "accentFill" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.accent
-				obj.BackgroundTransparency = 0
-			elseif kind == "ink" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.ink
-			elseif kind == "muted" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.muted
-			elseif kind == "inkDark" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.inkDark
-			elseif kind == "accentText" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.accent
-			elseif kind == "stroke" and obj:IsA("UIStroke") then
-				obj.Color = themeNow.stroke
-				obj.Transparency = themeNow.strokeFade
-			elseif kind == "iconStroke" and obj:IsA("UIStroke") then
-				obj.Color = themeNow.ink
-			end
-			if textKind == "inkDark" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.inkDark
-			elseif textKind == "ink" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.ink
-			end
-		end
-		barTrack.BackgroundColor3 = themeNow.accent
-		barTrack.BackgroundTransparency = themeNow.barFade
-		if themeNow.wallpaper and type(STATE.themeWall) == "string" then
-			wallpaperImage.Image = STATE.themeWall
-			wallpaperImage.ImageTransparency = themeNow.wallFade
-		else
-			wallpaperImage.ImageTransparency = 1
-		end
-		if themeNow.icon and type(STATE.themeIcon) == "string" then
-			markImage.Image = STATE.themeIcon
-			markImage.ImageTransparency = 0
-			mark.BackgroundTransparency = 1
-			markText.Visible = false
-		else
-			markImage.ImageTransparency = 1
-			mark.BackgroundColor3 = themeNow.accent
-			mark.BackgroundTransparency = 0
-			markText.TextColor3 = themeNow.inkDark
-			markText.Visible = true
-		end
-		for _, entry in ipairs(STATE.themeSwitches) do
-			if entry.track.Parent then
-				paintSwitch(entry.track, entry.knob, STATE[entry.key] == true, true)
-			end
-		end
-		for buttonName, button in pairs(navButtons) do
-			local on = buttonName == currentPage
-			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
-			button.BackgroundTransparency = on and themeNow.selectedFade or 1
-			local navLabel = button:FindFirstChild("Label")
-			if navLabel and navLabel:IsA("TextLabel") then
-				navLabel.TextColor3 = themeNow.ink
-			end
-		end
-		if STATE.refreshTracker then
-			pcall(STATE.refreshTracker)
-		end
-	end
-	STATE.applyLook = applyLook
-	applyLook()
-
-	showPage("Dashboard")
-
-	local function placeTopLeft(obj, absX, absY)
-		local parentPos = obj.Parent.AbsolutePosition
-		local scale = uiScale.Scale
-		if scale < 0.05 then
-			scale = 1
-		end
-		local size = obj.AbsoluteSize
-		local anchor = obj.AnchorPoint
-		obj.Position = UDim2.fromOffset((absX - parentPos.X + anchor.X * size.X) / scale, (absY - parentPos.Y + anchor.Y * size.Y) / scale)
-	end
-
-	local function clampObject(obj)
-		local view = viewSize()
-		local size = obj.AbsoluteSize
-		local pos = obj.AbsolutePosition
-		local x = math.clamp(pos.X, 0, math.max(0, view.X - size.X))
-		local y = math.clamp(pos.Y, 0, math.max(0, view.Y - size.Y))
-		if math.abs(x - pos.X) > 1 or math.abs(y - pos.Y) > 1 then
-			placeTopLeft(obj, x, y)
-		end
-	end
-	STATE.clampHub = function()
-		clampObject(holder)
-		if launcher then
-			clampObject(launcher)
-		end
-	end
-
-	local function rememberSpot(obj, keyX, keyY)
-		local view = viewSize()
-		if view.X < 1 or view.Y < 1 then
-			return
-		end
-		local pos = obj.AbsolutePosition
-		STATE[keyX] = pos.X / view.X
-		STATE[keyY] = pos.Y / view.Y
-		saveConfig()
-	end
-
-	local function rememberLayout()
-		if not gui.Parent then
-			return
-		end
-		clampObject(holder)
-		clampObject(launcher)
-		local view = viewSize()
-		if view.X < 1 or view.Y < 1 then
-			return
-		end
-		local changed = false
-		if type(STATE.menuX) == "number" and type(STATE.menuY) == "number" then
-			local menuPos = holder.AbsolutePosition
-			local nextX = menuPos.X / view.X
-			local nextY = menuPos.Y / view.Y
-			if math.abs(nextX - STATE.menuX) > 0.002 or math.abs(nextY - STATE.menuY) > 0.002 then
-				STATE.menuX = nextX
-				STATE.menuY = nextY
-				changed = true
-			end
-		end
-		if STATE.dockCustom and type(STATE.dockX) == "number" and type(STATE.dockY) == "number" then
-			local dockPos = launcher.AbsolutePosition
-			local nextX = dockPos.X / view.X
-			local nextY = dockPos.Y / view.Y
-			if math.abs(nextX - STATE.dockX) > 0.002 or math.abs(nextY - STATE.dockY) > 0.002 then
-				STATE.dockX = nextX
-				STATE.dockY = nextY
-				changed = true
-			end
-		end
-		if changed then
-			saveConfig()
-		end
-	end
-	applyHubLayout = function(_, compact, baseW)
-		sideWrap.Size = compact and UDim2.new(0, 72, 1, 0) or UDim2.new(0.25, 0, 1, 0)
-		content.Position = compact and UDim2.fromOffset(72, 0) or UDim2.new(0.25, 0, 0, 0)
-		content.Size = compact and UDim2.new(1, -72, 1, 0) or UDim2.new(0.75, 0, 1, 0)
-		brand.Visible = not compact
-		brandSub.Visible = not compact
-		profile.Visible = not compact
-		for index, name in ipairs({ "Dashboard", "Farming", "Animals", "Progress", "Selling", "Player", "Settings" }) do
-			local button = navButtons[name]
-			if button then
-				local label = button:FindFirstChild("Label")
-				if label then
-					label.Visible = not compact
-				end
-				button.Size = compact and UDim2.fromOffset(48, 42) or UDim2.new(1, -24, 0, 36)
-				button.Position = UDim2.fromOffset(12, compact and (60 + (index - 1) * 46) or (70 + (index - 1) * 42))
-			end
-		end
-		for _, page in pairs(pages) do
-			local pad = page:FindFirstChildOfClass("UIPadding")
-			if pad then
-				pad.PaddingLeft = UDim.new(0, compact and 12 or 28)
-				pad.PaddingRight = UDim.new(0, compact and 12 or 28)
-			end
-		end
-		search.Size = UDim2.fromOffset(compact and 140 or 200, compact and 40 or 34)
-	end
-	fitScale()
-	local function refit()
-		fitScale()
-		task.defer(rememberLayout)
-	end
-	local viewSignal = nil
-	local function bindView()
-		if viewSignal then
-			pcall(function()
-				viewSignal:Disconnect()
-			end)
-			viewSignal = nil
-		end
-		local camera = workspace.CurrentCamera
-		if camera then
-			viewSignal = trackConnection(camera:GetPropertyChangedSignal("ViewportSize"):Connect(refit))
-		end
-	end
-	trackConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-		refit()
-		bindView()
-	end))
-	bindView()
-
-	task.defer(function()
-		if not gui.Parent then
-			return
-		end
-		local view = viewSize()
-		if type(STATE.menuX) == "number" and type(STATE.menuY) == "number" then
-			placeTopLeft(holder, STATE.menuX * view.X, STATE.menuY * view.Y)
-			clampObject(holder)
-		end
-		if STATE.dockCustom and type(STATE.dockX) == "number" and type(STATE.dockY) == "number" then
-			placeTopLeft(launcher, STATE.dockX * view.X, STATE.dockY * view.Y)
-			clampObject(launcher)
-		end
-	end)
-
-	local dragTarget = nil
-	local dragStart = nil
-	local dragOrigin = nil
-	local dragMoved = false
-
-	local function beginDrag(target, input)
-		dragTarget = target
-		dragStart = input.Position
-		dragOrigin = target.AbsolutePosition
-		dragMoved = false
-	end
-
-	local function canDragFrom(input)
-		local hits = gui:GetGuiObjectsAtPosition(input.Position.X, input.Position.Y)
-		for _, hit in ipairs(hits) do
-			if hit:IsA("GuiButton") or hit:IsA("TextBox") then
-				return false
-			end
-		end
-		return true
-	end
-
-	header.InputBegan:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		if canDragFrom(input) then
-			beginDrag(holder, input)
-		end
-	end)
-	sidebar.InputBegan:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		if canDragFrom(input) then
-			beginDrag(holder, input)
-		end
-	end)
-	launcher.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			beginDrag(launcher, input)
-		end
-	end)
-
-	local openToken = 0
-	local function setOpen(open)
-		openToken += 1
-		local token = openToken
-		if open then
-			STATE.webhookReveal = false
-			if STATE.applyWebhookMask then
-				STATE.applyWebhookMask()
-			end
-			playMotion(launcher, { GroupTransparency = 1 }, tweenInfo.hover)
-			holder.Visible = true
-			shadow.Visible = true
-			windowScale.Scale = 0.9
-			sideWrap.GroupTransparency = 1
-			headWrap.GroupTransparency = 1
-			pageWrap.GroupTransparency = 1
-			playMotion(windowScale, { Scale = 1 }, tweenInfo.open)
-			task.delay(0.12, function()
-				if token ~= openToken or not gui.Parent then
-					return
-				end
-				launcher.Visible = false
-				launcher.GroupTransparency = 0
-			end)
-			task.delay(0.22, function()
-				if token ~= openToken or not gui.Parent then
-					return
-				end
-				playMotion(sideWrap, { GroupTransparency = 0 }, tweenInfo.fade)
-				task.delay(0.04, function()
-					if token ~= openToken or not gui.Parent then
-						return
-					end
-					playMotion(headWrap, { GroupTransparency = 0 }, tweenInfo.fade)
-				end)
-				task.delay(0.08, function()
-					if token ~= openToken or not gui.Parent then
-						return
-					end
-					playMotion(pageWrap, { GroupTransparency = 0 }, tweenInfo.fade)
-					playCards(pages[currentPage])
-				end)
-			end)
-			return
-		end
-		closePopup()
-		playMotion(pageWrap, { GroupTransparency = 1 }, tweenInfo.fade)
-		playMotion(headWrap, { GroupTransparency = 1 }, tweenInfo.fade)
-		playMotion(sideWrap, { GroupTransparency = 1 }, tweenInfo.fade)
-		playMotion(windowScale, { Scale = 0.9 }, tweenInfo.open)
-		task.delay(0.26, function()
-			if token ~= openToken or not gui.Parent then
-				return
-			end
-			holder.Visible = false
-			shadow.Visible = false
-			windowScale.Scale = 1
-			launcher.Visible = true
-			launcher.GroupTransparency = 1
-			playMotion(launcher, { GroupTransparency = 0 }, tweenInfo.fade)
-		end)
-	end
-
-	local dragConn = trackConnection(UserInputService.InputChanged:Connect(function(input)
-		if not dragTarget or not dragStart or not dragOrigin then
-			return
-		end
-		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		local delta = input.Position - dragStart
-		if not dragMoved and delta.Magnitude < 8 then
-			return
-		end
-		dragMoved = true
-		placeTopLeft(dragTarget, dragOrigin.X + delta.X, dragOrigin.Y + delta.Y)
-	end))
-	local dragEndConn = trackConnection(UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		local target = dragTarget
-		local moved = dragMoved
-		dragTarget = nil
-		dragStart = nil
-		dragOrigin = nil
-		dragMoved = false
-		if not target or not target.Parent then
-			return
-		end
-		if moved then
-			clampObject(target)
-			if target == holder then
-				rememberSpot(holder, "menuX", "menuY")
-			else
-				STATE.dockCustom = true
-				rememberSpot(launcher, "dockX", "dockY")
-			end
-			return
-		end
-		if target == launcher then
-			setOpen(true)
-		end
-	end))
-
-	bindPress(launcherOpenButton)
-	onActivate(launcherOpenButton, function()
-		setOpen(true)
-	end)
-	bindPress(closeButton)
-	bindPress(fullButton)
-	fullButton.MouseEnter:Connect(function()
-		playMotion(fullButton, { TextColor3 = STATE.hubThemeDef().ink }, tweenInfo.hover)
-	end)
-	fullButton.MouseLeave:Connect(function()
-		playMotion(fullButton, { TextColor3 = STATE.hubThemeDef().muted }, tweenInfo.hover)
-	end)
-	onActivate(fullButton, function()
-		fullMode = not fullMode
-		fullButton.Text = fullMode and "▣" or "⛶"
-		fitScale()
-	end)
-	onActivate(closeButton, function()
-		if not STATE.dockCustom then
-			local spot = holder.AbsolutePosition
-			placeTopLeft(launcher, spot.X + 16, spot.Y + 16)
-		end
-		setOpen(false)
-	end)
-
-	local keyConn = trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or search:IsFocused() then
-			return
-		end
-		if input.KeyCode == Enum.KeyCode.LeftControl then
-			gui.Enabled = not gui.Enabled
-			return
-		end
-		if input.KeyCode.Name == STATE.toggleKey then
-			setOpen(not holder.Visible)
-		end
-	end))
-
-	do
-	local function applyPreset(values, name)
-		for key, value in pairs(values) do
-			STATE[key] = value
-			if syncToggle then syncToggle(key) end
-		end
-		if STATE.autoTrain ~= true then
-			task.spawn(stopTraining)
-		end
-		nextSellAt = 0
-		saveConfig()
-		STATE.status = name .. " preset active"
-		noteActivity(STATE.status)
-	end
-
-	local quickCard = card(homePage, "QUICK START", 5)
-	local quickNote = label(quickCard, "Choose a safe starting point. You can still change every option afterwards.", 12, muted, Enum.Font.Gotham, 34)
-	quickNote.LayoutOrder = 1
-	actionButton(quickCard, "Safe AFK — No Auto Sell", 2, true, function()
-		applyPreset({
-			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = false,
-			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
-			autoFence = true, equipBest = true, autoSell = false,
-			autoOffline = true, autoFree = true,
-		}, "Safe AFK")
-		quickNote.Text = "Safe AFK enabled · protected selling remains off"
-	end)
-	actionButton(quickCard, "Fast Progress — No Auto Sell", 3, false, function()
-		applyPreset({
-			autoThrow = true, perfectMeter = true, autoSkip = true, autoSuper = true,
-			autoTrain = false, autoTapBonus = true, autoFood = true, autoStand = true,
-			autoFence = true, equipBest = true, autoSell = false,
-			autoOffline = true, autoFree = true,
-		}, "Fast Progress")
-		quickNote.Text = "Fast Progress enabled · review Safe Auto Sell filters before turning selling on"
-	end)
-	actionButton(quickCard, "Stop Automation", 4, false, function()
-		applyPreset({
-			autoThrow = false, autoTrain = false, autoFood = false, autoStand = false,
-			autoFence = false, equipBest = false, autoSell = false,
-			autoOffline = false, autoFree = false,
-		}, "Stopped")
-		quickNote.Text = "All game automation stopped"
-	end)
-
-	local actionsCard = card(homePage, "MANUAL ACTIONS", 9)
-	local actionsNote = label(actionsCard, "Run these now instead of waiting for the next pass.", 12, muted, Enum.Font.Gotham, 16)
-	actionsNote.LayoutOrder = 1
-	local sellConfirmUntil = 0
-	actionButton(actionsCard, "Sell Matching Animals Now", 2, true, function()
-		local preview = STATE.sellPreview()
-		if not preview or preview.eligible <= 0 then
-			sellConfirmUntil = 0
-			actionsNote.Text = "Nothing matches your current Safe Auto Sell filters"
-			return
-		end
-		if os.clock() > sellConfirmUntil then
-			sellConfirmUntil = os.clock() + 6
-			local warning = STATE.sellRiskWarning()
-			actionsNote.Text = string.format(
-				"Preview: %d backpack animals will be sold. Click again within 6 seconds to confirm.%s",
-				preview.eligible,
-				warning and (" " .. warning) or ""
-			)
-			return
-		end
-		sellConfirmUntil = 0
-		task.spawn(function()
-			local sold = STATE.sellJunkNow(true)
-			actionsNote.Text = sold > 0 and ("Sold " .. sold .. " matching backpack animals") or tostring(STATE.sellStatus)
-		end)
-	end)
-	actionButton(actionsCard, "Equip Best Now", 3, false, function()
-		task.spawn(function()
-			actionsNote.Text = STATE.equipBestNow() and "Best animals equipped" or "Equip Best was rejected"
+		pcall(function()
+			fpsConnection:Disconnect()
 		end)
 	end)
 
-	actionButton(actionsCard, "Teleport To Throw Line", 4, false, function()
-		actionsNote.Text = STATE.teleportTo("Throw") and "Moved to throw line" or "Throw line unavailable"
-	end)
-	actionButton(actionsCard, "Teleport To Shop", 5, false, function()
-		actionsNote.Text = STATE.teleportTo("Shop") and "Moved to food shop" or "Shop unavailable"
-	end)
-	actionButton(actionsCard, "Teleport To Training", 6, false, function()
-		actionsNote.Text = STATE.teleportTo("Training") and "Moved to training" or "Training unavailable"
-	end)
-	actionButton(actionsCard, "Teleport To Sell", 7, false, function()
-		actionsNote.Text = STATE.teleportTo("Sell") and "Moved to sell shop" or "Sell shop unavailable"
-	end)
-	end
-	do
-		local discordInvite = "https://discord.gg/94pC3T6NZG"
-		local communityCard = card(pages.Settings, "COMMUNITY", 4)
-		local communityNote = label(communityCard, "Join the ZinoosHub Discord for updates, support and new games.", 13, muted, Enum.Font.Gotham, 36)
-		communityNote.LayoutOrder = 1
-		local communityResult = label(communityCard, "", 13, accent, Enum.Font.Gotham, 18)
-		communityResult.LayoutOrder = 3
-		actionButton(communityCard, "Copy Discord Invite", 2, true, function()
-			if typeof(setclipboard) == "function" and pcall(setclipboard, discordInvite) then
-				communityResult.Text = "Invite copied. Paste it in your browser."
-			else
-				communityResult.Text = discordInvite
-			end
+	if STATE.hideOnStart == true then
+		task.defer(function()
+			elevate()
+			pcall(Window.Close, Window)
 		end)
 	end
-
-	do
-	local compatibilityCard = card(pages.Settings, "DIAGNOSTICS", 6)
-	local capabilityLines = {
-		"Executor · connected",
-		"Config saving · " .. ((typeof(writefile) == "function" and typeof(readfile) == "function") and "available" or "unavailable"),
-		"Clipboard · " .. (typeof(setclipboard) == "function" and "available" or "unavailable"),
-		"Reconnect queue · " .. ((typeof(queue_on_teleport) == "function" or (syn and typeof(syn.queue_on_teleport) == "function")) and "available" or "unavailable"),
-	}
-	local compatibilityText = label(compatibilityCard, table.concat(capabilityLines, "\n"), 13, ink, Enum.Font.Gotham, 74)
-	compatibilityText.LayoutOrder = 1
-	end
-
-	do
-	local saveCard = card(pages.Settings, "CONFIG & RESET", 5)
-	local saveNote = label(saveCard, "Changes save automatically for this Roblox account. Save Again forces an immediate write.", 13, muted, Enum.Font.Gotham, 40)
-	saveNote.LayoutOrder = 1
-	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
-	saveResult.LayoutOrder = 4
-	actionButton(saveCard, "Save Again", 2, true, function()
-		saveConfig()
-		saveResult.Text = "Saved for " .. LocalPlayer.DisplayName
-		saveResult.TextColor3 = accent
-	end)
-	local resetConfirmUntil = 0
-	actionButton(saveCard, "Reset to Safe Defaults", 3, false, function()
-		if os.clock() > resetConfirmUntil then
-			resetConfirmUntil = os.clock() + 6
-			saveResult.Text = "Click Reset again within 6 seconds to confirm"
-			saveResult.TextColor3 = risky
-			return
-		end
-		resetConfirmUntil = 0
-		local safeValues = {
-			autoThrow = true, perfectMeter = true, autoSkip = true, autoTrain = false,
-			autoTapBonus = true, autoFood = true, autoStand = true, autoFence = false,
-			equipBest = true, autoSell = false, autoOffline = true, autoFree = true,
-			autoSuper = false, stopOnRarity = false, stopOnMutation = false,
-			trainToTarget = false, resumeThrowAfterTraining = true,
-			walkSpeed = false, antiAfk = true, infiniteJump = false, noclip = false,
-			instantPrompts = false, fly = false, noPausePopup = true, autoReconnect = false,
-			disable3d = false, fpsBoost = false, hidePets = true,
-			notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
-			espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
-		}
-		for key, value in pairs(safeValues) do
-			STATE[key] = value
-			if syncToggle then syncToggle(key) end
-		end
-		STATE.keepBest = 10
-		STATE.sellMinutes = 2
-		STATE.sellRarities = { "Common", "Uncommon", "Rare" }
-		STATE.protectedMutations = table.clone(MUTATION_OPTIONS)
-		STATE.stopTargetRarity = "Supreme"
-		STATE.stopTargetMutations = { "Rainbow" }
-		STATE.trainTargetPower = "10K"
-		STATE.cashReserve = "$0"
-		STATE.superThrowReserve = 0
-		STATE.notifyMinRarity = "All"
-		STATE.espRarities = table.clone(RARITY_OPTIONS)
-		STATE.espMaxDistance = "500"
-		task.spawn(stopTraining)
-		pcall(STATE.apply3d)
-		pcall(STATE.applyFpsBoost)
-		pcall(STATE.applyHidePets)
-		pcall(STATE.refreshEsp)
-		local hum = humanoid()
-		if hum then hum.WalkSpeed = 16 end
-		refreshDropdowns()
-		nextSellAt = 0
-		saveConfig()
-		saveResult.Text = "Safe defaults restored · Auto Sell is off"
-		saveResult.TextColor3 = accent
-	end)
-	end
-
-	windowScale.Scale = 0.9
-	sideWrap.GroupTransparency = 1
-	headWrap.GroupTransparency = 1
-	pageWrap.GroupTransparency = 1
-	holder.Visible = false
-	shadow.Visible = false
-	launcher.Visible = STATE.hideOnStart ~= true
-	dockHint.Text = "Open dashboard · " .. tostring(STATE.toggleKey)
 
 	STATE.hubWindow = {
 		Unload = function()
