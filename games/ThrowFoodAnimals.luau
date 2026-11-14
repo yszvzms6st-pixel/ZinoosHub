@@ -35,11 +35,45 @@ local function running()
 	return genv.ZinoosThrowFoodGen == token
 end
 
-local RARITY_OPTIONS = {
+-- Rarities and mutations come from the game's own config so new tiers (such
+-- as Sovereign, Champion and Lucid) appear without a hub update. The fixed
+-- lists remain as a fallback and keep every older option selectable.
+local function gameNameList(moduleName, fallback)
+	local names = {}
+	local ok = pcall(function()
+		local folder = ReplicatedStorage:WaitForChild("Config", 10)
+		local module = folder and folder:WaitForChild(moduleName, 10)
+		local config = module and require(module)
+		local entries = {}
+		for order, entry in ipairs(type(config) == "table" and type(config.List) == "table" and config.List or {}) do
+			if type(entry) == "table" and type(entry.Name) == "string" then
+				table.insert(entries, { name = entry.Name, order = tonumber(entry.Index) or order })
+			end
+		end
+		table.sort(entries, function(a, b)
+			return a.order < b.order
+		end)
+		for _, entry in ipairs(entries) do
+			table.insert(names, entry.name)
+		end
+	end)
+	elevate()
+	if not ok or #names == 0 then
+		return table.clone(fallback)
+	end
+	for _, name in ipairs(fallback) do
+		if not table.find(names, name) then
+			table.insert(names, name)
+		end
+	end
+	return names
+end
+
+local RARITY_OPTIONS = gameNameList("RarityConfig", {
 	"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic",
-	"Secret", "Divine", "Celestial", "Eternal", "Cosmic", "Supreme",
-}
-local MUTATION_OPTIONS = { "Gold", "Diamond", "Emerald", "Ruby", "Rainbow" }
+	"Secret", "Divine", "Celestial", "Eternal", "Cosmic", "Supreme", "Sovereign",
+})
+local MUTATION_OPTIONS = gameNameList("MutationsConfig", { "Gold", "Diamond", "Emerald", "Ruby", "Rainbow", "Champion", "Lucid" })
 local RARITY_RANK = {}
 for index, rarity in ipairs(RARITY_OPTIONS) do
 	RARITY_RANK[rarity] = index
@@ -75,7 +109,18 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.5.5",
+	version = "2.6.0",
+	trainOnBoost = true,
+	dreamHunt = true,
+	dreamClaim = true,
+	dreamBuy = false,
+	indexClaim = true,
+	autoTrail = true,
+	indexHunt = false,
+	aimStatus = "Maximum distance",
+	dreamStatus = "Checking Dreamland...",
+	indexStatus = "Checking index rewards...",
+	boostStatus = "No boosts active",
 	autoThrow = true,
 	perfectMeter = true,
 	autoSkip = true,
@@ -218,7 +263,18 @@ local FLAG_KEYS = {
 	EspOwnOnly = "espOwnOnly",
 	EspAllAnimals = "espAllAnimals",
 	HideOnStart = "hideOnStart",
+	TrainOnBoost = "trainOnBoost",
+	DreamHunt = "dreamHunt",
+	DreamClaim = "dreamClaim",
+	DreamBuy = "dreamBuy",
+	IndexClaim = "indexClaim",
+	AutoTrail = "autoTrail",
+	IndexHunt = "indexHunt",
 }
+
+-- Shared between the boost-training step and config saving: temporary
+-- boost training must never be written to disk as the user's own choice.
+local boostTraining = { active = false, resumeThrow = false, declined = false }
 
 local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
@@ -932,6 +988,11 @@ local function saveConfig()
 	for flag, key in pairs(FLAG_KEYS) do
 		payload[flag] = STATE[key] == true
 	end
+	if boostTraining.active then
+		-- Save the user's real choice, not the temporary boost switch.
+		payload.AutoTrain = false
+		payload.AutoThrow = boostTraining.resumeThrow == true
+	end
 	for flag, choice in pairs(CHOICES) do
 		payload[flag] = STATE[choice.key]
 	end
@@ -1042,6 +1103,22 @@ local Mutations = require(ReplicatedStorage.Shared.Mutations)
 elevate()
 local AreaUtil = require(ReplicatedStorage.Shared.AreaUtil)
 elevate()
+-- Newer game systems. Each is optional so a renamed module only disables its
+-- own feature instead of stopping the whole hub.
+local function optionalRequire(parent, name)
+	local module = parent and parent:FindFirstChild(name)
+	if not module then
+		return nil
+	end
+	local ok, value = pcall(require, module)
+	elevate()
+	return ok and type(value) == "table" and value or nil
+end
+local GameConfig = optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "GameConfig")
+local RarityConfig = optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "RarityConfig")
+local Dreamland = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "Dreamland")
+local DreamlandConfig = Dreamland and Dreamland.Config or optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "DreamlandConfig")
+local IndexRewards = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "IndexRewards")
 local controllers = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client"):WaitForChild("Controllers")
 local GameDataController = require(controllers.DataController)
 elevate()
@@ -1420,6 +1497,218 @@ local function leaveThrowLine(root, height)
 	end
 end
 
+-- Throw aim. The game's own distance slider (Player_SetThrowPower, 0 means
+-- maximum) decides which area the food lands in. The hub only moves it while
+-- Dream Hunt or Index Hunt wants a specific area, and puts it back to maximum
+-- afterwards. A slider the player set by hand is left alone.
+local aim = { applied = false }
+
+local function areaIndexOf(key)
+	local ok, count = pcall(AreaUtil.Count)
+	if not ok or type(count) ~= "number" then
+		return nil
+	end
+	for index = 1, count do
+		local config = AreasConfig.Get(index)
+		if type(config) == "table" and config.Key == key then
+			return index, config
+		end
+	end
+	return nil
+end
+
+local function areaSpan(index)
+	local launch = AreaUtil.GetLaunchPosition()
+	local area = AreaUtil.Get(index)
+	if not launch or type(area) ~= "table" or type(area.ZStart) ~= "number" or type(area.ZEnd) ~= "number" then
+		return nil
+	end
+	return launch.Z - area.ZStart, launch.Z - area.ZEnd
+end
+
+local function throwPowerRange()
+	local level = tonumber(getData("Level")) or 1
+	local maxPower = tonumber(LevelConfig.ThrowPowerForLevel(level)) or 0
+	local minPower = math.min(tonumber(LevelConfig.MinThrowPower) or 0, maxPower)
+	return minPower, maxPower
+end
+
+-- Returns the slider value that lands `depth` (0 = front, 1 = back) of the
+-- way into an area, 0 when maximum distance already lands there, or nil
+-- when the area cannot be reached at this level.
+local function aimPowerFor(areaKey, depth)
+	local index = areaIndexOf(areaKey)
+	if not index then
+		return nil
+	end
+	local startDistance, endDistance = areaSpan(index)
+	if not startDistance then
+		return nil
+	end
+	local bonus = GameConfig and type(GameConfig.Throw) == "table" and tonumber(GameConfig.Throw.MeterBonusStuds) or 0
+	local minPower, maxPower = throwPowerRange()
+	local wanted = math.floor(startDistance + (endDistance - startDistance) * depth - bonus + 0.5)
+	local power = wanted
+	if wanted >= maxPower then
+		power = maxPower
+	elseif wanted < minPower then
+		power = minPower
+	end
+	local ok, _, landed = pcall(AreaUtil.ComputeLanding, power + bonus, 0)
+	if not ok or landed ~= index then
+		return nil
+	end
+	return power >= maxPower and 0 or power
+end
+
+local function displayAreaName(key)
+	local _, config = areaIndexOf(key)
+	return config and config.Name or tostring(key)
+end
+
+local function dreamState()
+	if not Dreamland then
+		return nil
+	end
+	local ok, state = pcall(Dreamland.State)
+	return ok and type(state) == "table" and state or nil
+end
+
+local function dreamEligible()
+	if not Dreamland then
+		return false
+	end
+	local ok, eligible = pcall(Dreamland.IsEligible, LocalPlayer)
+	return ok and eligible == true
+end
+
+local function dreamCaught()
+	local data = getData("Dreamland")
+	return type(data) == "table" and type(data.Caught) == "table" and data.Caught or {}
+end
+
+local function dreamAim()
+	if STATE.dreamHunt ~= true or not DreamlandConfig or type(DreamlandConfig.Zones) ~= "table" then
+		return nil
+	end
+	local state = dreamState()
+	if not state or state.Active ~= true or not dreamEligible() then
+		return nil
+	end
+	local caught = dreamCaught()
+	local best = nil
+	for order, zone in ipairs(DreamlandConfig.Zones) do
+		if type(zone) == "table" and type(zone.Animals) == "table" then
+			local missing = 0
+			for _, name in ipairs(zone.Animals) do
+				if not caught[name] then
+					missing += 1
+				end
+			end
+			-- Deep throws can roll every animal in the habitat.
+			local power = aimPowerFor(zone.Area, 0.95)
+			if power and missing > 0 and (not best or missing > best.missing or (missing == best.missing and order > best.order)) then
+				best = { power = power, missing = missing, order = order, area = zone.Area }
+			end
+		end
+	end
+	if best then
+		return best.power, string.format("Dream hunt · %s (%d new to find)", displayAreaName(best.area), best.missing)
+	end
+	-- Every reachable dream animal is found: stay at maximum distance, which
+	-- still lands in the farthest habitat and keeps earning research tokens.
+	return 0, "Dream hunt · all reachable dream animals found"
+end
+
+local function indexAim()
+	if STATE.indexHunt ~= true or not IndexRewards then
+		return nil
+	end
+	local index = getData("Index")
+	local best = nil
+	local ok, collections = pcall(IndexRewards.Collections, "World")
+	if not ok or type(collections) ~= "table" then
+		return nil
+	end
+	for _, collection in ipairs(collections) do
+		if type(collection) == "table" and collection.Area then
+			local okProgress, found, total = pcall(IndexRewards.Progress, index, collection)
+			found, total = tonumber(found) or 0, tonumber(total) or 0
+			local missing = total - found
+			if okProgress and total > 0 and missing > 0 then
+				local power = aimPowerFor(collection.Area, 0.9)
+				if power and (not best or missing < best.missing or (missing == best.missing and found > best.found)) then
+					best = { power = power, missing = missing, found = found, total = total, area = collection.Area }
+				end
+			end
+		end
+	end
+	if best then
+		return best.power, string.format("Index hunt · %s %d/%d", displayAreaName(best.area), best.found, best.total)
+	end
+	return nil
+end
+
+function STATE.aimTarget()
+	local power, label = dreamAim()
+	if power then
+		return power, label
+	end
+	power, label = indexAim()
+	if power then
+		return power, label
+	end
+	return nil
+end
+
+local function setThrowPower(power)
+	if (tonumber(getData("ThrowPower")) or 0) == power then
+		return true
+	end
+	local result = invoke("Player_SetThrowPower", power)
+	if not result.Ok then
+		STATE.aimStatus = "Aim rejected: " .. tostring(result.Reason or "unknown")
+		return false
+	end
+	local deadline = os.clock() + 1.5
+	while running() and (tonumber(getData("ThrowPower")) or 0) ~= power and os.clock() < deadline do
+		task.wait(0.05)
+	end
+	return true
+end
+
+function STATE.restoreAim()
+	if aim.applied then
+		if setThrowPower(0) then
+			aim.applied = false
+			STATE.aimStatus = "Maximum distance"
+		end
+	end
+end
+hubCleanup(function()
+	pcall(STATE.restoreAim)
+end)
+
+function STATE.applyAim()
+	local ok, power, label = pcall(STATE.aimTarget)
+	elevate()
+	if ok and type(power) == "number" then
+		if power ~= 0 or aim.applied then
+			if setThrowPower(power) then
+				aim.applied = power ~= 0
+				STATE.aimStatus = label or "Aimed throw"
+			end
+		else
+			STATE.aimStatus = label or "Maximum distance"
+		end
+		return
+	end
+	STATE.restoreAim()
+	if not aim.applied then
+		STATE.aimStatus = "Maximum distance"
+	end
+end
+
 local lastObservedThrows = tonumber(getData("Throws")) or 0
 local nextThrowTrigger = 0
 local function shouldUseSuperThrow()
@@ -1479,6 +1768,10 @@ local function stepThrow()
 	if os.clock() < nextThrowTrigger then
 		return 0.25
 	end
+	-- Point this throw at a Dreamland habitat or an unfinished index area when
+	-- those options are on; otherwise keep (or restore) maximum distance.
+	pcall(STATE.applyAim)
+	elevate()
 	local throwToken = claimBusy("Throw")
 	if not throwToken then
 		return 0.5
@@ -1646,12 +1939,13 @@ end
 hubCleanup(stopTraining)
 
 local function stopTrainingAtTarget()
-	if STATE.autoTrain ~= true or STATE.trainToTarget ~= true then
+	if STATE.autoTrain ~= true or STATE.trainToTarget ~= true or boostTraining.active then
 		return false
 	end
 	local level = tonumber(getData("Level")) or 1
-	local trainedPower = tonumber(getData("ThrowPower")) or 0
-	local power = tonumber(LevelConfig.EffectiveThrowPower(level, trainedPower)) or 0
+	-- The saved ThrowPower value is the game's distance slider (0 = maximum),
+	-- which the throw aim may lower. Measure the full power the level gives.
+	local power = tonumber(LevelConfig.EffectiveThrowPower(level, 0)) or 0
 	local target = TRAIN_TARGET_VALUES[STATE.trainTargetPower] or math.huge
 	if power < target then
 		return false
@@ -1675,10 +1969,34 @@ local function stopTrainingAtTarget()
 end
 STATE.stopTrainingAtTarget = stopTrainingAtTarget
 
+local function atMaxLevel()
+	local maxLevel = tonumber(LevelConfig.MaxLevel)
+	return maxLevel ~= nil and (tonumber(getData("Level")) or 0) >= maxLevel
+end
+STATE.atMaxLevel = atMaxLevel
+
 local function stepTraining()
 	if STATE.autoTrain ~= true then
 		stopTraining()
-		STATE.trainingStatus = "Off"
+		STATE.trainingStatus = atMaxLevel() and "Max level reached - training gives nothing" or "Off"
+		return
+	end
+	if atMaxLevel() then
+		-- Training only adds XP; a max-level account gains nothing from it, so
+		-- go back to throwing instead of standing on the pull-up bar.
+		stopTraining()
+		elevate()
+		STATE.autoTrain = false
+		STATE.autoThrow = true
+		boostTraining.active = false
+		STATE.trainingStatus = "Max level reached - training gives nothing"
+		noteActivity("Max level reached; Auto Throw resumed")
+		notify("progress", "Max level reached", "Training gives no more power, so Auto Throw was turned back on")
+		if typeof(STATE.syncToggle) == "function" then
+			pcall(STATE.syncToggle, "autoTrain")
+			pcall(STATE.syncToggle, "autoThrow")
+		end
+		saveConfig()
 		return
 	end
 	if stopTrainingAtTarget() then
@@ -2063,6 +2381,316 @@ local function stepRewards()
 	end
 	if not attempted then
 		STATE.rewardStatus = (STATE.autoOffline == true or STATE.autoFree == true) and "No rewards ready" or "Off"
+	end
+end
+
+-- Events and boosts: admin abuse boosts, Dreamland research and index trails.
+local function clockText(seconds)
+	seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+	if seconds >= 3600 then
+		return string.format("%d:%02d:%02d", seconds // 3600, seconds % 3600 // 60, seconds % 60)
+	end
+	return string.format("%d:%02d", seconds // 60, seconds % 60)
+end
+
+-- Admin boosts live in workspace attributes such as AdminLuck/AdminLuckEnd.
+local function attributeBoost(name)
+	local value = tonumber(workspace:GetAttribute(name)) or 1
+	local ends = tonumber(workspace:GetAttribute(name .. "End")) or 0
+	local now = workspace:GetServerTimeNow()
+	if value > 1 and (ends <= 0 or ends > now) then
+		return value, ends > 0 and (ends - now) or nil
+	end
+	return 1, nil
+end
+
+-- Personal timed boosts (Mr. Hush's shop) are player attributes.
+local function personalBoost(kind)
+	local ends = tonumber(LocalPlayer:GetAttribute("Timed" .. kind .. "End")) or 0
+	local left = ends - workspace:GetServerTimeNow()
+	if left > 0 then
+		return 2, left
+	end
+	return 1, nil
+end
+
+local function trainingBoostActive()
+	return attributeBoost("AdminTraining") > 1 or personalBoost("Training") > 1
+end
+
+local function boostText()
+	local parts = {}
+	local function add(label, value, left)
+		if value > 1 then
+			parts[#parts + 1] = string.format("%s %sx%s", label, shortNumber(value), left and (" (" .. clockText(left) .. ")") or "")
+		end
+	end
+	add("Admin luck", attributeBoost("AdminLuck"))
+	add("Server luck", attributeBoost("ServerLuck"))
+	add("Admin money", attributeBoost("AdminMoney"))
+	add("Admin training", attributeBoost("AdminTraining"))
+	add("Cash boost", personalBoost("Cash"))
+	add("Training boost", personalBoost("Training"))
+	return #parts > 0 and table.concat(parts, " · ") or "No boosts active"
+end
+
+local function syncThrowTrainToggles()
+	if typeof(STATE.syncToggle) == "function" then
+		pcall(STATE.syncToggle, "autoTrain")
+		pcall(STATE.syncToggle, "autoThrow")
+	end
+end
+
+-- During a training boost, swap Auto Throw for Auto Train and swap back when
+-- the boost ends. Skipped at max level, where training gives nothing.
+local function stepBoostTraining()
+	local active = STATE.trainOnBoost == true and trainingBoostActive() and not atMaxLevel()
+	if not active then
+		boostTraining.declined = false
+	end
+	if boostTraining.active then
+		if active and STATE.autoTrain == true then
+			return
+		end
+		-- Either the boost ended or the user switched training off themselves.
+		local userStopped = active
+		boostTraining.active = false
+		if STATE.autoTrain == true then
+			STATE.autoTrain = false
+			stopTraining()
+		end
+		if userStopped then
+			boostTraining.declined = true
+		elseif boostTraining.resumeThrow then
+			STATE.autoThrow = true
+			notify("progress", "Training boost over", "Auto Throw resumed")
+		end
+		elevate()
+		syncThrowTrainToggles()
+		saveConfig()
+		return
+	end
+	if active and not boostTraining.declined and STATE.autoTrain ~= true and STATE.autoThrow == true then
+		boostTraining.active = true
+		boostTraining.resumeThrow = true
+		STATE.autoTrain = true
+		STATE.autoThrow = false
+		noteActivity("Training boost: training until it ends")
+		notify("progress", "Training boost active", "Training until the boost ends, then Auto Throw resumes")
+		elevate()
+		syncThrowTrainToggles()
+	end
+end
+
+local nextDreamAction = 0
+local lastDreamActive = nil
+local dreamNote = nil
+local function dreamInvoke(label, ...)
+	-- Mr. Hush's stand closes his window beyond 22 studs, so act beside it
+	-- when it exists in the world.
+	local stand = workspace:FindFirstChild("DreamlandStand")
+	if stand then
+		return invokeNear(label, stand, "Dreamland_Action", ...)
+	end
+	return invoke("Dreamland_Action", ...)
+end
+
+local function stepDreamland()
+	if not Dreamland or not DreamlandConfig then
+		STATE.dreamStatus = "Dreamland is not in this game version"
+		return
+	end
+	local state = dreamState() or {}
+	local eligible = dreamEligible()
+	local data = getData("Dreamland")
+	data = type(data) == "table" and data or {}
+	local okUnique, unique = pcall(Dreamland.UniqueCount, data.Caught)
+	unique = okUnique and tonumber(unique) or 0
+	local okAll, all = pcall(DreamlandConfig.AllAnimals)
+	local total = okAll and type(all) == "table" and #all or 24
+	local tokens = tonumber(data.Tokens) or 0
+	elevate()
+
+	local isActive = state.Active == true
+	if isActive ~= lastDreamActive then
+		if isActive and lastDreamActive ~= nil and eligible then
+			notify("progress", "Dreamland run started", STATE.dreamHunt == true
+				and "Dream Hunt is aiming at habitats with dream animals you still need"
+				or "Dream habitats are open for 5 minutes")
+		end
+		lastDreamActive = isActive
+	end
+
+	if eligible and state.Open == true and os.clock() >= nextDreamAction then
+		if STATE.dreamClaim == true then
+			local ok, list = pcall(Dreamland.ClaimableMilestones, data)
+			if ok and type(list) == "table" and #list > 0 then
+				nextDreamAction = os.clock() + 10
+				if data.Talked ~= true then
+					dreamInvoke("DreamTalk", "Talked")
+				end
+				for _, milestone in ipairs(list) do
+					local result = dreamInvoke("DreamClaim", "Claim", milestone)
+					elevate()
+					if result.Ok then
+						stats.rewards += 1
+						local info = type(DreamlandConfig.Milestones) == "table" and DreamlandConfig.Milestones[milestone]
+						dreamNote = "Claimed " .. tostring(info and info.Text or ("milestone " .. tostring(milestone)))
+						noteActivity(dreamNote)
+						notify("progress", "Research milestone claimed", tostring(info and info.Text or milestone))
+					else
+						dreamNote = "Milestone claim: " .. tostring(result.Reason or "rejected")
+						break
+					end
+				end
+			end
+		end
+		if STATE.dreamBuy == true and os.clock() >= nextDreamAction and type(DreamlandConfig.Shop) == "table" then
+			for _, item in ipairs(DreamlandConfig.Shop) do
+				local price = tonumber(item.Price) or math.huge
+				local useful = item.Kind == "Boost" and not (item.Boost == "Training" and atMaxLevel())
+				if useful and tokens >= price then
+					local okLeft, left = pcall(Dreamland.StockLeft, data, item)
+					if okLeft and (left == nil or left > 0) then
+						nextDreamAction = os.clock() + 10
+						local result = dreamInvoke("DreamShop", "Buy", item.Key)
+						elevate()
+						if result.Ok then
+							tokens -= price
+							dreamNote = "Bought " .. tostring(item.Name)
+							noteActivity(dreamNote)
+							notify("progress", "Research shop", "Bought " .. tostring(item.Name))
+						else
+							dreamNote = "Shop: " .. tostring(result.Reason or "rejected")
+							break
+						end
+					end
+				end
+			end
+		end
+	end
+
+	local now = workspace:GetServerTimeNow()
+	local timing
+	if state.Open ~= true then
+		timing = state.OpensAt and ("Opens in " .. clockText(state.OpensAt - now)) or "Closed"
+	elseif isActive then
+		timing = "Dream run LIVE · " .. clockText((tonumber(state.RunEnd) or now) - now) .. " left"
+	else
+		timing = "Next dream run in " .. clockText((tonumber(state.NextStart) or now) - now)
+	end
+	local lines = {
+		timing,
+		string.format("%d/%d dream animals found · %s research tokens", unique, total, shortNumber(tokens)),
+	}
+	if not eligible then
+		lines[#lines + 1] = "Not unlocked for you yet; the game opens it after you have played a while"
+	end
+	if dreamNote then
+		lines[#lines + 1] = dreamNote
+	end
+	STATE.dreamStatus = table.concat(lines, "\n")
+end
+
+local nextIndexAction = 0
+local indexNote = nil
+local function trailScore(trail)
+	local bonus = type(trail) == "table" and type(trail.Bonus) == "table" and trail.Bonus or {}
+	return (tonumber(bonus.Xp) or 0) + (tonumber(bonus.Cash) or 0)
+end
+
+local function stepIndexRewards()
+	if not IndexRewards then
+		STATE.indexStatus = "Index rewards are not in this game version"
+		return
+	end
+	if os.clock() >= nextIndexAction then
+		nextIndexAction = os.clock() + 15
+		if STATE.indexClaim == true then
+			local ok, claimable = pcall(IndexRewards.Claimable, readAll())
+			elevate()
+			for _, key in ipairs(ok and type(claimable) == "table" and claimable or {}) do
+				local result = invoke("IndexRewards_Claim", key)
+				if result.Ok then
+					stats.rewards += 1
+					local collection = IndexRewards.GetCollection(key)
+					local trail = collection and IndexRewards.TrailOf(collection)
+					indexNote = "Claimed " .. tostring(trail and trail.Name or key)
+					noteActivity(indexNote)
+					notify("progress", "Index reward claimed", tostring(trail and trail.Name or key))
+				else
+					indexNote = "Index claim: " .. tostring(result.Reason or "rejected")
+					break
+				end
+			end
+		end
+		if STATE.autoTrail == true then
+			local data = readAll()
+			local owned = type(data.Trails) == "table" and type(data.Trails.Owned) == "table" and data.Trails.Owned or {}
+			local bestKey, bestScore = nil, -1
+			for key, has in pairs(owned) do
+				local trail = has == true and IndexRewards.GetTrail(key)
+				local score = trail and trailScore(trail) or -1
+				if trail and (score > bestScore or (score == bestScore and tostring(key) < tostring(bestKey))) then
+					bestKey, bestScore = key, score
+				end
+			end
+			local okEquipped, equipped = pcall(IndexRewards.Equipped, data)
+			if bestKey and (not okEquipped or equipped ~= bestKey) then
+				local current = okEquipped and equipped and IndexRewards.GetTrail(equipped)
+				if not current or trailScore(current) < bestScore then
+					local result = invoke("IndexRewards_Equip", bestKey)
+					local trail = IndexRewards.GetTrail(bestKey)
+					indexNote = result.Ok and ("Equipped " .. tostring(trail and trail.Name or bestKey))
+						or ("Trail equip: " .. tostring(result.Reason or "rejected"))
+				end
+			end
+		end
+	end
+	local data = readAll()
+	local ownedCount = 0
+	if type(data.Trails) == "table" and type(data.Trails.Owned) == "table" then
+		for _, has in pairs(data.Trails.Owned) do
+			if has == true then
+				ownedCount += 1
+			end
+		end
+	end
+	local okEquipped, equipped = pcall(IndexRewards.Equipped, data)
+	local equippedTrail = okEquipped and equipped and IndexRewards.GetTrail(equipped)
+	local closest = nil
+	local okCollections, collections = pcall(IndexRewards.Collections)
+	for _, collection in ipairs(okCollections and type(collections) == "table" and collections or {}) do
+		local okProgress, found, total = pcall(IndexRewards.Progress, data.Index, collection)
+		found, total = tonumber(found) or 0, tonumber(total) or 0
+		local claimed = IndexRewards.IsClaimed(data, collection.Key)
+		if okProgress and total > 0 and found < total and not claimed then
+			if not closest or total - found < closest.total - closest.found then
+				closest = { name = IndexRewards.Name(collection), found = found, total = total }
+			end
+		end
+	end
+	elevate()
+	local lines = {
+		string.format("%d trails owned · wearing %s", ownedCount, equippedTrail and tostring(equippedTrail.Name) or "none"),
+		closest and string.format("Closest: %s %d/%d", tostring(closest.name), closest.found, closest.total) or "Every collection is complete",
+	}
+	if indexNote then
+		lines[#lines + 1] = indexNote
+	end
+	STATE.indexStatus = table.concat(lines, "\n")
+end
+
+local function stepEvents()
+	pcall(stepBoostTraining)
+	STATE.boostStatus = boostText()
+	pcall(stepDreamland)
+	pcall(stepIndexRewards)
+	elevate()
+	-- Put the distance slider back once the hub is no longer throwing, so
+	-- the HUD and the game's own throws use full power again.
+	if aim.applied and (STATE.autoThrow ~= true or STATE.autoTrain == true) and ClientState.Busy == nil then
+		pcall(STATE.restoreAim)
 	end
 end
 
@@ -2628,7 +3256,17 @@ local ESP_COLORS = {
 	Eternal = Color3.fromRGB(255, 105, 225),
 	Cosmic = Color3.fromRGB(125, 105, 255),
 	Supreme = Color3.fromRGB(255, 80, 80),
+	Sovereign = Color3.fromRGB(246, 190, 58),
 }
+-- Any rarity added after this list uses the game's own rarity colour.
+for _, rarity in ipairs(RARITY_OPTIONS) do
+	if not ESP_COLORS[rarity] and RarityConfig and type(RarityConfig.ByName) == "table" then
+		local entry = RarityConfig.ByName[rarity]
+		if type(entry) == "table" and typeof(entry.Color) == "Color3" then
+			ESP_COLORS[rarity] = entry.Color
+		end
+	end
+end
 local espFolder = Instance.new("Folder")
 espFolder.Name = "ZinoosThrowFoodESP"
 elevate()
@@ -4480,6 +5118,39 @@ local function installHub()
 	end
 
 	do
+	local boostCard = card(pages.Farming, "BOOSTS & AIMING", 4)
+	makeSwitch(boostCard, "Train During Training Boosts", "trainOnBoost", "When an admin or shop training boost is on, trains until it ends, then Auto Throw resumes. Skipped at max level")
+	makeSwitch(boostCard, "Dream Hunt", "dreamHunt", "During a Dreamland run, aims each throw deep into the dream habitat with the most dream animals you still need")
+	makeSwitch(boostCard, "Index Hunt", "indexHunt", "Outside Dreamland runs, aims at the unfinished area collection closest to done. Catches are weaker while this is on")
+	STATE.uiStatusLabels.boosts = label(boostCard, "Boosts · " .. tostring(STATE.boostStatus), 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.boosts.LayoutOrder = 90
+	STATE.uiStatusLabels.boosts.TextWrapped = true
+	STATE.uiStatusLabels.boosts.AutomaticSize = Enum.AutomaticSize.Y
+	STATE.uiStatusLabels.aim = label(boostCard, "Aim · " .. tostring(STATE.aimStatus), 11, muted, Enum.Font.Gotham, 18)
+	STATE.uiStatusLabels.aim.LayoutOrder = 91
+	end
+
+	do
+	local dreamCard = card(pages.Progress, "DREAMLAND", 3)
+	makeSwitch(dreamCard, "Claim Research Milestones", "dreamClaim", "Claims Mr. Hush's rewards (Super Lucky Throws, potions, cash boost, Dream Dragon) as soon as you unlock them")
+	makeSwitch(dreamCard, "Spend Tokens on Boosts", "dreamBuy", "Buys the shop's 2x Cash and 2x Training boosts with research tokens (daily limit). Potions are never bought")
+	STATE.uiStatusLabels.dream = label(dreamCard, tostring(STATE.dreamStatus), 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.dream.LayoutOrder = 90
+	STATE.uiStatusLabels.dream.TextWrapped = true
+	STATE.uiStatusLabels.dream.AutomaticSize = Enum.AutomaticSize.Y
+	end
+
+	do
+	local indexCard = card(pages.Progress, "INDEX TRAILS", 4)
+	makeSwitch(indexCard, "Claim Index Rewards", "indexClaim", "Claims the trail reward each time you complete an area's animal collection")
+	makeSwitch(indexCard, "Wear Best Trail", "autoTrail", "Equips the owned trail with the biggest XP and cash bonus")
+	STATE.uiStatusLabels.index = label(indexCard, tostring(STATE.indexStatus), 12, accent, Enum.Font.GothamMedium, 18)
+	STATE.uiStatusLabels.index.LayoutOrder = 90
+	STATE.uiStatusLabels.index.TextWrapped = true
+	STATE.uiStatusLabels.index.AutomaticSize = Enum.AutomaticSize.Y
+	end
+
+	do
 	local animalCard = card(pages.Animals, "ANIMALS", 1)
 	makeSwitch(animalCard, "Keep Best Animals Equipped", "equipBest", "Keeps the strongest available animals earning money on your plot")
 	makeSwitch(animalCard, "Hide Animal Models (FPS)", "hidePets", "Hides placed and carried animals locally but keeps catch reveals visible; nothing is unequipped or sold")
@@ -4815,6 +5486,8 @@ local function installHub()
 			"Upgrades · " .. tostring(STATE.upgradeStatus),
 			"Selling · " .. tostring(STATE.sellStatus),
 			"Rewards · " .. tostring(STATE.rewardStatus),
+			"Boosts · " .. tostring(STATE.boostStatus),
+			"Aim · " .. tostring(STATE.aimStatus),
 			string.format("Session · %d throws, %d catches, %d training starts, %d bonuses, %d upgrades, %d sold", stats.throws, stats.catches, stats.trained, stats.bonuses, stats.foods + stats.stands + stats.fences, stats.sold),
 		}
 		if STATE.antiAfk == true then
@@ -4835,6 +5508,10 @@ local function installHub()
 		elevate()
 		STATE.uiStatusLabels.upgrade.Text = string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(foodLevel), tostring(standLevel), tostring(fenceLevel))
 		STATE.uiStatusLabels.reward.Text = "Status · " .. publicStatus(STATE.rewardStatus)
+		STATE.uiStatusLabels.boosts.Text = "Boosts · " .. tostring(STATE.boostStatus)
+		STATE.uiStatusLabels.aim.Text = "Aim · " .. tostring(STATE.aimStatus)
+		STATE.uiStatusLabels.dream.Text = tostring(STATE.dreamStatus)
+		STATE.uiStatusLabels.index.Text = tostring(STATE.indexStatus)
 		local preview = STATE.sellPreview()
 		elevate()
 		if preview then
@@ -5726,7 +6403,12 @@ end)
 
 -- Training, upgrades, team management and rewards.
 task.spawn(function()
+	local nextEvents = 0
 	while running() do
+		if os.clock() >= nextEvents then
+			nextEvents = os.clock() + 1
+			pcall(stepEvents)
+		end
 		pcall(stepTraining)
 		pcall(stepUpgrades)
 		pcall(stepRewards)
