@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "2.6.0",
+	version = "2.6.1",
 	trainOnBoost = true,
 	dreamHunt = true,
 	dreamClaim = true,
@@ -2539,7 +2539,12 @@ local function stepDreamland()
 						noteActivity(dreamNote)
 						notify("progress", "Research milestone claimed", tostring(info and info.Text or milestone))
 					else
-						dreamNote = "Milestone claim: " .. tostring(result.Reason or "rejected")
+						-- The server can grant a milestone before our copy of the
+						-- save shows it; that is not a problem worth reporting.
+						local reason = tostring(result.Reason or "rejected")
+						if reason ~= "NothingToClaim" and reason ~= "AlreadyClaimed" and reason ~= "Claimed" then
+							dreamNote = "Milestone claim: " .. reason
+						end
 						break
 					end
 				end
