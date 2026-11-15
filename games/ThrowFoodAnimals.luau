@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.3.0",
+	version = "3.4.0",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -132,6 +132,10 @@ local STATE = {
 	perfectMeter = true,
 	autoSkip = true,
 	autoTrain = false,
+	cycleTrain = false,
+	cycleTrainMinutes = 5,
+	cycleThrowMinutes = 5,
+	cycleStatus = "Off",
 	autoTapBonus = true,
 	autoFood = true,
 	autoStand = true,
@@ -239,6 +243,7 @@ local FLAG_KEYS = {
 	PerfectMeter = "perfectMeter",
 	AutoSkip = "autoSkip",
 	AutoTrain = "autoTrain",
+	CycleTrain = "cycleTrain",
 	AutoTapBonus = "autoTapBonus",
 	AutoFood = "autoFood",
 	AutoStand = "autoStand",
@@ -316,6 +321,8 @@ local LIST_OPTIONS = {
 }
 local NUMBERS = {
 	FlySpeed = { "flySpeed", 10, 300 },
+	CycleTrainMinutes = { "cycleTrainMinutes", 1, 60 },
+	CycleThrowMinutes = { "cycleThrowMinutes", 1, 60 },
 	SellMinutes = { "sellMinutes", 1, 30 },
 	KeepBest = { "keepBest", 0, 50 },
 	SuperThrowReserve = { "superThrowReserve", 0, 9999 },
@@ -3062,6 +3069,69 @@ local function stepBoostTraining()
 	end
 end
 
+-- Train & Throw cycle (mainly for new players): trains for a set time,
+-- then throws for a set time, on repeat. Training is paused for training
+-- boosts (which train anyway) and skipped at max level.
+do
+	local cycle = { phase = nil, endsAt = 0 }
+	local function setPhase(phase)
+		cycle.phase = phase
+		local minutes = phase == "train" and STATE.cycleTrainMinutes or STATE.cycleThrowMinutes
+		cycle.endsAt = os.clock() + math.max(1, tonumber(minutes) or 5) * 60
+		if phase == "train" then
+			STATE.autoThrow = false
+			STATE.autoTrain = true
+		else
+			STATE.autoTrain = false
+			stopTraining()
+			STATE.autoThrow = true
+		end
+		elevate()
+		syncThrowTrainToggles()
+		noteActivity(phase == "train" and "Cycle: training" or "Cycle: throwing")
+	end
+	function STATE.stepCycle()
+		if STATE.cycleTrain ~= true then
+			if cycle.phase == "train" then
+				-- Switched off mid-training: go back to throwing.
+				STATE.autoTrain = false
+				stopTraining()
+				STATE.autoThrow = true
+				elevate()
+				syncThrowTrainToggles()
+			end
+			cycle.phase = nil
+			STATE.cycleStatus = "Off"
+			return
+		end
+		if atMaxLevel() then
+			if cycle.phase ~= "throw" or STATE.autoThrow ~= true then
+				setPhase("throw")
+			end
+			cycle.endsAt = math.huge
+			STATE.cycleStatus = "Max level: training gives nothing, so it only throws"
+			return
+		end
+		if boostTraining.active then
+			STATE.cycleStatus = "Paused while a training boost lasts"
+			return
+		end
+		if not cycle.phase then
+			setPhase("train")
+		elseif os.clock() >= cycle.endsAt then
+			setPhase(cycle.phase == "train" and "throw" or "train")
+		end
+		STATE.cycleStatus = string.format("%s · %s next in %s",
+			cycle.phase == "train" and "Training" or "Throwing",
+			cycle.phase == "train" and "throwing" or "training",
+			clockText(cycle.endsAt - os.clock()))
+	end
+	-- A new length applies from the next switch; restart so it shows now.
+	function STATE.resetCycle()
+		cycle.phase = nil
+	end
+end
+
 local nextDreamAction = 0
 local lastDreamActive = nil
 local dreamNote = nil
@@ -3592,6 +3662,7 @@ end
 
 local function stepEvents()
 	pcall(stepBoostTraining)
+	pcall(STATE.stepCycle)
 	STATE.boostStatus = boostText()
 	pcall(stepDreamland)
 	pcall(stepIndexRewards)
@@ -5163,6 +5234,26 @@ local function installHub()
 		aimInfo = info(boostBox, "Aim", tostring(STATE.aimStatus))
 
 		local trainBox = section(farmTab, "Training", "dumbbell", false)
+		toggle(trainBox, "Train & Throw Cycle", "cycleTrain", "Trains, then throws, on repeat. Great for new players. Skipped at max level")
+		do
+			local lengths = { "1 minute", "2 minutes", "3 minutes", "5 minutes", "10 minutes", "15 minutes", "20 minutes", "30 minutes" }
+			local function label(minutes)
+				minutes = tonumber(minutes) or 5
+				return tostring(minutes) .. (minutes == 1 and " minute" or " minutes")
+			end
+			choice(trainBox, "Train For", "How long each training turn lasts", lengths, function()
+				return label(STATE.cycleTrainMinutes)
+			end, function(option)
+				STATE.cycleTrainMinutes = tonumber(option:match("%d+")) or STATE.cycleTrainMinutes
+				STATE.resetCycle()
+			end)
+			choice(trainBox, "Throw For", "How long each throwing turn lasts", lengths, function()
+				return label(STATE.cycleThrowMinutes)
+			end, function(option)
+				STATE.cycleThrowMinutes = tonumber(option:match("%d+")) or STATE.cycleThrowMinutes
+				STATE.resetCycle()
+			end)
+		end
 		toggle(trainBox, "Auto Train Throw Power", "autoTrain", "Pauses Auto Throw while training")
 		toggle(trainBox, "Claim Training Bonuses", "autoTapBonus")
 		toggle(trainBox, "Stop at Target Power", "trainToTarget")
@@ -5458,7 +5549,7 @@ local function installHub()
 					disable3d = false, fpsBoost = false, hidePets = true,
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
 					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
-					trainOnBoost = true, dreamBuy = false, dreamPotionBuy = false, dreamInfuse = false, autoTrail = true,
+					trainOnBoost = true, dreamBuy = false, dreamPotionBuy = false, dreamInfuse = false, autoTrail = true, cycleTrain = false,
 					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = false,
 				}
 				STATE.collectTarget = "Auto"
@@ -5632,7 +5723,7 @@ local function installHub()
 		setInfo(activityInfo, table.concat(lines, "\n"))
 		setInfo(throwInfo, publicStatus(STATE.throwStatus))
 		setInfo(superInfo, publicStatus(STATE.superThrowStatus))
-		setInfo(trainInfo, publicStatus(STATE.trainingStatus))
+		setInfo(trainInfo, publicStatus(STATE.trainingStatus) .. (STATE.cycleTrain == true and ("\nCycle: " .. tostring(STATE.cycleStatus)) or ""))
 		setInfo(boostInfo, tostring(STATE.boostStatus))
 		setInfo(aimInfo, tostring(STATE.aimStatus))
 		setInfo(upgradeInfo, string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(food), tostring(stand), tostring(fence)))
