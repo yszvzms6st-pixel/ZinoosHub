@@ -118,6 +118,7 @@ local STATE = {
 	indexHunt = false,
 	collectClaim = true,
 	collectStop = true,
+	collectSuper = true,
 	collectTarget = "Auto",
 	collectStatus = "Auto Collect is off",
 	aimStatus = "Maximum distance",
@@ -274,6 +275,7 @@ local FLAG_KEYS = {
 	IndexHunt = "indexHunt",
 	CollectClaim = "collectClaim",
 	CollectStop = "collectStop",
+	CollectSuper = "collectSuper",
 }
 
 -- Shared between the boost-training step and config saving: temporary
@@ -1667,7 +1669,21 @@ function STATE.collectionRows()
 				found, total = tonumber(found) or 0, tonumber(total) or 0
 				if okProgress and total > 0 then
 					local okClaimed, claimed = pcall(IndexRewards.IsClaimed, data, collection.Key)
+					-- The zone's animals are listed from most common to rarest, and
+					-- the zone's front band rolls the common ones, its back band the
+					-- rare ones. Remember where the first missing animal sits (0..1).
+					local okAnimals, animals = pcall(IndexRewards.Animals, collection)
+					local firstMissing = nil
+					if okAnimals and type(animals) == "table" and #animals > 0 then
+						for position, name in ipairs(animals) do
+							if not index[name] then
+								firstMissing = (position - 1) / #animals
+								break
+							end
+						end
+					end
 					table.insert(rows.world, {
+						firstMissing = firstMissing,
 						id = tostring(collection.Key),
 						area = collection.Area,
 						name = displayAreaName(collection.Area),
@@ -1713,17 +1729,33 @@ end
 -- Where Auto Collect wants the next throw to land. Returns the slider value
 -- (0 = maximum distance), a label, and the row id it is working on.
 function STATE.aimTarget()
+	STATE.collectWantsSuper = false
 	if STATE.indexHunt ~= true then
 		return nil
 	end
 	local rows = STATE.collectionRows()
 	local state = dreamState()
 	local dreamLive = state ~= nil and state.Active == true and dreamEligible()
+	-- A zone has three bands: the front rolls its common animals, the back its
+	-- rarest. Aim at the band of the first animal still missing. Lucky
+	-- (Super) Throws only pay off in the back band, where the rare ones are.
+	STATE.collectWantsSuper = false
 	local function aimAt(row)
-		-- Deep throws can roll every animal in a dream habitat.
-		local power = aimPowerFor(row.area, row.dream and 0.95 or 0.9)
+		local depth, band = 0.95, nil
+		if not row.dream then
+			local at = tonumber(row.firstMissing) or 0.9
+			if at < 0.45 then
+				depth, band = 0.17, "front"
+			elseif at < 0.75 then
+				depth, band = 0.5, "middle"
+			else
+				depth, band = 0.85, "back"
+			end
+		end
+		local power = aimPowerFor(row.area, depth)
 		if power then
-			return power, string.format("Collecting %s%s · %d/%d", row.dream and "Dreamland " or "", row.name, row.found, row.total), row.id
+			STATE.collectWantsSuper = band == "back"
+			return power, string.format("Collecting %s%s%s · %d/%d", row.dream and "Dreamland " or "", row.name, band and (" (" .. band .. ")") or "", row.found, row.total), row.id
 		end
 		return nil
 	end
@@ -1764,12 +1796,18 @@ function STATE.aimTarget()
 			end
 		end
 	end
-	-- World: the zone closest to finishing, so rewards unlock sooner.
+	-- World: easiest missing animal first (the one sitting furthest toward the
+	-- common end of its zone), so every throw has the best chance of being new.
+	-- Zones where only the rarest are left come last.
 	local best = nil
 	for _, row in ipairs(rows.world) do
 		local missing = row.total - row.found
-		if missing > 0 and row.reachable and (not best or missing < best.total - best.found or (missing == best.total - best.found and row.found > best.found)) then
-			best = row
+		local at = tonumber(row.firstMissing) or 1
+		if missing > 0 and row.reachable then
+			local bestAt = best and (tonumber(best.firstMissing) or 1)
+			if not best or at < bestAt - 0.001 or (math.abs(at - bestAt) <= 0.001 and missing > best.total - best.found) then
+				best = row
+			end
 		end
 	end
 	if best then
@@ -1844,7 +1882,17 @@ end
 local lastObservedThrows = tonumber(getData("Throws")) or 0
 local nextThrowTrigger = 0
 local function shouldUseSuperThrow()
-	if STATE.autoSuper ~= true then
+	-- While Auto Collect is aiming, Lucky Throws follow the Collection page:
+	-- spent only on throws into a zone's rare back band.
+	if STATE.indexHunt == true and STATE.collectAimId ~= nil then
+		if STATE.collectSuper ~= true then
+			STATE.superThrowStatus = "Off while collecting"
+			return false
+		elseif STATE.collectWantsSuper ~= true then
+			STATE.superThrowStatus = "Saved for rare collection animals"
+			return false
+		end
+	elseif STATE.autoSuper ~= true then
 		STATE.superThrowStatus = "Off"
 		return false
 	end
@@ -4541,6 +4589,7 @@ local function installHub()
 			STATE.collectTarget = at and targetIds[at] or "Auto"
 			task.defer(STATE.stepCollection)
 		end)
+		toggle(box, "Use Lucky Throws on Rare Ones", "collectSuper", "Spends Super Lucky Throws only when aiming at a zone's rarest animals. Keeps your reserve")
 		toggle(box, "Auto Claim Rewards", "collectClaim", "Zone trails and Dreamland research milestones")
 		toggle(box, "Stop When Complete", "collectStop", "Turns Auto Collect off once it's finished")
 		collectInfo = info(box, "Progress", tostring(STATE.collectStatus))
@@ -4785,7 +4834,7 @@ local function installHub()
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
 					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
 					trainOnBoost = true, dreamBuy = false, autoTrail = true,
-					indexHunt = false, collectClaim = true, collectStop = true,
+					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = true,
 				}
 				STATE.collectTarget = "Auto"
 				for key, value in pairs(safeValues) do
