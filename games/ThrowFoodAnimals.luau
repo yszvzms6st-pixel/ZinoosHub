@@ -109,10 +109,12 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.2.3",
+	version = "3.3.0",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
+	dreamPotionBuy = false,
+	dreamInfuse = false,
 	autoTrail = true,
 	-- Collection page: one Auto Collect switch for the world index and the
 	-- Dreamland collection. "indexHunt" keeps its old save key.
@@ -272,6 +274,8 @@ local FLAG_KEYS = {
 	HideOnStart = "hideOnStart",
 	TrainOnBoost = "trainOnBoost",
 	DreamBuy = "dreamBuy",
+	DreamPotionBuy = "dreamPotionBuy",
+	DreamInfuse = "dreamInfuse",
 	AutoTrail = "autoTrail",
 	IndexHunt = "indexHunt",
 	CollectClaim = "collectClaim",
@@ -3149,6 +3153,65 @@ local function stepDreamland()
 				end
 			end
 		end
+		-- Dream Potions: one per step, with whatever tokens the boosts left.
+		if STATE.dreamPotionBuy == true and os.clock() >= nextDreamAction and type(DreamlandConfig.Shop) == "table" then
+			local potion = nil
+			for _, item in ipairs(DreamlandConfig.Shop) do
+				if item.Kind == "Potion" then
+					potion = item
+				end
+			end
+			local price = potion and tonumber(potion.Price) or math.huge
+			if potion and tokens >= price then
+				nextDreamAction = os.clock() + 3
+				local result = dreamInvoke("DreamShop", "Buy", potion.Key)
+				elevate()
+				if result.Ok then
+					tokens -= price
+					dreamNote = "Bought a " .. tostring(potion.Name)
+					noteActivity(dreamNote)
+				else
+					dreamNote = "Potion shop: " .. tostring(result.Reason or "rejected")
+					nextDreamAction = os.clock() + 30
+				end
+			end
+		end
+		-- Infusion: only with a full set of potions (100% success), on the
+		-- strongest placed animal that is not Dream yet.
+		local potions = tonumber(data.Potions) or 0
+		local need = DreamlandConfig.Infusion and tonumber(DreamlandConfig.Infusion.MaxPotions) or 4
+		if STATE.dreamInfuse == true and os.clock() >= nextDreamAction and potions >= need then
+			local bestId, bestEntry, bestPlaced, bestIncome = nil, nil, false, -1
+			local animals = getData("Animals")
+			for id, entry in pairs(type(animals) == "table" and animals or {}) do
+				if type(entry) == "table" and entry.ModelName and entry.Dream ~= true and entry.OfBest == nil then
+					-- Placed animals earn, so they always come first.
+					local placed = entry.Placed == true
+					local income = animalIncome(entry)
+					if (placed and not bestPlaced) or (placed == bestPlaced and income > bestIncome) then
+						bestId, bestEntry, bestPlaced, bestIncome = id, entry, placed, income
+					end
+				end
+			end
+			elevate()
+			if bestId then
+				nextDreamAction = os.clock() + 8
+				local name = describeCatch(bestEntry)
+				local result = dreamInvoke("DreamInfuse", "Infuse", bestId, need)
+				elevate()
+				if result.Ok and result.Success ~= false then
+					stats.rewards += 1
+					dreamNote = "Infused " .. tostring(name) .. " · Dream x1.2 income"
+					noteActivity(dreamNote)
+					notify("progress", "Infusion successful", tostring(name) .. " is now Dream (x1.2 income)")
+				elseif result.Ok then
+					dreamNote = "Infusion failed on " .. tostring(name)
+				else
+					dreamNote = "Infusion: " .. tostring(result.Reason or "rejected")
+					nextDreamAction = os.clock() + 30
+				end
+			end
+		end
 	end
 
 	local now = workspace:GetServerTimeNow()
@@ -3164,7 +3227,7 @@ local function stepDreamland()
 	STATE.dreamLive = isActive and eligible
 	local lines = {
 		timing,
-		string.format("%d/%d dream animals found · %s research tokens", unique, total, shortNumber(tokens)),
+		string.format("%d/%d dream animals found · %s research tokens · %d Dream Potions", unique, total, shortNumber(tokens), tonumber(data.Potions) or 0),
 	}
 	if not eligible then
 		lines[#lines + 1] = "Not unlocked for you yet; the game opens it after you have played a while"
@@ -5244,7 +5307,9 @@ local function installHub()
 		upgradeInfo = info(upgradeBox, "Status", tostring(STATE.upgradeStatus))
 
 		local dreamBox = section(progressTab, "Dreamland Research", "moon")
-		toggle(dreamBox, "Spend Tokens on Boosts", "dreamBuy", "2x Cash and 2x Training boosts. Never potions")
+		toggle(dreamBox, "Spend Tokens on Boosts", "dreamBuy", "2x Cash and 2x Training boosts")
+		toggle(dreamBox, "Buy Dream Potions", "dreamPotionBuy", "Spends research tokens (350 each) after any boosts")
+		toggle(dreamBox, "Auto Infuse Best Animals", "dreamInfuse", "4 Dream Potions per animal = 100% Dream mutation (x1.2 income). Strongest placed animal first")
 		dreamInfo = info(dreamBox, "Dreamland", tostring(STATE.dreamStatus))
 
 		local indexBox = section(progressTab, "Index Trails", "book-open")
@@ -5393,7 +5458,7 @@ local function installHub()
 					disable3d = false, fpsBoost = false, hidePets = true,
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
 					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
-					trainOnBoost = true, dreamBuy = false, autoTrail = true,
+					trainOnBoost = true, dreamBuy = false, dreamPotionBuy = false, dreamInfuse = false, autoTrail = true,
 					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = false,
 				}
 				STATE.collectTarget = "Auto"
