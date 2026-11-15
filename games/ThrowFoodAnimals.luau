@@ -3099,10 +3099,11 @@ function STATE.buildCollectList(paragraph, title)
 				if entry then
 					local complete = item.found >= item.total
 					local targeted = aiming == item.id
-					local key = string.format("%d/%d/%s/%s/%s/%s", item.found, item.total, tostring(complete), tostring(targeted), tostring(item.reachable), tostring(item.claimed))
+					local waiting = targeted and item.dream and STATE.dreamLive ~= true
+					local key = string.format("%d/%d/%s/%s/%s/%s/%s", item.found, item.total, tostring(complete), tostring(targeted), tostring(item.reachable), tostring(item.claimed), tostring(waiting))
 					if entry.last ~= key then
 						entry.last = key
-						entry.name.Text = item.name .. (targeted and "  ·  collecting" or (not item.reachable and "  ·  out of reach" or ""))
+						entry.name.Text = item.name .. (waiting and "  ·  waiting for run" or (targeted and "  ·  collecting" or (not item.reachable and "  ·  out of reach" or "")))
 						entry.name.TextColor3 = targeted and accent or ink
 						entry.name.TextTransparency = (item.reachable or complete) and 0 or 0.5
 						entry.count.Text = complete and ((item.claimed == false and not item.dream) and "Reward ready" or "Done") or string.format("%d / %d", item.found, item.total)
