@@ -109,7 +109,8 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.1.1",
+	version = "3.1.2",
+	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
 	autoTrail = true,
@@ -1225,14 +1226,39 @@ hubCleanup(function()
 	end
 end)
 
-local function readAll()
-	local ok, value = pcall(GameDataController.GetData, GameDataController)
-	return ok and type(value) == "table" and value or {}
+-- The game's Get/GetData hand back a full copy every call. With thousands
+-- of animals that is ~4-5 ms each, and the hub reads every second. So the
+-- animal list is kept from the game's own change feed (one copy per change),
+-- and readAll only fetches the keys a caller actually reads.
+do
+	local ok, stop = pcall(GameDataController.ObserveTable, GameDataController, "Animals", function(value)
+		if type(value) == "table" then
+			STATE.animalsCache = value
+		end
+	end)
+	if ok and type(stop) == "function" then
+		hubCleanup(stop)
+	end
 end
 
 local function getData(key)
+	if key == "Animals" and type(STATE.animalsCache) == "table" then
+		return STATE.animalsCache
+	end
 	local ok, value = pcall(GameDataController.Get, GameDataController, key)
 	return ok and value or nil
+end
+
+local function readAll()
+	return setmetatable({}, {
+		__index = function(self, key)
+			local value = getData(key)
+			if value ~= nil then
+				rawset(self, key, value)
+			end
+			return value
+		end,
+	})
 end
 
 local DataController = {}
@@ -2506,9 +2532,37 @@ local function buildSellPlan()
 	return ranked, keep, summary
 end
 
-function STATE.sellPreview()
+-- Ranking every animal takes ~15 ms with a few thousand of them, and the
+-- menu asks for this every second. Reuse the last answer until the animal
+-- count or the sell filters change (or 30 seconds pass).
+do
+local sellPreviewCache = { key = nil, at = 0, summary = nil }
+function STATE.sellPreview(fresh)
+	local animals = getData("Animals")
+	local count, placed = 0, 0
+	if type(animals) == "table" then
+		for _, entry in pairs(animals) do
+			count += 1
+			if type(entry) == "table" and entry.Placed then
+				placed += 1
+			end
+		end
+	end
+	local key = table.concat({
+		count, placed, tostring(STATE.keepBest),
+		table.concat(STATE.sellRarities or {}, ","),
+		table.concat(STATE.protectedMutations or {}, ","),
+	}, "|")
+	local now = os.clock()
+	if fresh ~= true and sellPreviewCache.summary and sellPreviewCache.key == key and now - sellPreviewCache.at < 30 then
+		return sellPreviewCache.summary
+	end
 	local _, _, summary = buildSellPlan()
+	sellPreviewCache.key = key
+	sellPreviewCache.at = now
+	sellPreviewCache.summary = summary
 	return summary
+end
 end
 
 function STATE.sellRiskWarning()
@@ -4687,7 +4741,7 @@ local function installHub()
 			STATE.sellMinutes = tonumber(option:match("%d+")) or STATE.sellMinutes
 		end)
 		button(sellBox, "Sell Matching Animals Now", "Shows what will be sold and asks first", "trash-2", function()
-			local preview = STATE.sellPreview()
+			local preview = STATE.sellPreview(true)
 			if not preview or preview.eligible <= 0 then
 				notify("sale", "Nothing to sell", "Nothing matches your Safe Auto Sell filters")
 				return
