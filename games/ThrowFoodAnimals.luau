@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.4.1",
+	version = "3.4.2",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -2038,6 +2038,33 @@ function STATE.aimTarget()
 			return plan.power, string.format("Collecting %s · %d/%d · %d%% new per throw", row.name, row.found, row.total, math.floor(plan.chance * 100 + 0.5)), row.id
 		end
 		local depth, band = 0.95, nil
+		if row.dream then
+			-- A dream catch is picked at random from the habitat's first
+			-- ceil(depth x count) dream animals, so land in the shortest
+			-- front stretch with the best share of animals still missing.
+			local animals = nil
+			for _, zone in ipairs(DreamlandConfig and type(DreamlandConfig.Zones) == "table" and DreamlandConfig.Zones or {}) do
+				if type(zone) == "table" and zone.Area == row.area then
+					animals = zone.Animals
+				end
+			end
+			if type(animals) == "table" and #animals > 0 then
+				local caught = dreamCaught()
+				local bestShare, bestCount, missing = -1, #animals, 0
+				for count, name in ipairs(animals) do
+					if not caught[name] then
+						missing += 1
+					end
+					local share = missing / count
+					if share > bestShare + 1e-9 then
+						bestShare, bestCount = share, count
+					end
+				end
+				-- Middle of that stretch, nudged forward for throws that miss
+				-- the meter bonus.
+				depth = math.clamp((bestCount - 0.5) / #animals + 0.04, 0.05, 0.95)
+			end
+		end
 		if not row.dream then
 			local at = tonumber(row.firstMissing) or 0.9
 			if at < 0.45 then
