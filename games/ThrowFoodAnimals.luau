@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.2.2",
+	version = "3.2.3",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -1806,8 +1806,19 @@ do
 		cache.key = nil
 	end
 
-	-- Slider value that lands exactly `depth` into the area, without the
-	-- clamping aimPowerFor does (a clamped throw would land somewhere else).
+	-- Slider value for a throw aimed `depth` into the area. Not every throw
+	-- gets the meter's bonus distance, so the slider sits halfway and the
+	-- spot only counts when the throw lands in this area and the same band
+	-- with or without the bonus. Returns the slider value (0 = maximum) and
+	-- the two landing depths (no bonus, full bonus).
+	local function landingDepth(distance, index)
+		local ok, position, landed = pcall(AreaUtil.ComputeLanding, distance, 0)
+		if not ok or landed ~= index or typeof(position) ~= "Vector3" then
+			return nil
+		end
+		local okDepth, depth = pcall(AreaUtil.DepthInArea, index, position.Z)
+		return okDepth and tonumber(depth) or nil
+	end
 	local function exactPower(index, depth)
 		local startDistance, endDistance = areaSpan(index)
 		if not startDistance then
@@ -1815,15 +1826,20 @@ do
 		end
 		local bonus = GameConfig and type(GameConfig.Throw) == "table" and tonumber(GameConfig.Throw.MeterBonusStuds) or 0
 		local minPower, maxPower = throwPowerRange()
-		local wanted = math.floor(startDistance + (endDistance - startDistance) * depth - bonus + 0.5)
+		local wanted = math.floor(startDistance + (endDistance - startDistance) * depth - bonus / 2 + 0.5)
 		if wanted < minPower or wanted > maxPower then
 			return nil
 		end
-		local ok, _, landed = pcall(AreaUtil.ComputeLanding, wanted + bonus, 0)
-		if not ok or landed ~= index then
+		local low = landingDepth(wanted, index)
+		local high = landingDepth(wanted + bonus, index)
+		if not low or not high then
 			return nil
 		end
-		return wanted >= maxPower and 0 or wanted
+		local subAreas = tonumber(AreasConfig.SubAreas) or 3
+		if math.floor(math.clamp(low, 0, 0.999) * subAreas) ~= math.floor(math.clamp(high, 0, 0.999) * subAreas) then
+			return nil
+		end
+		return wanted >= maxPower and 0 or wanted, low, high
 	end
 
 	local function ownedFoods()
@@ -1876,15 +1892,22 @@ do
 				local best = nil
 				if #missing > 0 then
 					for _, depth in ipairs(DEPTHS) do
-						local power = exactPower(areaIndex, depth)
+						local power, low, high = exactPower(areaIndex, depth)
 						if power then
 							for _, food in ipairs(foods) do
-								local ok, weights = pcall(AnimalRoll.Weights, food.bait, areaIndex, depth)
-								if ok and type(weights) == "table" then
-									local chance = 0
-									for _, rank in ipairs(missing) do
-										chance += tonumber(weights[rank]) or 0
+								-- The worse of the two possible landings counts.
+								local chance = nil
+								for _, landed in ipairs({ low, high }) do
+									local ok, weights = pcall(AnimalRoll.Weights, food.bait, areaIndex, landed)
+									local here = 0
+									if ok and type(weights) == "table" then
+										for _, rank in ipairs(missing) do
+											here += tonumber(weights[rank]) or 0
+										end
 									end
+									chance = chance and math.min(chance, here) or here
+								end
+								do
 									-- Prefer the stronger food on ties: more cash per catch.
 									if not best or chance > best.chance + 1e-6 or (math.abs(chance - best.chance) <= 1e-6 and food.index > best.food) then
 										best = { food = food.index, depth = depth, power = power, chance = chance }
