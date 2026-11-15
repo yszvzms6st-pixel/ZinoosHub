@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.2.0",
+	version = "3.2.1",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -3673,10 +3673,154 @@ pcall(function()
 	end))
 end)
 
-function STATE.apply3d()
-	pcall(function()
-		RunService:Set3dRenderingEnabled(STATE.disable3d ~= true)
-	end)
+-- AFK Black Screen: stops drawing the 3D world (big GPU and battery saving)
+-- and covers the game with a black screen showing live progress, so a
+-- phone or PC left overnight still shows what the hub is doing.
+do
+	local screen = nil
+	local startedAt = os.clock()
+
+	local function clock(seconds)
+		seconds = math.max(0, math.floor(seconds))
+		return string.format("%d:%02d:%02d", seconds // 3600, (seconds % 3600) // 60, seconds % 60)
+	end
+
+	local function destroyScreen()
+		if screen then
+			pcall(function()
+				screen:Destroy()
+			end)
+			screen = nil
+		end
+	end
+
+	local function buildScreen()
+		elevate()
+		local parent = (typeof(gethui) == "function" and gethui()) or CoreGui
+		local look = STATE.hubThemeDef()
+		local accent = look and typeof(look.accent) == "Color3" and look.accent or Color3.fromRGB(150, 110, 255)
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "ZinoosAfkScreen"
+		gui.IgnoreGuiInset = true
+		gui.ResetOnSpawn = false
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		-- Under the hub menu, so the menu and its alerts still open on top.
+		local wind = parent:FindFirstChild("WindUI")
+		gui.DisplayOrder = (wind and wind:IsA("ScreenGui") and wind.DisplayOrder or 1000) - 1
+
+		local back = Instance.new("Frame")
+		back.Name = "Black"
+		back.Size = UDim2.fromScale(1, 1)
+		back.BackgroundColor3 = Color3.new(0, 0, 0)
+		back.BorderSizePixel = 0
+		back.Active = true
+		back.Parent = gui
+
+		local box = Instance.new("Frame")
+		box.AnchorPoint = Vector2.new(0.5, 0.5)
+		box.Position = UDim2.fromScale(0.5, 0.5)
+		box.Size = UDim2.new(0.9, 0, 0, 300)
+		box.BackgroundTransparency = 1
+		box.Parent = back
+		local cap = Instance.new("UISizeConstraint")
+		cap.MaxSize = Vector2.new(520, 300)
+		cap.Parent = box
+		local layout = Instance.new("UIListLayout")
+		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layout.VerticalAlignment = Enum.VerticalAlignment.Center
+		layout.Padding = UDim.new(0, 6)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = box
+
+		local function label(order, size, color, bold)
+			local text = Instance.new("TextLabel")
+			text.LayoutOrder = order
+			text.Size = UDim2.new(1, 0, 0, size + 6)
+			text.BackgroundTransparency = 1
+			text.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+			text.TextSize = size
+			text.TextColor3 = color
+			text.TextWrapped = true
+			text.Text = ""
+			text.Parent = box
+			return text
+		end
+		local title = label(1, 30, accent, true)
+		title.Text = "ZINOOS HUB"
+		local sub = label(2, 13, Color3.fromRGB(150, 150, 160), true)
+		sub.Text = "AFK MODE  ·  THE HUB IS STILL RUNNING"
+		local index = label(3, 24, Color3.new(1, 1, 1), true)
+		local doing = label(4, 15, Color3.fromRGB(210, 210, 220), false)
+		doing.Size = UDim2.new(1, 0, 0, 40)
+		local session = label(5, 14, Color3.fromRGB(170, 170, 180), false)
+		local last = label(6, 14, Color3.fromRGB(170, 170, 180), false)
+
+		local button = Instance.new("TextButton")
+		button.LayoutOrder = 7
+		button.Size = UDim2.new(0, 220, 0, 36)
+		button.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+		button.AutoButtonColor = true
+		button.Font = Enum.Font.GothamBold
+		button.TextSize = 14
+		button.TextColor3 = Color3.new(1, 1, 1)
+		button.Text = "Turn off black screen"
+		button.Parent = box
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 8)
+		corner.Parent = button
+		button.MouseButton1Click:Connect(function()
+			STATE.disable3d = false
+			if STATE.syncToggle then
+				STATE.syncToggle("disable3d")
+			end
+			STATE.apply3d()
+			saveConfig()
+		end)
+
+		gui.Parent = parent
+		screen = gui
+
+		task.spawn(function()
+			while running() and screen == gui and gui.Parent do
+				local rows = STATE.collectRows
+				local found = rows and (rows.worldFound + rows.dreamFound) or 0
+				local total = rows and (rows.worldTotal + rows.dreamTotal) or 0
+				local doingText = tostring(STATE.aimStatus or STATE.status or "")
+				if STATE.indexHunt ~= true then
+					doingText = STATE.autoThrow == true and "Farming · Auto Throw on" or "Auto Throw is off"
+				elseif STATE.autoThrow ~= true then
+					doingText = "Auto Collect is on · Auto Throw is off"
+				end
+				local catch = STATE.lastCatch
+				local catchText = catch and ("Last catch: " .. tostring(catch.title) .. " (" .. tostring(catch.rarity) .. ")") or "Last catch: waiting for the first one"
+				local money = shortNumber(getData("Money"))
+				elevate()
+				-- The menu may be built after the black screen: stay under it.
+				local windGui = gui.Parent and gui.Parent:FindFirstChild("WindUI")
+				if windGui and windGui:IsA("ScreenGui") and gui.DisplayOrder ~= windGui.DisplayOrder - 1 then
+					gui.DisplayOrder = windGui.DisplayOrder - 1
+				end
+				index.Text = total > 0 and string.format("Index %d / %d", found, total) or "Index loading..."
+				doing.Text = doingText
+				session.Text = string.format("Running %s  ·  %d catches  ·  $%s", clock(os.clock() - startedAt), tonumber(stats.catches) or 0, money)
+				last.Text = catchText
+				task.wait(1)
+			end
+		end)
+	end
+
+	function STATE.apply3d()
+		local on = STATE.disable3d == true
+		pcall(function()
+			RunService:Set3dRenderingEnabled(not on)
+		end)
+		if on and not (screen and screen.Parent) then
+			pcall(buildScreen)
+		elseif not on then
+			destroyScreen()
+		end
+	end
+	hubCleanup(destroyScreen)
 end
 hubCleanup(function()
 	pcall(function()
@@ -5089,7 +5233,7 @@ local function installHub()
 		toggle(clientBox, "Reload Hub After Server Change", "autoReload", STATE.autoReloadAvailable and "Loads the hub again after a rejoin, server hop or update" or "Your executor can't do this (no queue_on_teleport)")
 		toggle(clientBox, "Hide Roblox Pause Popup", "noPausePopup")
 		toggle(clientBox, "Potato Mode", "fpsBoost", "Low detail for more FPS. Fully reversible")
-		toggle(clientBox, "AFK Black Screen", "disable3d", "Stops drawing the world for maximum FPS")
+		toggle(clientBox, "AFK Black Screen", "disable3d", "Black screen with your live progress. Stops drawing the world to save GPU and battery")
 		potatoInfo = info(clientBox, "Status", STATE.potatoStatus or "Potato Mode off")
 
 		local serverBox = section(playerTab, "Server", "server", false)
