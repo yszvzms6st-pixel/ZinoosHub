@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.4.0",
+	version = "3.4.1",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -3130,6 +3130,114 @@ do
 	function STATE.resetCycle()
 		cycle.phase = nil
 	end
+	-- phase ("train"/"throw"), seconds left, seconds in this turn; nil when off.
+	function STATE.cycleInfo()
+		if STATE.cycleTrain ~= true or not cycle.phase or cycle.endsAt == math.huge then
+			return nil
+		end
+		local minutes = cycle.phase == "train" and STATE.cycleTrainMinutes or STATE.cycleThrowMinutes
+		return cycle.phase, math.max(0, cycle.endsAt - os.clock()), math.max(1, tonumber(minutes) or 5) * 60
+	end
+
+	-- Live timer on screen while the cycle runs: which turn it is, a
+	-- countdown and a bar, so it is obvious it is working without the menu.
+	-- Hidden under the AFK Black Screen, which shows the same countdown.
+	local timerGui = nil
+	local function destroyTimer()
+		if timerGui then
+			pcall(function()
+				timerGui:Destroy()
+			end)
+			timerGui = nil
+		end
+	end
+	hubCleanup(destroyTimer)
+	local function buildTimer()
+		local parent = (typeof(gethui) == "function" and gethui()) or CoreGui
+		local look = STATE.hubThemeDef()
+		local accent = look and typeof(look.accent) == "Color3" and look.accent or Color3.fromRGB(150, 110, 255)
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "ZinoosCycleTimer"
+		gui.ResetOnSpawn = false
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		local card = Instance.new("Frame")
+		card.Name = "Card"
+		card.AnchorPoint = Vector2.new(0.5, 0)
+		card.Position = UDim2.new(0.5, 0, 0, 52)
+		card.Size = UDim2.fromOffset(230, 46)
+		card.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+		card.BackgroundTransparency = 0.1
+		card.Parent = gui
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 10)
+		corner.Parent = card
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = accent
+		stroke.Transparency = 0.4
+		stroke.Parent = card
+		local title = Instance.new("TextLabel")
+		title.Name = "Title"
+		title.BackgroundTransparency = 1
+		title.Position = UDim2.fromOffset(12, 5)
+		title.Size = UDim2.new(1, -24, 0, 18)
+		title.Font = Enum.Font.GothamBold
+		title.TextSize = 14
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.TextColor3 = Color3.new(1, 1, 1)
+		title.Parent = card
+		local time = Instance.new("TextLabel")
+		time.Name = "Time"
+		time.BackgroundTransparency = 1
+		time.Position = UDim2.fromOffset(12, 5)
+		time.Size = UDim2.new(1, -24, 0, 18)
+		time.Font = Enum.Font.GothamBold
+		time.TextSize = 14
+		time.TextXAlignment = Enum.TextXAlignment.Right
+		time.TextColor3 = accent
+		time.Parent = card
+		local track = Instance.new("Frame")
+		track.Name = "Track"
+		track.Position = UDim2.new(0, 12, 0, 30)
+		track.Size = UDim2.new(1, -24, 0, 6)
+		track.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+		track.BorderSizePixel = 0
+		track.Parent = card
+		local trackCorner = Instance.new("UICorner")
+		trackCorner.CornerRadius = UDim.new(1, 0)
+		trackCorner.Parent = track
+		local fill = Instance.new("Frame")
+		fill.Name = "Fill"
+		fill.Size = UDim2.fromScale(1, 1)
+		fill.BackgroundColor3 = accent
+		fill.BorderSizePixel = 0
+		fill.Parent = track
+		local fillCorner = Instance.new("UICorner")
+		fillCorner.CornerRadius = UDim.new(1, 0)
+		fillCorner.Parent = fill
+		gui.Parent = parent
+		timerGui = gui
+	end
+	task.spawn(function()
+		while running() do
+			local phase, left, total = STATE.cycleInfo()
+			if phase and STATE.disable3d ~= true then
+				elevate()
+				if not (timerGui and timerGui.Parent) then
+					pcall(buildTimer)
+				end
+				local card = timerGui and timerGui:FindFirstChild("Card")
+				if card then
+					card.Title.Text = phase == "train" and "🏋️ TRAINING" or "🍔 THROWING"
+					card.Time.Text = string.format("%s → %s", clockText(left), phase == "train" and "throw" or "train")
+					card.Track.Fill.Size = UDim2.fromScale(math.clamp(left / total, 0, 1), 1)
+				end
+			elseif timerGui then
+				elevate()
+				destroyTimer()
+			end
+			task.wait(0.25)
+		end
+	end)
 end
 
 local nextDreamAction = 0
@@ -3984,7 +4092,9 @@ do
 				local found = rows and (rows.worldFound + rows.dreamFound) or 0
 				local total = rows and (rows.worldTotal + rows.dreamTotal) or 0
 				local doingText = tostring(STATE.aimStatus or STATE.status or "")
-				if STATE.indexHunt ~= true then
+				if STATE.cycleTrain == true and STATE.cycleInfo and STATE.cycleInfo() then
+					doingText = "Train & Throw: " .. tostring(STATE.cycleStatus)
+				elseif STATE.indexHunt ~= true then
 					doingText = STATE.autoThrow == true and "Farming · Auto Throw on" or "Auto Throw is off"
 				elseif STATE.autoThrow ~= true then
 					doingText = "Auto Collect is on · Auto Throw is off"
@@ -5680,8 +5790,8 @@ local function installHub()
 
 		setInfo(overview, string.format(
 			"%s  ·  %s\nMoney $%s  ·  %d animals (%d placed)\nFood %s · Stand %s · Fence %s\nSession %s  ·  %d fps  ·  %d ms",
-			STATE.autoThrow == true and "Farming ON" or "Farming OFF",
-			publicStatus(STATE.status),
+			STATE.autoThrow == true and "Farming ON" or (STATE.autoTrain == true and "Training" or "Farming OFF"),
+			STATE.cycleTrain == true and STATE.cycleInfo and STATE.cycleInfo() and ("Cycle: " .. tostring(STATE.cycleStatus)) or publicStatus(STATE.status),
 			shortNumber(money),
 			animalCount,
 			placedCount,
