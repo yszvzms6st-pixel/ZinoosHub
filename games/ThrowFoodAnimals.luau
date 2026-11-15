@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.1.2",
+	version = "3.2.0",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -1778,6 +1778,200 @@ function STATE.collectionRows()
 	return rows
 end
 
+-- Collection planner. Which animal a throw catches is rolled from the food's
+-- Bait, the zone and how deep into the zone the food lands (the game's own
+-- Shared.AnimalRoll.Weights). With the best food a zone's commonest animals
+-- can never roll, so for every zone this tries each owned food and landing
+-- depth and keeps the one with the highest chance of an animal still
+-- missing from the index. Re-planned only when the index, level or owned
+-- foods change.
+do
+	local AnimalRoll = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "AnimalRoll")
+	local AnimalsData = nil
+	pcall(function()
+		AnimalsData = require(ReplicatedStorage:FindFirstChild("AnimalsData"))
+	end)
+	elevate()
+	local DEPTHS = {}
+	for step = 0, 19 do
+		DEPTHS[#DEPTHS + 1] = 0.025 + step * 0.05
+	end
+	local cache = { key = nil, plans = {} }
+
+	-- Slider value that lands exactly `depth` into the area, without the
+	-- clamping aimPowerFor does (a clamped throw would land somewhere else).
+	local function exactPower(index, depth)
+		local startDistance, endDistance = areaSpan(index)
+		if not startDistance then
+			return nil
+		end
+		local bonus = GameConfig and type(GameConfig.Throw) == "table" and tonumber(GameConfig.Throw.MeterBonusStuds) or 0
+		local minPower, maxPower = throwPowerRange()
+		local wanted = math.floor(startDistance + (endDistance - startDistance) * depth - bonus + 0.5)
+		if wanted < minPower or wanted > maxPower then
+			return nil
+		end
+		local ok, _, landed = pcall(AreaUtil.ComputeLanding, wanted + bonus, 0)
+		if not ok or landed ~= index then
+			return nil
+		end
+		return wanted >= maxPower and 0 or wanted
+	end
+
+	local function ownedFoods()
+		local owned = getData("OwnedFoods")
+		local equipped = tonumber(getData("EquippedFood")) or 0
+		local list = {}
+		local count = (FoodsConfig.Count and FoodsConfig.Count()) or 0
+		for i = 1, count do
+			local food = FoodsConfig.Get(i)
+			local has = type(owned) == "table" and (owned[i] == true or owned[tostring(i)] == true)
+			if food and tonumber(food.Bait) and (has or i == equipped) then
+				list[#list + 1] = { index = i, bait = tonumber(food.Bait) }
+			end
+		end
+		return list, equipped
+	end
+	STATE.collectOwnedFoods = ownedFoods
+
+	-- rows: STATE.collectionRows().world. Returns { [row.id] = plan } where
+	-- plan = { food, depth, power, chance }.
+	function STATE.collectPlans(rows)
+		if not AnimalRoll or type(AnimalRoll.Weights) ~= "function" or type(AnimalsData) ~= "table" then
+			return nil
+		end
+		local foods = ownedFoods()
+		if #foods == 0 then
+			return nil
+		end
+		local index = getData("Index")
+		index = type(index) == "table" and index or {}
+		local parts = { tostring(getData("Level")), tostring(#foods) }
+		for _, row in ipairs(rows) do
+			parts[#parts + 1] = row.id .. ":" .. tostring(row.found)
+		end
+		local key = table.concat(parts, "|")
+		if cache.key == key then
+			return cache.plans
+		end
+		local plans = {}
+		for _, row in ipairs(rows) do
+			local areaIndex = areaIndexOf(row.area)
+			local animals = AnimalsData[row.area]
+			if areaIndex and type(animals) == "table" and row.found < row.total then
+				local missing = {}
+				for rank, animal in ipairs(animals) do
+					if type(animal) == "table" and index[animal.ModelName] ~= true then
+						missing[#missing + 1] = rank
+					end
+				end
+				local best = nil
+				if #missing > 0 then
+					for _, depth in ipairs(DEPTHS) do
+						local power = exactPower(areaIndex, depth)
+						if power then
+							for _, food in ipairs(foods) do
+								local ok, weights = pcall(AnimalRoll.Weights, food.bait, areaIndex, depth)
+								if ok and type(weights) == "table" then
+									local chance = 0
+									for _, rank in ipairs(missing) do
+										chance += tonumber(weights[rank]) or 0
+									end
+									-- Prefer the stronger food on ties: more cash per catch.
+									if not best or chance > best.chance + 1e-6 or (math.abs(chance - best.chance) <= 1e-6 and food.index > best.food) then
+										best = { food = food.index, depth = depth, power = power, chance = chance }
+									end
+								end
+							end
+						end
+					end
+				end
+				plans[row.id] = best
+				-- Spread the work over frames instead of one long hitch.
+				task.wait()
+			end
+		end
+		elevate()
+		cache.key = key
+		cache.plans = plans
+		return plans
+	end
+end
+
+-- Food Auto Collect asked for, and the food to put back afterwards. The
+-- marker file lets a hub started after a rejoin finish the job.
+do
+	local foodSwap = {
+		file = "Rayfield/Configurations/ZinoosHub/ThrowFoodAnimals_food_" .. tostring(LocalPlayer.UserId) .. ".txt",
+		nextTry = 0,
+	}
+	local function bestOwned()
+		local list = STATE.collectOwnedFoods and STATE.collectOwnedFoods() or {}
+		local best = 0
+		for _, food in ipairs(list) do
+			best = math.max(best, food.index)
+		end
+		return best
+	end
+	local function equip(index)
+		local equipped = tonumber(getData("EquippedFood")) or 0
+		if equipped == index then
+			return true
+		end
+		if os.clock() < foodSwap.nextTry or ClientState.Busy ~= nil then
+			return false
+		end
+		local result = invokeNear("Food", foodShopTarget(), "Shop_Equip", index)
+		if not result.Ok then
+			foodSwap.nextTry = os.clock() + 5
+			STATE.collectFoodStatus = "Food swap failed: " .. tostring(result.Reason or "rejected")
+			return false
+		end
+		local deadline = os.clock() + 1.5
+		while running() and (tonumber(getData("EquippedFood")) or 0) ~= index and os.clock() < deadline do
+			task.wait(0.05)
+		end
+		return (tonumber(getData("EquippedFood")) or 0) == index
+	end
+
+	-- Equip the food the planner wants (nil = the best food you own).
+	function STATE.collectEquipFood(wanted)
+		local best = bestOwned()
+		if best <= 0 then
+			return false
+		end
+		local target = wanted or best
+		local equipped = tonumber(getData("EquippedFood")) or 0
+		if equipped == target then
+			return true
+		end
+		if target ~= best then
+			-- Remember to put the best food back afterwards.
+			pcall(writefile, foodSwap.file, tostring(best))
+			STATE.collectFoodSwapped = true
+		end
+		local ok = equip(target)
+		if ok and target == best then
+			STATE.collectFoodSwapped = false
+			pcall(writefile, foodSwap.file, "")
+		end
+		return ok
+	end
+
+	-- Put the best food back once Auto Collect no longer needs another one.
+	function STATE.collectRestoreFood()
+		if STATE.collectFoodSwapped ~= true then
+			return
+		end
+		STATE.collectEquipFood(nil)
+	end
+
+	local ok, saved = pcall(readfile, foodSwap.file)
+	if ok and tonumber(saved) then
+		STATE.collectFoodSwapped = true
+	end
+end
+
 -- Where Auto Collect wants the next throw to land. Returns the slider value
 -- (0 = maximum distance), a label, and the row id it is working on.
 function STATE.aimTarget()
@@ -1792,7 +1986,15 @@ function STATE.aimTarget()
 	-- rarest. Aim at the band of the first animal still missing. Lucky
 	-- (Super) Throws only pay off in the back band, where the rare ones are.
 	STATE.collectWantsSuper = false
+	STATE.collectFoodWanted = nil
+	local plans = STATE.collectPlans and STATE.collectPlans(rows.world) or nil
 	local function aimAt(row)
+		local plan = plans and not row.dream and plans[row.id] or nil
+		if plan and plan.chance > 0 then
+			STATE.collectFoodWanted = plan.food
+			STATE.collectWantsSuper = plan.chance < 0.5
+			return plan.power, string.format("Collecting %s · %d/%d · %d%% new per throw", row.name, row.found, row.total, math.floor(plan.chance * 100 + 0.5)), row.id
+		end
 		local depth, band = 0.95, nil
 		if not row.dream then
 			local at = tonumber(row.firstMissing) or 0.9
@@ -1851,6 +2053,36 @@ function STATE.aimTarget()
 	-- World: easiest missing animal first (the one sitting furthest toward the
 	-- common end of its zone), so every throw has the best chance of being new.
 	-- Zones where only the rarest are left come last.
+	if plans then
+		-- Best chance of a new animal per throw. Near-ties stay on the zone
+		-- already being worked (no food swap), then go to the zone with more
+		-- missing.
+		local best, bestPlan = nil, nil
+		for _, row in ipairs(rows.world) do
+			local plan = plans[row.id]
+			if row.found < row.total and plan and plan.chance > 0 then
+				local better = not best
+				if best then
+					local diff = plan.chance - bestPlan.chance
+					if diff > 0.03 then
+						better = true
+					elseif diff >= -0.03 then
+						if row.id == STATE.collectAimId and best.id ~= STATE.collectAimId then
+							better = true
+						elseif best.id ~= STATE.collectAimId and (row.total - row.found) > (best.total - best.found) then
+							better = true
+						end
+					end
+				end
+				if better then
+					best, bestPlan = row, plan
+				end
+			end
+		end
+		if best then
+			return aimAt(best)
+		end
+	end
 	local best = nil
 	for _, row in ipairs(rows.world) do
 		local missing = row.total - row.found
@@ -1924,6 +2156,14 @@ function STATE.applyAim()
 	local ok, power, label, rowId = pcall(STATE.aimTarget)
 	elevate()
 	STATE.collectAimId = ok and type(power) == "number" and rowId or nil
+	-- The planner may want a weaker food for this zone; otherwise make sure
+	-- the best food is back on.
+	if STATE.collectAimId and STATE.collectFoodWanted then
+		pcall(STATE.collectEquipFood, STATE.collectFoodWanted)
+	else
+		pcall(STATE.collectRestoreFood)
+	end
+	elevate()
 	if ok and type(power) == "number" then
 		if power ~= 0 or aim.applied then
 			if setThrowPower(power) then
@@ -2346,7 +2586,8 @@ local function stepUpgrades()
 			if not nextFood and best <= equipped then
 				maxedUpgrades += 1
 			end
-			if best > equipped then
+			-- Auto Collect may be using a weaker food on purpose.
+			if best > equipped and not (STATE.indexHunt == true and STATE.collectFoodWanted ~= nil) then
 				local result = invokeNear("Food", foodShopTarget(), "Shop_Equip", best)
 				if result.Ok then
 					STATE.upgradeStatus = "Equipped " .. tostring((FoodsConfig.GetAny and FoodsConfig.GetAny(best) or {}).Name or ("food " .. best))
@@ -2973,6 +3214,14 @@ function STATE.stepCollection()
 		local what = STATE.collectTarget == "Auto" and "Your whole collection" or "That zone"
 		noteActivity("Collection complete · Auto Collect turned off")
 		notify("progress", "Collection complete", what .. " is finished. Auto Collect is off and throws go back to maximum distance")
+	end
+	-- Auto Collect switched off while not throwing: put the best food back.
+	if STATE.indexHunt ~= true and STATE.autoThrow ~= true and STATE.collectFoodSwapped == true and not STATE.collectRestoring then
+		STATE.collectRestoring = true
+		task.spawn(function()
+			pcall(STATE.collectRestoreFood)
+			STATE.collectRestoring = false
+		end)
 	end
 	local found = rows.worldFound + rows.dreamFound
 	local total = rows.worldTotal + rows.dreamTotal
