@@ -1555,6 +1555,12 @@ end
 -- Dream Hunt or Index Hunt wants a specific area, and puts it back to maximum
 -- afterwards. A slider the player set by hand is left alone.
 local aim = { applied = false }
+-- Remember on disk when the hub moved the slider, so a hub that starts after
+-- a rejoin or server hop can put it back to maximum distance.
+aim.file = "Rayfield/Configurations/ZinoosHub/ThrowFoodAnimals_aim_" .. tostring(LocalPlayer.UserId) .. ".txt"
+function aim.remember(power)
+	pcall(writefile, aim.file, tostring(power or 0))
+end
 
 local function areaIndexOf(key)
 	local ok, count = pcall(AreaUtil.Count)
@@ -1850,6 +1856,7 @@ function STATE.restoreAim()
 	if aim.applied then
 		if setThrowPower(0) then
 			aim.applied = false
+			aim.remember(0)
 			STATE.aimStatus = "Maximum distance"
 		end
 	end
@@ -1857,6 +1864,15 @@ end
 hubCleanup(function()
 	pcall(STATE.restoreAim)
 end)
+do
+	-- The last hub aimed and never got to put the slider back (the server
+	-- changed mid-throw): take it over so it goes back to maximum.
+	local ok, saved = pcall(readfile, aim.file)
+	local power = ok and tonumber(saved) or 0
+	if power and power > 0 and (tonumber(getData("ThrowPower")) or 0) == power then
+		aim.applied = true
+	end
+end
 
 function STATE.applyAim()
 	local ok, power, label, rowId = pcall(STATE.aimTarget)
@@ -1866,6 +1882,7 @@ function STATE.applyAim()
 		if power ~= 0 or aim.applied then
 			if setThrowPower(power) then
 				aim.applied = power ~= 0
+				aim.remember(power)
 				STATE.aimStatus = label or "Aimed throw"
 			end
 		else
