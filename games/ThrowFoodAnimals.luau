@@ -4198,6 +4198,17 @@ local function installHub()
 		elseif key == "autoTrain" and on then
 			STATE.autoThrow = false
 			if syncToggle then syncToggle("autoThrow") end
+		elseif key == "indexHunt" and on and STATE.autoThrow ~= true then
+			-- Auto Collect only chooses where throws land; it needs Auto Throw
+			-- to actually throw.
+			STATE.autoThrow = true
+			STATE.autoTrain = false
+			task.spawn(stopTraining)
+			if syncToggle then
+				syncToggle("autoThrow")
+				syncToggle("autoTrain")
+			end
+			task.defer(notify, "system", "Auto Throw turned on", "Auto Collect needs it to throw")
 		elseif key == "antiAfk" and on and pulseAntiAfk then
 			task.defer(pulseAntiAfk)
 		elseif key == "disable3d" then
