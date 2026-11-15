@@ -118,7 +118,7 @@ local STATE = {
 	indexHunt = false,
 	collectClaim = true,
 	collectStop = true,
-	collectSuper = true,
+	collectSuper = false,
 	collectTarget = "Auto",
 	collectStatus = "Auto Collect is off",
 	aimStatus = "Maximum distance",
@@ -4589,7 +4589,7 @@ local function installHub()
 			STATE.collectTarget = at and targetIds[at] or "Auto"
 			task.defer(STATE.stepCollection)
 		end)
-		toggle(box, "Use Lucky Throws on Rare Ones", "collectSuper", "Spends Super Lucky Throws only when aiming at a zone's rarest animals. Keeps your reserve")
+		toggle(box, "Use Lucky Throws While Collecting", "collectSuper", "Off: lucky throws are saved for normal farming. On: spent only on a zone's rarest animals")
 		toggle(box, "Auto Claim Rewards", "collectClaim", "Zone trails and Dreamland research milestones")
 		toggle(box, "Stop When Complete", "collectStop", "Turns Auto Collect off once it's finished")
 		collectInfo = info(box, "Progress", tostring(STATE.collectStatus))
@@ -4834,7 +4834,7 @@ local function installHub()
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
 					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
 					trainOnBoost = true, dreamBuy = false, autoTrail = true,
-					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = true,
+					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = false,
 				}
 				STATE.collectTarget = "Auto"
 				for key, value in pairs(safeValues) do
