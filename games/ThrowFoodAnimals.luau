@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.2.1",
+	version = "3.2.2",
 	animalsCache = nil,
 	trainOnBoost = true,
 	dreamBuy = false,
@@ -1792,11 +1792,19 @@ do
 		AnimalsData = require(ReplicatedStorage:FindFirstChild("AnimalsData"))
 	end)
 	elevate()
+	-- Landing spots well inside each of the zone's three bands: real throws
+	-- land a few studs off, and the game nudges landings away from the band
+	-- lines, so a spot near an edge can end up in the next zone or band.
 	local DEPTHS = {}
-	for step = 0, 19 do
-		DEPTHS[#DEPTHS + 1] = 0.025 + step * 0.05
+	for band = 0, 2 do
+		for _, offset in ipairs({ 0.07, 0.12, 0.17, 0.21, 0.26 }) do
+			DEPTHS[#DEPTHS + 1] = band / 3 + offset
+		end
 	end
 	local cache = { key = nil, plans = {} }
+	function STATE.collectPlanReset()
+		cache.key = nil
+	end
 
 	-- Slider value that lands exactly `depth` into the area, without the
 	-- clamping aimPowerFor does (a clamped throw would land somewhere else).
@@ -1846,7 +1854,7 @@ do
 		end
 		local index = getData("Index")
 		index = type(index) == "table" and index or {}
-		local parts = { tostring(getData("Level")), tostring(#foods) }
+		local parts = { tostring(getData("Level")), tostring(#foods), tostring(STATE.collectBanEpoch or 0) }
 		for _, row in ipairs(rows) do
 			parts[#parts + 1] = row.id .. ":" .. tostring(row.found)
 		end
@@ -2060,7 +2068,8 @@ function STATE.aimTarget()
 		local best, bestPlan = nil, nil
 		for _, row in ipairs(rows.world) do
 			local plan = plans[row.id]
-			if row.found < row.total and plan and plan.chance > 0 then
+			local banned = STATE.collectBans and (STATE.collectBans[row.id] or 0) > os.clock()
+			if row.found < row.total and plan and plan.chance > 0 and not banned then
 				local better = not best
 				if best then
 					local diff = plan.chance - bestPlan.chance
@@ -2153,9 +2162,41 @@ do
 end
 
 function STATE.applyAim()
+	-- Safety net: if a zone's planned throws keep giving nothing new (4 in a
+	-- row), skip that zone for 10 minutes and plan again.
+	do
+		local rows = STATE.collectRows
+		local found = rows and (rows.worldFound + rows.dreamFound) or 0
+		local miss = STATE.collectMiss
+		local catches = tonumber(stats.catches) or 0
+		if STATE.indexHunt == true and miss and miss.id == STATE.collectAimId and miss.id and not string.find(miss.id, "^Dream:") then
+			if found > miss.found then
+				miss.count = 0
+			elseif catches > miss.catches then
+				miss.count += catches - miss.catches
+			end
+			if miss.count >= 4 then
+				STATE.collectBans = STATE.collectBans or {}
+				STATE.collectBans[miss.id] = os.clock() + 600
+				STATE.collectBanEpoch = (STATE.collectBanEpoch or 0) + 1
+				noteActivity("Auto Collect: " .. tostring(miss.id) .. " gave nothing new 4 times, trying other zones for 10 minutes")
+				miss.count = 0
+			end
+			miss.found, miss.catches = found, catches
+		end
+	end
 	local ok, power, label, rowId = pcall(STATE.aimTarget)
 	elevate()
 	STATE.collectAimId = ok and type(power) == "number" and rowId or nil
+	if STATE.collectAimId and (not STATE.collectMiss or STATE.collectMiss.id ~= STATE.collectAimId) then
+		local rows = STATE.collectRows
+		STATE.collectMiss = {
+			id = STATE.collectAimId,
+			count = 0,
+			found = rows and (rows.worldFound + rows.dreamFound) or 0,
+			catches = tonumber(stats.catches) or 0,
+		}
+	end
 	-- The planner may want a weaker food for this zone; otherwise make sure
 	-- the best food is back on.
 	if STATE.collectAimId and STATE.collectFoodWanted then
