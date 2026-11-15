@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.1.0",
+	version = "3.1.1",
 	trainOnBoost = true,
 	dreamBuy = false,
 	autoTrail = true,
@@ -1092,8 +1092,28 @@ local pulseAntiAfk = function()
 		virtual:CaptureController()
 		virtual:ClickButton2(Vector2.new(-1, -1))
 	end)
-	STATE.antiAfkOperational = ok
-	return ok
+	-- The game has its own AFK check (AFKRejoin: 18 minutes with no
+	-- UserInputService input, then it moves you to another server).
+	-- VirtualUser does not count for it, so also send a mouse move to where
+	-- the mouse already is. If that is unavailable, run the game's own input
+	-- listener directly.
+	local reset = pcall(function()
+		local mouse = UserInputService:GetMouseLocation()
+		game:GetService("VirtualInputManager"):SendMouseMoveEvent(mouse.X, mouse.Y, game)
+	end)
+	if not reset and typeof(getconnections) == "function" then
+		pcall(function()
+			for _, connection in ipairs(getconnections(UserInputService.InputBegan)) do
+				local fn = connection.Function
+				if type(fn) == "function" and string.find(tostring(debug.info(fn, "s")), "AFKRejoin", 1, true) then
+					fn()
+					reset = true
+				end
+			end
+		end)
+	end
+	STATE.antiAfkOperational = ok or reset
+	return ok or reset
 end
 
 -- Auto reload: when this client is teleported (rejoin, server hop, update
@@ -5190,7 +5210,7 @@ end)
 
 task.spawn(function()
 	while running() do
-		task.wait(4 * 60)
+		task.wait(2 * 60)
 		pulseAntiAfk()
 	end
 end)
