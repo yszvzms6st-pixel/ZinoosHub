@@ -109,9 +109,10 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.4.2",
+	version = "3.5.0",
 	animalsCache = nil,
 	trainOnBoost = true,
+	autoRingRush = true,
 	dreamBuy = false,
 	dreamPotionBuy = false,
 	dreamInfuse = false,
@@ -278,6 +279,7 @@ local FLAG_KEYS = {
 	EspAllAnimals = "espAllAnimals",
 	HideOnStart = "hideOnStart",
 	TrainOnBoost = "trainOnBoost",
+	AutoRingRush = "autoRingRush",
 	DreamBuy = "dreamBuy",
 	DreamPotionBuy = "dreamPotionBuy",
 	DreamInfuse = "dreamInfuse",
@@ -2326,11 +2328,20 @@ local function useSuperThrow()
 end
 
 local function stepThrow()
-	if STATE.autoThrow ~= true or STATE.autoTrain == true then
+	-- During Ring Rush every throw is a ring flight. Auto Ring Rush plays it
+	-- even with Auto Throw off; with Auto Ring Rush off the hub's own throws
+	-- wait so they never get in the player's way.
+	local ringLive = typeof(STATE.ringRushLive) == "function" and STATE.ringRushLive() == true
+	local ringPlay = ringLive and STATE.autoRingRush == true
+	if (STATE.autoThrow ~= true and not ringPlay) or STATE.autoTrain == true then
 		if STATE.autoThrow ~= true then
 			STATE.throwStatus = "Off"
 		end
 		return 0.5
+	end
+	if ringLive and not ringPlay then
+		STATE.throwStatus = "Paused for Ring Rush (Auto Ring Rush is off)"
+		return 1
 	end
 	syncAutoSkip()
 	local currentThrows = tonumber(getData("Throws")) or lastObservedThrows
@@ -2342,8 +2353,9 @@ local function stepThrow()
 	lastObservedThrows = currentThrows
 	local busy = ClientState.Busy
 	if busy == "Throw" then
-		STATE.status = "Throwing food"
-		STATE.throwStatus = STATE.perfectMeter and "Perfect throw running" or "Throw running"
+		STATE.status = ringLive and "Flying through Ring Rush" or "Throwing food"
+		STATE.throwStatus = ringLive and "Ring Rush flight running"
+			or (STATE.perfectMeter and "Perfect throw running" or "Throw running")
 		return 0.25
 	elseif busy then
 		STATE.status = "Waiting for " .. publicStatus(busy)
@@ -2355,7 +2367,9 @@ local function stepThrow()
 	end
 	-- Point this throw at a Dreamland habitat or an unfinished index area when
 	-- those options are on; otherwise keep (or restore) maximum distance.
-	pcall(STATE.applyAim)
+	if not ringPlay then
+		pcall(STATE.applyAim)
+	end
 	elevate()
 	local throwToken = claimBusy("Throw")
 	if not throwToken then
@@ -2373,6 +2387,42 @@ local function stepThrow()
 	-- Give the server enough time to receive the line teleport. A quarter-second
 	-- was unreliable on lower FPS clients and caused valid throws to return TooFar.
 	task.wait(0.8)
+	if ringPlay then
+		-- A ring flight only exists in the game's own throw, so always use
+		-- it here. The throw returns when the run ends (event over, or too
+		-- many missed rings), which can be the rest of the event.
+		local previousAutoTap = STATE.throwMeter.TestAutoTap
+		local previousMeterNew = STATE.throwMeter.new
+		STATE.throwMeter.new = function(...)
+			local meter = previousMeterNew(...)
+			meter:SetLocked(true)
+			return meter
+		end
+		STATE.throwMeter.TestAutoTap = 0.5
+		local ringsBefore = STATE.ringRushRings()
+		STATE.status = "Flying through Ring Rush"
+		STATE.throwStatus = "Ring Rush flight running"
+		STATE.ringRushStatus = "Flying and steering through the rings..."
+		noteActivity("Ring Rush flight started")
+		releaseBusy(throwToken)
+		local sequenceOk, sequenceError = pcall(STATE.throwController.Start)
+		STATE.throwMeter.new = previousMeterNew
+		STATE.throwMeter.TestAutoTap = previousAutoTap
+		elevate()
+		local gained = math.max(0, STATE.ringRushRings() - ringsBefore)
+		if sequenceOk then
+			STATE.ringRushStatus = string.format("Last run: %d %s. Starting the next one...", gained, gained == 1 and "ring" or "rings")
+			STATE.throwStatus = "Ring Rush run ended"
+			noteActivity(string.format("Ring Rush run: %d rings", gained))
+		else
+			STATE.ringRushStatus = "Run error: " .. tostring(sequenceError)
+			STATE.throwStatus = "Ring Rush error: " .. tostring(sequenceError)
+		end
+		lastObservedThrows = tonumber(getData("Throws")) or lastObservedThrows
+		STATE.status = "Waiting for next throw"
+		nextThrowTrigger = os.clock() + (sequenceOk and 1 or 3)
+		return 0.25
+	end
 	if STATE.autoSkip ~= true then
 		-- The game's controller owns the complete throw, POV and animal reveal.
 		-- Keep our prep token until Start is called so its line detector cannot
@@ -3048,6 +3098,169 @@ local function boostText()
 	return #parts > 0 and table.concat(parts, " · ") or "No boosts active"
 end
 
+-- Ring Rush ------------------------------------------------------------------
+-- An admin abuse live event (about 2 hours). While it runs, every throw turns
+-- into a flight: the food flies down a lane and has to be steered through
+-- rings, with cash, Lucky Throws and a Big Champion pet at ring milestones.
+-- Auto Ring Rush lets the game run its own flight and steers it: the food
+-- glides to the next ring no faster than the server's steering check allows
+-- (80 studs a second), and imps can't knock it out (the server only judges
+-- rings, never imps). The hooks change nothing while the option is off.
+do
+	local config = optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "RingRushConfig")
+	local folder = controllers:FindFirstChild("RingRush")
+	local Steering = folder and optionalRequire(folder, "RingRushSteering")
+	local CourseView = folder and optionalRequire(folder, "RingRushCourseView")
+	elevate()
+	local eventName = config and config.EventName or "RingRush"
+	local endKey = "LiveEvent_" .. eventName
+	local stageKey = "LiveEventStage_" .. eventName
+	local runKey = config and config.RunKeyAttribute or "RingRushRunKey"
+	local flightStages = config and config.FlightStages or { Arrival = true, Rush = true }
+	local milestones = config and config.Milestones or {}
+	local repeatReward = config and config.RepeatReward
+	local GLIDE_SPEED = 60
+	local ring = { view = nil, hooked = false, wasLive = false }
+	STATE.ringRush = ring
+
+	-- LiveEvent_RingRush holds the event's end time; the stage says whether
+	-- throws are flights right now (Arrival and Rush) or the finale is on.
+	function STATE.ringRushLive()
+		if workspace:GetAttribute(endKey) == nil then
+			return false
+		end
+		local stage = workspace:GetAttribute(stageKey)
+		return type(stage) == "string" and flightStages[stage] == true
+	end
+
+	function STATE.ringRushRings()
+		local ok, data = pcall(GameDataController.Get, GameDataController, "RingRush")
+		elevate()
+		if ok and type(data) == "table" and data.Key == workspace:GetAttribute(runKey) then
+			return tonumber(data.Rings) or 0
+		end
+		return 0
+	end
+
+	local function rewardText(rings)
+		for _, milestone in ipairs(milestones) do
+			local need = tonumber(milestone.Rings) or 0
+			if need > rings then
+				return string.format("Next reward: %s at %d rings", tostring(milestone.Text or milestone.Kind), need)
+			end
+		end
+		if type(repeatReward) == "table" then
+			return string.format("All rewards done · %dm of cash every %d rings", tonumber(repeatReward.Minutes) or 1, tonumber(repeatReward.EveryRings) or 10)
+		end
+		return "All rewards done"
+	end
+
+	function STATE.ringRushText()
+		local ends = workspace:GetAttribute(endKey)
+		if ends == nil then
+			return "Not live right now. It only runs during admin abuse (about 2 hours).\n" .. rewardText(0)
+		end
+		local stage = workspace:GetAttribute(stageKey)
+		local left = type(ends) == "number" and (ends - workspace:GetServerTimeNow()) or nil
+		local rings = STATE.ringRushRings()
+		local lines = {
+			string.format("LIVE%s%s", type(stage) == "string" and (" · " .. stage) or "", left and left > 0 and (" · " .. clockText(left) .. " left") or ""),
+			string.format("%d rings this event · %s", rings, rewardText(rings)),
+		}
+		if STATE.autoRingRush ~= true then
+			lines[#lines + 1] = "Auto Ring Rush is off, so Auto Throw waits. Play it yourself or turn it on."
+		elseif not ring.hooked then
+			lines[#lines + 1] = "Steering unavailable (game changed). Throws still run, steer yourself."
+		elseif STATE.ringRushStatus then
+			lines[#lines + 1] = tostring(STATE.ringRushStatus)
+		end
+		return table.concat(lines, "\n")
+	end
+
+	-- Called from the event loop: one heads-up when the event goes live.
+	function STATE.stepRingRush()
+		local live = workspace:GetAttribute(endKey) ~= nil
+		if live and not ring.wasLive then
+			noteActivity("Ring Rush is live")
+			notify("progress", "Ring Rush is live!", STATE.autoRingRush == true and "Auto Ring Rush is playing it for you" or "Turn on Auto Ring Rush in the Admin Abuse tab")
+		elseif not live and ring.wasLive then
+			STATE.ringRushStatus = nil
+			noteActivity("Ring Rush ended")
+		end
+		ring.wasLive = live
+	end
+
+	if type(Steering) == "table" and type(Steering.Step) == "function" and type(Steering.GetOffset) == "function"
+		and type(CourseView) == "table" and type(CourseView.Update) == "function"
+		and type(CourseView.GetCrossedMob) == "function" then
+		local originalStep = Steering.Step
+		local originalGetOffset = Steering.GetOffset
+		local originalUpdate = CourseView.Update
+		local originalCrossed = CourseView.GetCrossedMob
+		local originalDestroy = CourseView.Destroy
+		local glides = setmetatable({}, { __mode = "k" })
+
+		-- The flight calls Update every frame with the next ring's number and
+		-- the flight clock, before it steps the steering.
+		CourseView.Update = function(self, ...)
+			ring.view = self
+			return originalUpdate(self, ...)
+		end
+		if type(originalDestroy) == "function" then
+			CourseView.Destroy = function(self, ...)
+				if ring.view == self then
+					ring.view = nil
+				end
+				return originalDestroy(self, ...)
+			end
+		end
+		Steering.Step = function(self, frame, ...)
+			originalStep(self, frame, ...)
+			local view = ring.view
+			if STATE.autoRingRush == true and view and type(frame) == "table" then
+				local entry = type(view.Rings) == "table" and view.Rings[view.NextIndex]
+				local course = view.Course
+				if entry and course and type(course.GetRingOffset) == "function" then
+					local ok, target = pcall(course.GetRingOffset, course, entry.Ring, view.Time)
+					if ok and typeof(target) == "Vector2" then
+						local current = glides[self] or originalGetOffset(self)
+						local reach = GLIDE_SPEED * math.clamp(tonumber(frame.DeltaTime) or 0, 0, 0.1)
+						local gap = target - current
+						glides[self] = gap.Magnitude <= reach and target or (current + gap.Unit * reach)
+						return
+					end
+				end
+			end
+			glides[self] = nil
+		end
+		Steering.GetOffset = function(self, ...)
+			local glide = STATE.autoRingRush == true and glides[self]
+			if glide then
+				return glide
+			end
+			return originalGetOffset(self, ...)
+		end
+		CourseView.GetCrossedMob = function(self, ...)
+			local mob = originalCrossed(self, ...)
+			if mob ~= nil and STATE.autoRingRush == true then
+				return nil
+			end
+			return mob
+		end
+		ring.hooked = true
+		hubCleanup(function()
+			Steering.Step = originalStep
+			Steering.GetOffset = originalGetOffset
+			CourseView.Update = originalUpdate
+			CourseView.GetCrossedMob = originalCrossed
+			if type(originalDestroy) == "function" then
+				CourseView.Destroy = originalDestroy
+			end
+			ring.view = nil
+		end)
+	end
+end
+
 local function syncThrowTrainToggles()
 	if typeof(STATE.syncToggle) == "function" then
 		pcall(STATE.syncToggle, "autoTrain")
@@ -3058,7 +3271,9 @@ end
 -- During a training boost, swap Auto Throw for Auto Train and swap back when
 -- the boost ends. Skipped at max level, where training gives nothing.
 local function stepBoostTraining()
-	local active = STATE.trainOnBoost == true and trainingBoostActive() and not atMaxLevel()
+	-- Ring Rush only pays while throwing, so it wins over boost training.
+	local ringPlay = STATE.autoRingRush == true and typeof(STATE.ringRushLive) == "function" and STATE.ringRushLive()
+	local active = STATE.trainOnBoost == true and trainingBoostActive() and not atMaxLevel() and not ringPlay
 	if not active then
 		boostTraining.declined = false
 	end
@@ -3141,6 +3356,15 @@ do
 		end
 		if boostTraining.active then
 			STATE.cycleStatus = "Paused while a training boost lasts"
+			return
+		end
+		if STATE.autoRingRush == true and typeof(STATE.ringRushLive) == "function" and STATE.ringRushLive() then
+			-- Ring Rush only pays while throwing, so hold the throw turn.
+			if cycle.phase ~= "throw" or STATE.autoThrow ~= true then
+				setPhase("throw")
+			end
+			cycle.endsAt = math.max(tonumber(cycle.endsAt) or 0, os.clock() + 5)
+			STATE.cycleStatus = "Paused while Ring Rush is live"
 			return
 		end
 		if not cycle.phase then
@@ -3798,6 +4022,7 @@ end
 local function stepEvents()
 	pcall(stepBoostTraining)
 	pcall(STATE.stepCycle)
+	pcall(STATE.stepRingRush)
 	STATE.boostStatus = boostText()
 	pcall(stepDreamland)
 	pcall(stepIndexRewards)
@@ -5304,6 +5529,7 @@ local function installHub()
 	-- Tabs -----------------------------------------------------------------
 	local homeTab = Window:Tab({ Title = "Home", Icon = "house" })
 	local farmTab = Window:Tab({ Title = "Farming", Icon = "target" })
+	local abuseTab = Window:Tab({ Title = "Admin Abuse", Icon = "crown" })
 	local collectTab = Window:Tab({ Title = "Collection", Icon = "library" })
 	local animalTab = Window:Tab({ Title = "Animals", Icon = "paw-print" })
 	local progressTab = Window:Tab({ Title = "Progress", Icon = "trending-up" })
@@ -5350,7 +5576,16 @@ local function installHub()
 	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
 	-- Farming --------------------------------------------------------------
-	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo
+	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo
+	-- Admin Abuse ----------------------------------------------------------
+	do
+		local ringBox = section(abuseTab, "Ring Rush", "orbit")
+		toggle(ringBox, "Auto Ring Rush", "autoRingRush", "When Ring Rush is live: throws, steers through every ring and gets past the imps. Works even with Auto Throw off")
+		ringInfo = info(ringBox, "Ring Rush", tostring(STATE.ringRushText and STATE.ringRushText() or "Checking Ring Rush..."))
+		local liveBox = section(abuseTab, "Live Boosts", "sparkles")
+		toggle(liveBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level and during Ring Rush")
+		boostInfo = info(liveBox, "Boosts", tostring(STATE.boostStatus))
+	end
 	do
 		local throwBox = section(farmTab, "Throwing", "target")
 		toggle(throwBox, "Auto Throw", "autoThrow", "Throws and catches on repeat")
@@ -5365,10 +5600,8 @@ local function installHub()
 		throwInfo = info(throwBox, "Status", tostring(STATE.throwStatus))
 		superInfo = info(throwBox, "Super Throw", tostring(STATE.superThrowStatus))
 
-		local boostBox = section(farmTab, "Boosts & Aiming", "sparkles")
-		toggle(boostBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level")
-		boostInfo = info(boostBox, "Boosts", tostring(STATE.boostStatus))
-		aimInfo = info(boostBox, "Aim", tostring(STATE.aimStatus))
+		local aimBox = section(farmTab, "Aiming", "crosshair")
+		aimInfo = info(aimBox, "Aim", tostring(STATE.aimStatus))
 
 		local trainBox = section(farmTab, "Training", "dumbbell", false)
 		toggle(trainBox, "Train & Throw Cycle", "cycleTrain", "Trains, then throws, on repeat. Great for new players. Skipped at max level")
@@ -5686,7 +5919,7 @@ local function installHub()
 					disable3d = false, fpsBoost = false, hidePets = true,
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
 					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
-					trainOnBoost = true, dreamBuy = false, dreamPotionBuy = false, dreamInfuse = false, autoTrail = true, cycleTrain = false,
+					trainOnBoost = true, autoRingRush = true, dreamBuy = false, dreamPotionBuy = false, dreamInfuse = false, autoTrail = true, cycleTrain = false,
 					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = false,
 				}
 				STATE.collectTarget = "Auto"
@@ -5862,6 +6095,11 @@ local function installHub()
 		setInfo(superInfo, publicStatus(STATE.superThrowStatus))
 		setInfo(trainInfo, publicStatus(STATE.trainingStatus) .. (STATE.cycleTrain == true and ("\nCycle: " .. tostring(STATE.cycleStatus)) or ""))
 		setInfo(boostInfo, tostring(STATE.boostStatus))
+		if STATE.ringRushText then
+			local ok, text = pcall(STATE.ringRushText)
+			elevate()
+			setInfo(ringInfo, ok and tostring(text) or "Checking Ring Rush...")
+		end
 		setInfo(aimInfo, tostring(STATE.aimStatus))
 		setInfo(upgradeInfo, string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(food), tostring(stand), tostring(fence)))
 		setInfo(rewardInfo, publicStatus(STATE.rewardStatus))
