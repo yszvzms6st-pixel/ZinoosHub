@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.2.6"
+local VERSION = "1.3.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -131,6 +131,7 @@ local STATE = {
 	keepTradeDupes = true,
 	tradeSpares = 3,
 	keepMutationMin = "Ruby and up",
+	indexHunt = false,
 	-- Rewards
 	autoDaily = true,
 	autoGifts = true,
@@ -239,7 +240,7 @@ local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(
 local SAVE_KEYS = {
 	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "showCycleTimer", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
-	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin",
+	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin", "indexHunt",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
@@ -571,6 +572,208 @@ local function closeGameAim()
 	end
 end
 
+-- Auto Complete Index -----------------------------------------------------------
+-- The game's roll (Balance.Roll) walks every plant from rarest to commonest and
+-- stops at each one with chance luck x c. Luck = zone luck where the seed lands
+-- x seed luck x boosts, and the game's Throw Power setting (1-100%) shortens
+-- the throw. So low power + a weak seed rolls commons, full power + the best
+-- seed rolls Secrets. Before each throw the hub picks the power and seed with
+-- the best chance of a plant you are missing (live: 1% power + Plain Seed gave
+-- luck 1.2 in the Meadow and 3 new commons in 4 throws).
+local indexHunt = { extra = 1, plan = nil, planAt = 0, planKey = "", touched = false, summary = "" }
+STATE.indexHuntInfo = indexHunt
+
+function indexHunt.missing()
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
+	local list = {}
+	for _, names in ipairs(Balance.Plants or {}) do
+		for _, name in ipairs(names) do
+			if not have[name] then
+				table.insert(list, name)
+			end
+		end
+	end
+	return list
+end
+
+-- Chance of each plant for one throw at this luck (same walk as Balance.Roll).
+function indexHunt.chances(luck)
+	local result = {}
+	local pass = 1
+	local secretLuck = Balance.SecretLuck(luck)
+	local last
+	for _, entry in ipairs(Balance.ByOdds or {}) do
+		local l = entry.tier == Balance.SecretTier and secretLuck or luck
+		local p = math.min(1, l * (tonumber(entry.c) or 0))
+		result[entry.name] = (result[entry.name] or 0) + pass * p
+		pass *= 1 - p
+		last = entry
+		if pass <= 1e-15 then
+			pass = 0
+			break
+		end
+	end
+	if last and pass > 0 then
+		result[last.name] = (result[last.name] or 0) + pass
+	end
+	return result
+end
+
+function indexHunt.plantList(names, max)
+	local shown = {}
+	for i = 1, math.min(#names, max) do
+		shown[i] = names[i]
+	end
+	return table.concat(shown, ", ") .. (#names > max and (" +" .. (#names - max) .. " more") or "")
+end
+
+function indexHunt.makePlan()
+	local missing = indexHunt.missing()
+	local strength = tonumber(attr("Strength")) or 1
+	local key = table.concat(missing, ",") .. "|" .. math.floor(math.log10(math.max(1, strength)) * 20) .. "|" .. string.format("%.2f", indexHunt.extra)
+	if indexHunt.planKey == key and os.clock() - indexHunt.planAt < 60 then
+		return indexHunt.plan
+	end
+	indexHunt.planKey, indexHunt.planAt = key, os.clock()
+	local missingSet = {}
+	local secretsLeft, othersLeft = {}, {}
+	local secretNames = {}
+	for _, entry in ipairs(Balance.ByOdds or {}) do
+		if entry.tier == Balance.SecretTier then
+			secretNames[entry.name] = true
+		end
+	end
+	for _, name in ipairs(missing) do
+		missingSet[name] = true
+		table.insert(secretNames[name] and secretsLeft or othersLeft, name)
+	end
+	indexHunt.secretsLeft, indexHunt.othersLeft = secretsLeft, othersLeft
+	local best
+	indexHunt.maxSeedLuck = 0
+	if #missing > 0 then
+		local maxDistance = Balance.DistanceMax(strength)
+		for _, seedIndex in ipairs(type(ClientState.seeds) == "table" and ClientState.seeds or {}) do
+			seedIndex = tonumber(seedIndex)
+			local okSeed, seedLuck = pcall(Balance.SeedLuck, seedIndex, ClientState.seeds)
+			seedLuck = okSeed and tonumber(seedLuck) or nil
+			if seedLuck then
+				indexHunt.maxSeedLuck = math.max(indexHunt.maxSeedLuck, seedLuck)
+			end
+			if seedIndex and seedLuck then
+				for power = 1, 100 do
+					local zoneLuck = tonumber((ZoneConfig.LuckAt(maxDistance * power / 100))) or 1
+					local luck = zoneLuck * seedLuck * indexHunt.extra
+					local chances = indexHunt.chances(luck)
+					local score = 0
+					for name in pairs(missingSet) do
+						score += chances[name] or 0
+					end
+					-- Ties (e.g. only Secrets left, all at the luck cap) go to
+					-- full power and the strongest seed, i.e. normal farming.
+					if not best or score > best.score * 1.0001
+						or (score >= best.score * 0.9999 and (power > best.power or (power == best.power and seedLuck > best.seedLuck))) then
+						best = { power = power, seed = seedIndex, seedLuck = seedLuck, score = score, luck = luck }
+					end
+				end
+			end
+		end
+	end
+	if best and best.score <= 0 then
+		best = nil
+	end
+	indexHunt.plan = best
+	return best
+end
+
+-- True while the hub is throwing at low power / a weak seed for commons.
+function indexHunt.huntingLow()
+	local plan = indexHunt.plan
+	return STATE.indexHunt == true and plan ~= nil
+		and (plan.power < 100 or plan.seedLuck < (indexHunt.maxSeedLuck or 0))
+end
+
+function indexHunt.restore()
+	if not indexHunt.touched then
+		return
+	end
+	if tonumber(attr("PowerPct")) ~= 100 then
+		request("Settings", { power = 100 })
+	end
+	indexHunt.touched = false
+	-- stepUpgrades equips the best seed again.
+end
+
+-- Set Throw Power and seed for the next throw.
+function indexHunt.apply()
+	if STATE.indexHunt ~= true then
+		indexHunt.plan = nil
+		return indexHunt.restore()
+	end
+	local plan = indexHunt.makePlan()
+	if not plan then
+		return indexHunt.restore()
+	end
+	if tonumber(attr("PowerPct")) ~= plan.power then
+		if request("Settings", { power = plan.power }) then
+			indexHunt.touched = true
+		end
+	end
+	if tonumber(attr("Seed")) ~= plan.seed then
+		if request("EquipSeed", { i = plan.seed }) then
+			indexHunt.touched = true
+		end
+	end
+end
+
+-- Learn the boost multiplier (potions, events) from a real throw result.
+function indexHunt.learn(result)
+	local distance, luck, seedLuck = tonumber(result.distance), tonumber(result.luck), tonumber(result.seedLuck)
+	if distance and luck and seedLuck and seedLuck > 0 then
+		local zoneLuck = tonumber((ZoneConfig.LuckAt(distance))) or 0
+		if zoneLuck > 0 then
+			indexHunt.extra = math.clamp(luck / (zoneLuck * seedLuck), 1, 1e6)
+		end
+	end
+end
+
+hubCleanup(function()
+	if indexHunt.touched then
+		pcall(RequestRemote.InvokeServer, RequestRemote, "Settings", { power = 100 })
+	end
+end)
+
+-- Live tracker text for the Index box.
+function indexHunt.trackerText(found, total)
+	local lines = { string.format("%d of %d plants found (%d%%)", found, total, total > 0 and math.floor(found / total * 100) or 0) }
+	if found >= total and total > 0 then
+		table.insert(lines, "Index complete!")
+		return table.concat(lines, "\n")
+	end
+	if STATE.indexHunt ~= true then
+		table.insert(lines, "Auto Complete Index is off")
+		return table.concat(lines, "\n")
+	end
+	local plan = indexHunt.makePlan()
+	local others, secrets = indexHunt.othersLeft or {}, indexHunt.secretsLeft or {}
+	if #others > 0 and plan and indexHunt.huntingLow() then
+		local seed = Balance.Seeds[plan.seed]
+		local pct = plan.score * 100
+		table.insert(lines, "Hunting: " .. indexHunt.plantList(others, 4))
+		table.insert(lines, string.format("%d%% power + %s · %s chance of a new plant each throw",
+			plan.power, seed and seed.name or "?", pct >= 10 and string.format("%d%%", math.floor(pct + 0.5)) or string.format("%.1f%%", pct)))
+	elseif #others > 0 then
+		table.insert(lines, "Can't be thrown right now: " .. indexHunt.plantList(others, 4))
+	end
+	if #secrets > 0 then
+		local each = ""
+		if plan and not indexHunt.huntingLow() and plan.score > 0 then
+			each = " · about 1 in " .. shortNumber(math.floor(1 / plan.score)) .. " throws"
+		end
+		table.insert(lines, string.format("Secrets left (%d): only at full power%s", #secrets, each))
+	end
+	return table.concat(lines, "\n")
+end
+
 local function throwOnce()
 	local char = character()
 	if not char then
@@ -582,6 +785,7 @@ local function throwOnce()
 		request("StopTrain")
 		task.wait(1)
 	end
+	indexHunt.apply()
 	-- Right after pull-ups the server refuses throws from behind the strip
 	-- (seen every time live), so the first one goes from on the strip.
 	local fromStrip = throwState.refusedRow >= 3 or throwState.afterTrain == true
@@ -624,6 +828,7 @@ local function throwOnce()
 	end
 	CollectRemote:FireServer(true)
 	recordThrow(result)
+	indexHunt.learn(result)
 	return true, result
 end
 
@@ -773,6 +978,7 @@ function animated.step()
 	end
 	local again = animated.choiceButton("Encore")
 	if again then
+		indexHunt.apply()
 		animated.click(again)
 		task.delay(1, animated.recordNew)
 		STATE.throwStatus = string.format("Throw Again · %d done", stats.throws)
@@ -804,6 +1010,7 @@ function animated.step()
 		return 0.2
 	end
 	-- Stand on the strip; the game opens its meter by itself.
+	indexHunt.apply()
 	local _, _, root = character()
 	if root and root.Anchored then
 		root.Anchored = false
@@ -1035,9 +1242,10 @@ local function stepUpgrades()
 	end
 	upgradeWait = os.clock() + 2
 	local wanted = {}
-	-- Keep the best owned seed equipped (also after buying one by hand).
+	-- Keep the best owned seed equipped (also after buying one by hand),
+	-- except while Auto Complete Index has picked a weaker one for commons.
 	local best = bestOwnedSeed()
-	if best and tonumber(attr("Seed")) ~= best then
+	if best and tonumber(attr("Seed")) ~= best and not indexHunt.huntingLow() then
 		local ok, message = request("EquipSeed", { i = best })
 		if ok then
 			noteActivity("Equipped " .. tostring(Balance.Seeds[best].name))
@@ -1605,7 +1813,9 @@ local function stepRewards()
 				-- Luck only helps while throwing, 2x XP only while training,
 				-- 2x Money always.
 				local wanted = { Money = true }
-				if STATE.mode == "throw" then
+				-- (Not while Auto Complete Index hunts commons: more luck makes
+				-- commons harder to roll.)
+				if STATE.mode == "throw" and not indexHunt.huntingLow() then
 					wanted.Luck2, wanted.Luck5 = true, true
 				elseif STATE.mode == "train" then
 					wanted.Train = true
@@ -1622,7 +1832,7 @@ local function stepRewards()
 			-- Lucky Throws (50x and 10x luck on one throw): save them for a 5x Luck
 			-- potion when you have one, then load one at a time so each lands
 			-- inside the boost. Without 5x potions they are used straight away.
-			if STATE.useLuckyThrows == true and STATE.mode == "throw" then
+			if STATE.useLuckyThrows == true and STATE.mode == "throw" and not indexHunt.huntingLow() then
 				local loaded = (tonumber(attr("LuckyThrows")) or 0) + (tonumber(attr("LuckyThrows10")) or 0)
 				local lucky = (tonumber(items.Lucky) or 0) > 0 and "Lucky" or ((tonumber(items.Lucky10) or 0) > 0 and "Lucky10" or nil)
 				if loaded == 0 and lucky then
@@ -2012,6 +2222,12 @@ local function installHub()
 			end
 		elseif key == "disable3d" then
 			STATE.apply3d()
+		elseif key == "indexHunt" then
+			indexHunt.planKey = ""
+			if not on then
+				indexHunt.plan = nil
+				task.spawn(indexHunt.restore)
+			end
 		elseif key == "walkSpeed" and not on then
 			local _, hum = character()
 			if hum then hum.WalkSpeed = 16 end
@@ -2283,7 +2499,7 @@ local function installHub()
 	toggle(trainBox, "Train & Throw Cycle", "cycleTrain", "Trains, then throws, on repeat with the timers below")
 	slider(trainBox, "Train For (minutes)", nil, "cycleTrainMinutes", 1, 30, 1)
 	slider(trainBox, "Throw For (minutes)", nil, "cycleThrowMinutes", 1, 30, 1)
-	toggle(trainBox, "Timer On Screen", "showCycleTimer", "Small Training / Throwing countdown in the top-right of your game screen")
+	toggle(trainBox, "Timer On Screen", "showCycleTimer", "Small Training / Throwing countdown (and the live index tracker) in the top-right of your game screen")
 	toggle(trainBox, "Auto Tap 2x XP Bubbles", "autoXpOffers", "Taps the purple 2x bubble the moment it pops up while training")
 
 	-- Upgrades
@@ -2316,6 +2532,7 @@ local function installHub()
 	toggle(sellBox, "Keep Huge And Bigger", "keepBigSizes", "Huge, Massive and bigger are never fused or sold by the manual options")
 	local indexBox = section(gardenTab, "Index", "book-open")
 	local indexInfo = info(indexBox, "Progress", "Loading...")
+	toggle(indexBox, "Auto Complete Index", "indexHunt", "On throwing turns, sets Throw Power and seed for the best chance of plants you're missing (low power for commons), then goes back to 100% and your best seed")
 
 	-- Rewards
 	local rewardBox = section(rewardTab, "Free Rewards", "gift")
@@ -2392,7 +2609,7 @@ local function installHub()
 				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2, showCycleTimer = true,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
-				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up",
+				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up", indexHunt = false,
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
@@ -2515,7 +2732,7 @@ local function installHub()
 			capCost and ("$" .. shortNumber(capCost)) or "maxed"
 		))
 		setInfo(gardenInfo, tostring(STATE.gardenStatus))
-		setInfo(indexInfo, string.format("%d of %d plants found (%d%%)", found, total, total > 0 and math.floor(found / total * 100) or 0))
+		setInfo(indexInfo, indexHunt.trackerText(found, total))
 		setInfo(rewardInfo, tostring(STATE.rewardStatus) .. string.format("\nCodes used: %d of %d", #STATE.redeemedCodes, (function()
 			local n = 0
 			for _ in pairs(Balance.Codes or {}) do n += 1 end
@@ -2598,28 +2815,20 @@ end)
 -- On-screen cycle timer: a small pill in the top-right of the game screen that
 -- counts down the Train & Throw turns while the menu is closed.
 do
-	local gui, label, dot, stroke
-	local function build()
-		elevate()
-		gui = Instance.new("ScreenGui")
-		gui.Name = "ZinoosSeedTimer"
-		gui.ResetOnSpawn = false
-		gui.IgnoreGuiInset = false
-		gui.DisplayOrder = 50
-		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	local gui, timerPill, indexPill
+	local function makePill(holder, order)
 		local pill = Instance.new("Frame")
-		pill.Name = "Pill"
-		pill.AnchorPoint = Vector2.new(1, 0)
-		pill.Position = UDim2.new(1, -12, 0, 8)
+		pill.Name = "Pill" .. order
+		pill.LayoutOrder = order
 		pill.Size = UDim2.fromOffset(0, 34)
 		pill.AutomaticSize = Enum.AutomaticSize.X
 		pill.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
 		pill.BackgroundTransparency = 0.15
-		pill.Parent = gui
+		pill.Parent = holder
 		local corner = Instance.new("UICorner")
 		corner.CornerRadius = UDim.new(1, 0)
 		corner.Parent = pill
-		stroke = Instance.new("UIStroke")
+		local stroke = Instance.new("UIStroke")
 		stroke.Thickness = 2
 		stroke.Parent = pill
 		local pad = Instance.new("UIPadding")
@@ -2632,7 +2841,7 @@ do
 		list.SortOrder = Enum.SortOrder.LayoutOrder
 		list.Padding = UDim.new(0, 8)
 		list.Parent = pill
-		dot = Instance.new("Frame")
+		local dot = Instance.new("Frame")
 		dot.Size = UDim2.fromOffset(10, 10)
 		dot.LayoutOrder = 1
 		dot.BorderSizePixel = 0
@@ -2640,7 +2849,7 @@ do
 		local dotCorner = Instance.new("UICorner")
 		dotCorner.CornerRadius = UDim.new(1, 0)
 		dotCorner.Parent = dot
-		label = Instance.new("TextLabel")
+		local label = Instance.new("TextLabel")
 		label.BackgroundTransparency = 1
 		label.AutomaticSize = Enum.AutomaticSize.X
 		label.Size = UDim2.fromOffset(0, 34)
@@ -2650,12 +2859,51 @@ do
 		label.LayoutOrder = 2
 		label.Text = ""
 		label.Parent = pill
+		return { frame = pill, dot = dot, label = label, stroke = stroke }
+	end
+	local function build()
+		elevate()
+		gui = Instance.new("ScreenGui")
+		gui.Name = "ZinoosSeedTimer"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = false
+		gui.DisplayOrder = 50
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		local holder = Instance.new("Frame")
+		holder.Name = "Holder"
+		holder.AnchorPoint = Vector2.new(1, 0)
+		holder.Position = UDim2.new(1, -12, 0, 8)
+		holder.Size = UDim2.fromOffset(0, 0)
+		holder.AutomaticSize = Enum.AutomaticSize.XY
+		holder.BackgroundTransparency = 1
+		holder.Parent = gui
+		local list = Instance.new("UIListLayout")
+		list.FillDirection = Enum.FillDirection.Vertical
+		list.HorizontalAlignment = Enum.HorizontalAlignment.Right
+		list.SortOrder = Enum.SortOrder.LayoutOrder
+		list.Padding = UDim.new(0, 6)
+		list.Parent = holder
+		timerPill = makePill(holder, 1)
+		indexPill = makePill(holder, 2)
 		local placed = pcall(function()
 			gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
 		end)
 		if not placed then
 			gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 		end
+	end
+	local function indexCounts()
+		local found, total = 0, 0
+		local have = type(ClientState.index) == "table" and ClientState.index or {}
+		for _, names in ipairs(Balance.Plants or {}) do
+			for _, name in ipairs(names) do
+				total += 1
+				if have[name] then
+					found += 1
+				end
+			end
+		end
+		return found, total
 	end
 	hubCleanup(function()
 		if gui then
@@ -2665,22 +2913,42 @@ do
 		end
 	end)
 	task.spawn(function()
+		local indexColor = Color3.fromHex("B05AFF")
 		while running() do
-			local show = STATE.showCycleTimer ~= false and STATE.cycleTrain == true and cycle.endsAt > 0
-			if show and not gui then
+			local showTimer = STATE.showCycleTimer ~= false and STATE.cycleTrain == true and cycle.endsAt > 0
+			-- The live index pill shows while Auto Complete Index is on.
+			local showIndex = STATE.showCycleTimer ~= false and STATE.indexHunt == true
+			if (showTimer or showIndex) and not gui then
 				pcall(build)
 			end
 			if gui then
 				local left = math.max(0, math.ceil(cycle.endsAt - os.clock()))
 				local training = cycle.phase == "train"
 				local color = training and Color3.fromHex("FF9A2A") or Color3.fromHex("6BE34A")
+				local indexText
+				if showIndex then
+					local found, total = indexCounts()
+					indexText = string.format("INDEX  %d/%d", found, total)
+					if found >= total then
+						indexText ..= "  DONE"
+					elseif indexHunt.huntingLow() and indexHunt.othersLeft and indexHunt.othersLeft[1] then
+						indexText ..= "  · " .. indexHunt.othersLeft[1]
+					end
+				end
 				elevate()
 				pcall(function()
-					gui.Enabled = show
-					if show then
-						label.Text = string.format("%s  %d:%02d", training and "TRAINING" or "THROWING", left // 60, left % 60)
-						dot.BackgroundColor3 = color
-						stroke.Color = color
+					gui.Enabled = showTimer or showIndex
+					timerPill.frame.Visible = showTimer
+					indexPill.frame.Visible = showIndex
+					if showTimer then
+						timerPill.label.Text = string.format("%s  %d:%02d", training and "TRAINING" or "THROWING", left // 60, left % 60)
+						timerPill.dot.BackgroundColor3 = color
+						timerPill.stroke.Color = color
+					end
+					if showIndex then
+						indexPill.label.Text = indexText
+						indexPill.dot.BackgroundColor3 = indexColor
+						indexPill.stroke.Color = indexColor
 					end
 				end)
 			end
