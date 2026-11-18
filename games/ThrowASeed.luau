@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -426,10 +426,15 @@ end
 
 -- Just behind the launch strip: close enough for the server to accept a
 -- throw, but outside the strip so the game's own throw screen stays closed.
-local function throwSpot()
+local function throwSpot(onStrip)
 	local strip = launchStrip()
 	if not strip then
 		return nil
+	end
+	if onStrip then
+		-- The game's own spot: 1 stud past the strip's middle. Used to get
+		-- unstuck when the server keeps refusing throws from behind the strip.
+		return strip.CFrame * CFrame.new(0, strip.Size.Y / 2 + 3, -1)
 	end
 	local back = -(tonumber(ZoneConfig.Direction) or -1)
 	local depth = strip.Size.Z / 2 + 5
@@ -474,9 +479,12 @@ end
 -- The server only accepts a throw about 6.6 s after the last accepted one
 -- (measured live). The hub learns that gap: a refused throw makes it wait a
 -- little longer, accepted throws slowly try a little sooner.
--- The server can also still count you as training after the game stopped
--- showing it, and then refuses every throw; telling it StopTrain fixes that.
-local throwState = { lastOkSent = 0, sentAt = 0, learned = 6.9, refusedRow = 0, needStop = true }
+-- The server can also get stuck refusing every throw after a training turn
+-- (seen live: 6+ minutes, StopTrain every few seconds did not help, one throw
+-- from the game's own spot on the strip fixed it at once). So a refused run
+-- climbs a ladder: StopTrain once, then throw from on the strip, then StopTrain
+-- again now and then, and as a last resort respawn the character.
+local throwState = { lastOkSent = 0, sentAt = 0, learned = 6.9, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0 }
 
 local function recordThrow(result)
 	stats.throws += 1
@@ -518,10 +526,13 @@ local function throwOnce()
 	end
 	if isTraining() or throwState.needStop then
 		throwState.needStop = false
+		throwState.lastStop = os.clock()
 		request("StopTrain")
 		task.wait(1)
 	end
-	local spot = throwSpot()
+	-- Right after pull-ups the server refuses throws from behind the strip
+	-- (seen every time live), so the first one goes from on the strip.
+	local spot = throwSpot(throwState.refusedRow >= 3 or throwState.afterTrain == true)
 	if not spot then
 		return false, "Launch strip not found"
 	end
@@ -646,6 +657,7 @@ local function stepFarm()
 		if ok then
 			throwState.lastOkSent = throwState.sentAt
 			throwState.refusedRow = 0
+			throwState.afterTrain = false
 			throwState.learned = math.max(6.2, throwState.learned - 0.05)
 			STATE.throwStatus = string.format("Threw %s · %d done", describePlant(result), stats.throws)
 			STATE.status = "Throwing"
@@ -656,20 +668,40 @@ local function stepFarm()
 			-- A refused try does not restart the server's wait (measured), so
 			-- try again shortly and learn a slightly longer gap.
 			throwState.refusedRow += 1
-			throwState.learned = math.min(9, throwState.learned + 0.3)
-			if throwState.refusedRow >= 2 then
-				-- Two in a row: the server may still think you are training.
-				throwState.needStop = true
-				throwState.refusedRow = 0
+			local row = throwState.refusedRow
+			if throwState.sentAt - throwState.lastOkSent < 10 then
+				-- Only a refusal close to the last throw says the wait is longer.
+				throwState.learned = math.min(9, throwState.learned + 0.3)
 			end
-			STATE.throwStatus = "Server said wait, trying again"
-			return 1.5
+			if row == 2 or (row >= 10 and os.clock() - throwState.lastStop > 30) then
+				-- The server may still think you are training.
+				throwState.needStop = true
+			end
+			if row == 6 or row % 15 == 0 then
+				CollectRemote:FireServer(true)
+			end
+			if row >= 20 and os.clock() - throwState.lastRespawn > 180 then
+				-- Over a minute stuck: a fresh character clears it on the server.
+				throwState.lastRespawn = os.clock()
+				noteActivity("Throws stuck, respawning to fix it")
+				local _, humanoid = character()
+				if humanoid then
+					humanoid.Health = 0
+				end
+				STATE.throwStatus = "Throws stuck, respawning"
+				return 6
+			end
+			STATE.status = "Throwing"
+			STATE.throwStatus = row >= 3 and string.format("Server keeps saying wait (%d in a row), trying to unstick it", row)
+				or "Server said wait, trying again"
+			return row >= 6 and 3 or 1.5
 		end
 		STATE.throwStatus = tostring(result)
 		return 0.5
 	elseif mode == "train" then
 		-- The next throwing turn starts with a StopTrain to the server.
 		throwState.needStop = true
+		throwState.afterTrain = true
 		STATE.throwStatus = STATE.cycleTrain == true and "Waiting for the cycle" or "Off"
 		if not isTraining() then
 			STATE.trainStatus = "Getting on the bar..."
