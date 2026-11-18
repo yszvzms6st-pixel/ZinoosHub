@@ -9,6 +9,7 @@ local GAMES = {
 	{ name = "Solve The Cube", file = "SolveTheCube.luau", gameId = 10769259605 },
 	{ name = "Climb For Animals Eggs", file = "ClimbAnimals.luau", gameId = 10765490774 },
 	{ name = "Throw Food For Animals", file = "ThrowFoodAnimals.luau", gameId = 10766972131 },
+	{ name = "Throw a Seed", file = "ThrowASeed.luau", gameId = 10775182046 },
 }
 
 local entry = nil
