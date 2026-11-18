@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.5.1"
+local VERSION = "1.6.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -145,6 +145,8 @@ local STATE = {
 	-- Alerts
 	notifications = true,
 	showTracker = true,
+	customFov = false,
+	fov = 90,
 	-- Menu
 	toggleKey = "RightControl",
 	hideOnStart = false,
@@ -252,7 +254,7 @@ local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker",
+	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -1709,6 +1711,37 @@ local function stepProServer()
 	noteActivity("Joining Pro Servers")
 end
 
+-- Field of view ----------------------------------------------------------------
+-- The game zooms the camera to 65-70 when its menus open and close, so the
+-- chosen FOV is put back every frame, right after the camera updates.
+local FOV_BIND = "ZinoosVolleyFov"
+local fovApplied = false
+local function applyFov()
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	if STATE.customFov == true then
+		local value = math.clamp(tonumber(STATE.fov) or 90, 30, 120)
+		if math.abs(camera.FieldOfView - value) > 0.01 then
+			camera.FieldOfView = value
+		end
+		fovApplied = true
+	elseif fovApplied then
+		fovApplied = false
+		camera.FieldOfView = 70
+	end
+end
+pcall(function()
+	RunService:BindToRenderStep(FOV_BIND, Enum.RenderPriority.Camera.Value + 1, applyFov)
+end)
+hubCleanup(function()
+	pcall(RunService.UnbindFromRenderStep, RunService, FOV_BIND)
+	if fovApplied and workspace.CurrentCamera then
+		workspace.CurrentCamera.FieldOfView = 70
+	end
+end)
+
 -- Player -----------------------------------------------------------------------
 local function pulseAntiAfk()
 	if not running() or STATE.antiAfk ~= true then
@@ -2222,6 +2255,22 @@ local function installHub()
 	local questInfo = info(questBox, "Progress", "Loading...")
 
 	-- Player
+	local cameraBox = section(playerTab, "Camera", "camera")
+	toggle(cameraBox, "Custom FOV", "customFov", "Wider view so you can see more of the court (Roblox default is 70)")
+	cameraBox:Slider({
+		Title = "Field Of View",
+		Desc = "30 = zoomed in · 70 = normal · 120 = widest",
+		Step = 1,
+		Value = { Min = 30, Max = 120, Default = math.clamp(tonumber(STATE.fov) or 90, 30, 120) },
+		Callback = function(value)
+			value = tonumber(value)
+			if not value or value == STATE.fov then
+				return
+			end
+			STATE.fov = value
+			saveConfig()
+		end,
+	})
 	local afkBox = section(playerTab, "AFK", "moon")
 	toggle(afkBox, "Anti AFK", "antiAfk", "Stops the 20 minute idle kick")
 	toggle(afkBox, "Stay Active", "stayActive", "Turns the game's AFK button off so you keep getting put in rounds")
@@ -2268,7 +2317,7 @@ local function installHub()
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
-				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false,
+				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false, customFov = false, fov = 90,
 			}
 			for key, value in pairs(defaults) do
 				STATE[key] = value
