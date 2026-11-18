@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.6.0"
+local VERSION = "1.6.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -147,6 +147,7 @@ local STATE = {
 	showTracker = true,
 	customFov = false,
 	fov = 90,
+	dodgeShockwave = true,
 	-- Menu
 	toggleKey = "RightControl",
 	hideOnStart = false,
@@ -254,7 +255,7 @@ local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov",
+	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -1711,6 +1712,68 @@ local function stepProServer()
 	noteActivity("Joining Pro Servers")
 end
 
+-- Dodge Shockwave ----------------------------------------------------------------
+-- Shockwave (an enemy passive) sends a short ring out from where their ball
+-- blew up: it grows to 60 studs across in 2 seconds and kills anyone it
+-- touches. The game's own tip is "Jump to avoid!", so jump just before the
+-- ring's edge reaches you.
+local shockwaves = {}
+local lastDodge = 0
+trackConnection(workspace.ChildAdded:Connect(function(child)
+	if child.Name == "Shockwave" and child:IsA("BasePart") then
+		shockwaves[child] = { r = child.Size.X / 2, t = os.clock(), rate = 14.5 }
+	end
+end))
+trackConnection(RunService.Heartbeat:Connect(function()
+	if not running() or next(shockwaves) == nil then
+		return
+	end
+	local _, root, hum = character()
+	for part, info in pairs(shockwaves) do
+		if not part.Parent then
+			shockwaves[part] = nil
+		elseif root and STATE.dodgeShockwave == true then
+			local radius = part.Size.X / 2
+			local now = os.clock()
+			if now - info.t > 0.03 then
+				local measured = (radius - info.r) / (now - info.t)
+				if measured > 1 then
+					info.rate = measured
+				end
+				info.r, info.t = radius, now
+			end
+			local dist = ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude
+			local gap = dist - radius
+			local reaches = dist <= 31
+			if reaches and gap > -2.5 and gap / math.max(info.rate, 1) <= 0.35
+				and hum.FloorMaterial ~= Enum.Material.Air and now - lastDodge > 0.6 then
+				lastDodge = now
+				hum:ChangeState(Enum.HumanoidStateType.Jumping)
+				stats.dodges = (stats.dodges or 0) + 1
+				noteActivity("Jumped a Shockwave")
+			end
+		end
+	end
+end))
+
+-- Remember which abilities other players use on you (the game announces them).
+do
+	local event = remote("RoundNotification")
+	if event then
+		trackConnection(event.OnClientEvent:Connect(function(_, text)
+			if type(text) ~= "string" then
+				return
+			end
+			local who, ability = string.match(text, "^(.-) used (.-) ability")
+			if ability and who ~= LocalPlayer.DisplayName and who ~= LocalPlayer.Name then
+				stats.enemyAbilities = stats.enemyAbilities or {}
+				stats.enemyAbilities[ability] = (stats.enemyAbilities[ability] or 0) + 1
+				STATE.lastEnemyAbility = who .. " used " .. ability
+			end
+		end))
+	end
+end
+
 -- Field of view ----------------------------------------------------------------
 -- The game zooms the camera to 65-70 when its menus open and close, so the
 -- chosen FOV is put back every frame, right after the camera updates.
@@ -2213,6 +2276,19 @@ local function installHub()
 	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
 	toggle(moveBox, "Emotes", "emotes", "Sometimes emotes after a kill or a win, and now and then in the lobby")
 	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
+	local dangerBox = section(playTab, "Enemy Abilities", "shield")
+	toggle(dangerBox, "Dodge Shockwave", "dodgeShockwave", "Jumps over Shockwave rings (they kill anyone they touch) right before they reach you")
+	local dangerInfo = info(dangerBox, "Seen this session", "None yet")
+	STATE.drawDanger = function()
+		local parts = {}
+		for name, count in pairs(stats.enemyAbilities or {}) do
+			table.insert(parts, name .. " x" .. count)
+		end
+		table.sort(parts)
+		setInfo(dangerInfo, (#parts > 0 and table.concat(parts, " · ") or "None yet")
+			.. string.format("\nShockwaves jumped: %d", stats.dodges or 0)
+			.. (STATE.lastEnemyAbility and ("\nLast: " .. STATE.lastEnemyAbility) or ""))
+	end
 	local abilityBox = section(playTab, "Ability", "zap")
 	local abilityInfo = info(abilityBox, "Equipped", "Checking...")
 	toggle(abilityBox, "Auto Use Ability", "autoAbility", "Uses it at the right moment: spike abilities before a spike, Moonball/Portal/Tornado before a hit, Adrenaline when the ball comes your way, Frozen/Magnet/Forcefield to save a ball you can't reach")
@@ -2317,7 +2393,7 @@ local function installHub()
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
-				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false, customFov = false, fov = 90,
+				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true,
 			}
 			for key, value in pairs(defaults) do
 				STATE[key] = value
@@ -2426,6 +2502,7 @@ local function installHub()
 		table.insert(packLines, "Last: " .. tostring(STATE.lastPack or "none yet"))
 		setInfo(packInfo, table.concat(packLines, "\n"))
 		setInfo(questInfo, questText())
+		pcall(STATE.drawDanger)
 	end
 
 	task.spawn(function()
