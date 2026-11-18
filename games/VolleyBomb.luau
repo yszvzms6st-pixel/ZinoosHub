@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -122,6 +122,7 @@ local STATE = {
 	abilityGoal = "Guardian",
 	autoEquipAbility = true,
 	autoBuyPacks = true,
+	saveForAbility = false,
 	packChoice = "Both",
 	-- Rewards
 	autoDaily = true,
@@ -236,7 +237,7 @@ local ABILITY_MOMENT = {
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding",
-	"autoVote", "voteMode", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "packChoice",
+	"autoVote", "voteMode", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
@@ -904,9 +905,6 @@ end
 
 local shopTotals = { abilities = 0, packs = 0 }
 local function stepShop()
-	if arenaName() then
-		return -- shop between rounds only
-	end
 	local coins = tonumber(dataGet("Money")) or 0
 	local goal = STATE.abilityGoal
 	local goalData = goal and AbilityInfo[goal]
@@ -930,8 +928,8 @@ local function stepShop()
 				end
 			end
 		else
-			saving = goalPrice
-			table.insert(parts, string.format("Saving for %s: %s/%s coins", goal, shortNumber(coins), shortNumber(goalPrice)))
+			saving = STATE.saveForAbility == true and goalPrice or 0
+			table.insert(parts, string.format("%s: %s/%s coins", goal, shortNumber(coins), shortNumber(goalPrice)))
 		end
 	end
 
@@ -944,28 +942,38 @@ local function stepShop()
 	end
 
 	if STATE.autoBuyPacks == true then
-		local bought = false
-		for _, packName in ipairs(PACK_NAMES[STATE.packChoice] or {}) do
+		local bought, done, broke = false, 0, false
+		local names = PACK_NAMES[STATE.packChoice] or {}
+		for _, packName in ipairs(names) do
 			local pack = PackInfo[packName]
 			local price = pack and tonumber(pack.Price) or math.huge
-			if not packComplete(packName) and coins - price >= saving then
+			if packComplete(packName) then
+				done += 1
+			elseif coins - price >= saving then
 				local ok, result = pcall(Net.Invoke, Net, "BuyPack", packName)
 				elevate()
 				if ok and result then
 					shopTotals.packs += 1
 					bought = true
 					coins = tonumber(dataGet("Money")) or (coins - price)
-					noteActivity("Opened " .. packName)
+					local item = type(result) == "string" and result or nil
+					STATE.lastPack = (item and (item .. " from ") or "") .. packName
+					noteActivity("Opened " .. packName .. (item and (": " .. item) or ""))
 				end
-				break
+			else
+				broke = true
 			end
 		end
-		if not bought and saving > 0 then
+		if done == #names and #names > 0 then
+			table.insert(parts, "every pack complete")
+		elseif not bought and saving > 0 then
 			table.insert(parts, "packs wait until the ability is bought")
+		elseif not bought and broke then
+			table.insert(parts, "not enough coins for a pack")
 		end
 	end
 	if shopTotals.packs > 0 then
-		table.insert(parts, shopTotals.packs .. " packs opened")
+		table.insert(parts, shopTotals.packs .. " packs opened" .. (STATE.lastPack and (" (last: " .. STATE.lastPack .. ")") or ""))
 	end
 	STATE.shopStatus = #parts > 0 and table.concat(parts, " · ") or "Nothing to buy right now"
 end
@@ -1479,8 +1487,10 @@ local function installHub()
 		return table.concat(abilityLabels, "\n")
 	end)())
 	local packBox = section(shopTab, "Packs", "package")
-	toggle(packBox, "Auto Buy Packs", "autoBuyPacks", "Uses spare coins on ball and explosion packs (only after the ability above is bought, and stops once you own everything in a pack)")
+	toggle(packBox, "Auto Buy Packs", "autoBuyPacks", "Opens ball and explosion packs with your coins (100 each) and stops once you own everything in a pack")
 	choice(packBox, "Packs", nil, PACK_OPTIONS, "packChoice")
+	toggle(packBox, "Save For Ability First", "saveForAbility", "Holds pack buying until the ability above is bought")
+	local packInfo = info(packBox, "Opened", "None yet")
 
 	-- Rewards
 	local rewardBox = section(rewardTab, "Free Rewards", "gift")
@@ -1536,7 +1546,7 @@ local function installHub()
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
 				autoVote = true, voteMode = "Solo", autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
-				autoBuyPacks = true, packChoice = "Both", showTracker = true,
+				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
 				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false,
 			}
@@ -1628,6 +1638,21 @@ local function installHub()
 			.. (abilityData and abilityData.Description and ("\n" .. abilityData.Description) or "")) or "None equipped")
 		setInfo(rewardInfo, tostring(STATE.rewardStatus))
 		setInfo(shopInfo, tostring(STATE.shopStatus))
+		local packLines = {}
+		for _, packName in ipairs({ "Basic Ball Pack", "Basic Explosions Pack" }) do
+			local pack = PackInfo[packName]
+			if type(pack) == "table" and type(pack.Items) == "table" then
+				local owned = dataGet(pack.Kind == "Explosions" and "OwnedExplosions" or "OwnedBalls") or {}
+				local have, total = 0, 0
+				for item in pairs(pack.Items) do
+					total += 1
+					if owned[item] then have += 1 end
+				end
+				table.insert(packLines, string.format("%s: %d/%d collected", packName, have, total))
+			end
+		end
+		table.insert(packLines, "Last: " .. tostring(STATE.lastPack or "none yet"))
+		setInfo(packInfo, table.concat(packLines, "\n"))
 		setInfo(questInfo, questText())
 	end
 
