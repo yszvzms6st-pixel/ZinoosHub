@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.1.1"
+local VERSION = "1.2.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -117,6 +117,7 @@ local STATE = {
 	showLanding = false,
 	autoVote = true,
 	voteMode = "Solo",
+	autoProServer = true,
 	-- Shop
 	autoBuyAbility = true,
 	abilityGoal = "Guardian",
@@ -146,6 +147,7 @@ local STATE = {
 	playStatus = "Waiting for a round",
 	rewardStatus = "Waiting",
 	shopStatus = "Waiting",
+	proStatus = "Checking...",
 	toggleControls = {},
 }
 genv.ZinoosVolleyState = STATE
@@ -237,7 +239,7 @@ local ABILITY_MOMENT = {
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding",
-	"autoVote", "voteMode", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
+	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
@@ -1003,6 +1005,65 @@ trackConnection(workspace:GetAttributeChangedSignal("Voting"):Connect(function()
 	end
 end))
 
+-- Pro Servers: the lobby pad "Join Pro Servers" (1.5x coins) needs a number of
+-- wins. Once you have them, walk onto the pad between rounds and press it.
+local proServer = { lastTry = 0, tries = 0 }
+local function proPad()
+	local objects = workspace:FindFirstChild("GameObjects")
+	local model = objects and objects:FindFirstChild("ProServer")
+	local prompt = model and model:FindFirstChildWhichIsA("ProximityPrompt", true)
+	local primary = model and (model:FindFirstChild("Primary") or model.PrimaryPart)
+	local needed
+	local label = primary and primary:FindFirstChild("BillboardGui") and primary.BillboardGui:FindFirstChild("Wins")
+	if label and label:IsA("TextLabel") then
+		needed = tonumber(string.match(label.Text, "%d+"))
+	end
+	return prompt, primary, needed or 20
+end
+STATE.proPad = proPad
+
+-- Normal servers are place 98979169190595; Pro Servers are place 97790681249268
+-- (it has the same pad, so never try to join from there).
+local MAIN_PLACE, PRO_PLACE = 98979169190595, 97790681249268
+local function stepProServer()
+	if game.PlaceId == PRO_PLACE then
+		STATE.proStatus = "You're in a Pro Server (1.5x coins)"
+		return
+	elseif game.PlaceId ~= MAIN_PLACE then
+		STATE.proStatus = "Pro Servers can only be joined from the main lobby"
+		return
+	end
+	local prompt, primary, needed = proPad()
+	if not prompt or not primary then
+		STATE.proStatus = "No Pro Server pad here (you may already be in one)"
+		return
+	end
+	local wins = leaderstat("Wins")
+	if wins < needed then
+		STATE.proStatus = string.format("%d/%d wins to unlock Pro Servers (1.5x coins)", wins, needed)
+		return
+	end
+	if STATE.autoProServer ~= true then
+		STATE.proStatus = "Unlocked · turn on Auto Join to go"
+		return
+	end
+	if arenaName() or os.clock() - proServer.lastTry < 60 or proServer.tries >= 5 then
+		STATE.proStatus = proServer.tries >= 5 and "Tried 5 times, stopped (join it from the pad)" or "Unlocked · joining between rounds"
+		return
+	end
+	local _, root = character()
+	if not root then
+		return
+	end
+	proServer.lastTry = os.clock()
+	proServer.tries += 1
+	root.CFrame = CFrame.new(primary.Position + primary.CFrame.LookVector * 5 + Vector3.new(0, 3, 0))
+	task.wait(0.4)
+	pcall(fireproximityprompt, prompt)
+	STATE.proStatus = "Joining Pro Servers..."
+	noteActivity("Joining Pro Servers")
+end
+
 -- Player -----------------------------------------------------------------------
 local function pulseAntiAfk()
 	if not running() or STATE.antiAfk ~= true then
@@ -1471,6 +1532,9 @@ local function installHub()
 	toggle(lobbyBox, "Auto Vote Game Mode", "autoVote", "Votes for you when the round vote opens")
 	choice(lobbyBox, "Vote For", "Trios needs 12 players in the server", VOTE_OPTIONS, "voteMode")
 	toggle(lobbyBox, "On-screen Tracker", "showTracker", "Small box with wins, eliminations and coins made this session")
+	local proBox = section(playTab, "Pro Servers", "crown")
+	local proInfo = info(proBox, "Status", "Checking...")
+	toggle(proBox, "Auto Join Pro Servers", "autoProServer", "1.5x coins. Goes to the lobby pad and joins once you have the wins (between rounds)")
 
 	-- Shop
 	local shopBox = section(shopTab, "Abilities", "zap")
@@ -1545,7 +1609,7 @@ local function installHub()
 			local defaults = {
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
-				autoVote = true, voteMode = "Solo", autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
+				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
 				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false,
@@ -1638,6 +1702,7 @@ local function installHub()
 			.. (abilityData and abilityData.Description and ("\n" .. abilityData.Description) or "")) or "None equipped")
 		setInfo(rewardInfo, tostring(STATE.rewardStatus))
 		setInfo(shopInfo, tostring(STATE.shopStatus))
+		setInfo(proInfo, tostring(STATE.proStatus))
 		local packLines = {}
 		for _, packName in ipairs({ "Basic Ball Pack", "Basic Explosions Pack" }) do
 			local pack = PackInfo[packName]
@@ -1693,6 +1758,8 @@ task.spawn(function()
 		pcall(stepVote)
 		elevate()
 		pcall(stepShop)
+		elevate()
+		pcall(stepProServer)
 		elevate()
 		task.wait(5)
 	end
