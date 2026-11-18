@@ -92,8 +92,16 @@ local DailyRewards = safeRequire(ReplicatedStorage.Data:FindFirstChild("DailyRew
 local QuestInfo = safeRequire(Info:FindFirstChild("Quests")) or {}
 local AchievementConfig = safeRequire(Info:FindFirstChild("AchievementConfig")) or {}
 local AbilityInfo = safeRequire(Info:FindFirstChild("Abilities")) or {}
+local PackInfo = safeRequire(Info:FindFirstChild("Packs")) or {}
+local AbilityModules = {}
+do
+	local folder = Shared:FindFirstChild("Modules") and Shared.Modules:FindFirstChild("Abilities")
+	for _, module in ipairs(folder and folder:GetChildren() or {}) do
+		AbilityModules[module.Name] = safeRequire(module)
+	end
+end
 
-local VERSION = "1.0.0"
+local VERSION = "1.1.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -107,6 +115,14 @@ local STATE = {
 	aimMode = "Hardest to save",
 	autoAbility = true,
 	showLanding = false,
+	autoVote = true,
+	voteMode = "Solo",
+	-- Shop
+	autoBuyAbility = true,
+	abilityGoal = "Guardian",
+	autoEquipAbility = true,
+	autoBuyPacks = true,
+	packChoice = "Both",
 	-- Rewards
 	autoDaily = true,
 	autoQuests = true,
@@ -118,6 +134,7 @@ local STATE = {
 	autoReload = true,
 	-- Alerts
 	notifications = true,
+	showTracker = true,
 	-- Menu
 	toggleKey = "RightControl",
 	hideOnStart = false,
@@ -127,6 +144,7 @@ local STATE = {
 	status = "Starting...",
 	playStatus = "Waiting for a round",
 	rewardStatus = "Waiting",
+	shopStatus = "Waiting",
 	toggleControls = {},
 }
 genv.ZinoosVolleyState = STATE
@@ -182,13 +200,45 @@ end
 -- Options --------------------------------------------------------------------
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
 local AIM_OPTIONS = { "Hardest to save", "Fastest", "Random player" }
+local VOTE_OPTIONS = { "Solo", "Duos", "Trios" }
+local PACK_OPTIONS = { "Both", "Ball Pack", "Explosions Pack" }
+local PACK_NAMES = { ["Ball Pack"] = { "Basic Ball Pack" }, ["Explosions Pack"] = { "Basic Explosions Pack" }, Both = { "Basic Ball Pack", "Basic Explosions Pack" } }
+-- Abilities you can buy with coins, cheapest first.
+local ABILITY_OPTIONS = {}
+do
+	local list = {}
+	for name, data in pairs(AbilityInfo) do
+		if type(data) == "table" and tonumber(data.Price) then
+			table.insert(list, { name = name, price = tonumber(data.Price) })
+		end
+	end
+	table.sort(list, function(a, b)
+		return a.price < b.price
+	end)
+	for _, entry in ipairs(list) do
+		table.insert(ABILITY_OPTIONS, entry.name)
+	end
+	if #ABILITY_OPTIONS == 0 then
+		ABILITY_OPTIONS = { "Guardian" }
+	end
+end
+-- When each ability does the most good:
+-- spike = right before a spike, hit = before any hit, incoming = the ball is
+-- coming into your square, save = you can't reach a ball that will land in it.
+local ABILITY_MOMENT = {
+	Superspike = "spike", Curveball = "spike",
+	Moonball = "hit", Portal = "hit", TornadoBall = "hit",
+	Adrenaline = "incoming",
+	Frozen = "save", Magnet = "save", Forcefield = "save",
+}
 
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding",
+	"autoVote", "voteMode", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications",
+	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -214,6 +264,15 @@ local function loadSaved()
 	end
 	if not table.find(AIM_OPTIONS, STATE.aimMode) then
 		STATE.aimMode = "Hardest to save"
+	end
+	if not table.find(VOTE_OPTIONS, STATE.voteMode) then
+		STATE.voteMode = "Solo"
+	end
+	if not table.find(PACK_OPTIONS, STATE.packChoice) then
+		STATE.packChoice = "Both"
+	end
+	if not table.find(ABILITY_OPTIONS, STATE.abilityGoal) then
+		STATE.abilityGoal = table.find(ABILITY_OPTIONS, "Guardian") and "Guardian" or ABILITY_OPTIONS[#ABILITY_OPTIONS]
 	end
 end
 
@@ -336,6 +395,32 @@ local function equippedAbility()
 	return dataGet("EquippedAbility")
 end
 
+-- Uses the equipped ability when this moment suits it. A spike also counts as
+-- a hit, so hit abilities fire before spikes too.
+local function useAbility(moment)
+	if STATE.autoAbility ~= true then
+		return false
+	end
+	local name = equippedAbility()
+	local wanted = name and ABILITY_MOMENT[name]
+	if not wanted or not (wanted == moment or (moment == "spike" and wanted == "hit")) then
+		return false
+	end
+	local okLeft, left = pcall(AbilityController.Remaining, AbilityController, name)
+	if okLeft and tonumber(left) and left > 0 then
+		return false
+	end
+	if type(AbilityController._active) == "table" and AbilityController._active[name] then
+		return false
+	end
+	local ok = pcall(AbilityController.ActivateEquipped, AbilityController)
+	elevate()
+	if ok then
+		stats.abilities = (stats.abilities or 0) + 1
+	end
+	return ok
+end
+
 -- Brain ------------------------------------------------------------------------
 -- Everything below asks the game's own Ball module where the ball will be, so
 -- the moves match what the server checks (reach, zones, cooldowns).
@@ -454,6 +539,7 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	if kind == "Spike" then
 		resolvedKind, quality = Ball.Resolve("Spike", char.Head.Position, ballPos, Ball.Jump(char, root.Position))
 	end
+	useAbility(resolvedKind == "Spike" and "spike" or "hit")
 	local pick
 	if STATE.smartAim == true then
 		local dir
@@ -571,13 +657,21 @@ local function stepBrain()
 	local ballHere = Ball.ZoneAt(zones, ballNow) == myZone
 	local airborne = hum.FloorMaterial == Enum.Material.Air
 
-	-- Spike while in the air.
+	-- In the air: only hit once it really counts as a spike (high enough in the
+	-- jump, ball not below your head). Hitting earlier would turn it into a bump.
 	if airborne and ballHere and STATE.autoSpike == true then
 		local reach = Ball.Reach("Spike", root.Position, char)
-		if Ball.InRange("Spike", reach, ballNow) and os.clock() - brain.lastTry > 0.05 then
-			brain.lastTry = os.clock()
-			tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
-			return
+		if Ball.InRange("Spike", reach, ballNow) then
+			local kind = Ball.Resolve("Spike", char.Head.Position, ballNow, Ball.Jump(char, root.Position))
+			local below = ballNow.Y < char.Head.Position.Y - 0.5
+			if kind == "Spike" and os.clock() - brain.lastTry > 0.05 then
+				brain.lastTry = os.clock()
+				tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
+				return
+			elseif not below and os.clock() - brain.lastJump < 0.9 then
+				STATE.playStatus = "Waiting for the spike"
+				return
+			end
 		end
 	end
 
@@ -596,7 +690,7 @@ local function stepBrain()
 			local p = Ball.Contain(Ball.At(state, t))
 			if Ball.ZoneAt(zones, p) == myZone and Ball.VelocityAt(state, t).Y < 0 then
 				local height = p.Y - Ball.Ground(p).Y
-				if height <= 15 and height >= 9 then
+				if height <= 15.5 and height >= 8.5 then
 					local flat = Vector3.new(p.X, root.Position.Y, p.Z)
 					local dist = (flat - root.Position).Magnitude
 					if STATE.autoMove ~= true and dist > 4 then
@@ -607,10 +701,7 @@ local function stepBrain()
 						STATE.playStatus = "Lining up a spike"
 						if t - now <= 0.46 and os.clock() - brain.lastJump > 0.8 then
 							brain.lastJump = os.clock()
-							if STATE.autoAbility == true then
-								pcall(AbilityController.ActivateEquipped, AbilityController)
-								elevate()
-							end
+							useAbility("spike")
 							hum:ChangeState(Enum.HumanoidStateType.Jumping)
 						end
 						return
@@ -635,10 +726,14 @@ local function stepBrain()
 		local dist = (flat - root.Position).Magnitude
 		moveTo(hum, root, flat)
 		STATE.playStatus = "Going for the ball"
+		useAbility("incoming")
 		local land, landTime = landingSpot(state, now)
 		local lands = land and Ball.ZoneAt(zones, land) == myZone
 		local left = (lands and landTime or targetTime) - now
 		local need = dist / math.max(hum.WalkSpeed, 1)
+		if lands and need > left and left < 1 then
+			useAbility("save")
+		end
 		if STATE.autoDive == true and lands and need > left and left < 0.5 and dist < 30 and os.clock() - brain.lastDive > 1 then
 			brain.lastDive = os.clock()
 			face(root, (flat - root.Position).Unit)
@@ -785,6 +880,120 @@ local function stepRewards()
 	STATE.rewardStatus = (#parts > 0 and ("Claimed " .. table.concat(parts, ", ")) or "Nothing to claim yet")
 		.. (nextSpin > 0 and string.format(" · free spin in %dm", math.ceil(nextSpin / 60)) or "")
 end
+
+-- Shop -------------------------------------------------------------------------
+local function ownsAbility(name)
+	local owned = dataGet("OwnedAbilities") or {}
+	return owned[name] == true
+end
+
+local function packComplete(packName)
+	local pack = PackInfo[packName]
+	if type(pack) ~= "table" or type(pack.Items) ~= "table" then
+		return true
+	end
+	local ownedKey = pack.Kind == "Explosions" and "OwnedExplosions" or "OwnedBalls"
+	local owned = dataGet(ownedKey) or {}
+	for item in pairs(pack.Items) do
+		if not owned[item] then
+			return false
+		end
+	end
+	return true
+end
+
+local shopTotals = { abilities = 0, packs = 0 }
+local function stepShop()
+	if arenaName() then
+		return -- shop between rounds only
+	end
+	local coins = tonumber(dataGet("Money")) or 0
+	local goal = STATE.abilityGoal
+	local goalData = goal and AbilityInfo[goal]
+	local goalPrice = goalData and tonumber(goalData.Price) or 0
+	local saving = 0
+	local parts = {}
+
+	if STATE.autoBuyAbility == true and goalData then
+		if ownsAbility(goal) then
+			table.insert(parts, goal .. " owned")
+		elseif coins >= goalPrice then
+			local event = remote("BuyAbility")
+			if event then
+				event:FireServer(goal)
+				task.wait(1)
+				if ownsAbility(goal) then
+					shopTotals.abilities += 1
+					coins = tonumber(dataGet("Money")) or coins
+					noteActivity("Bought " .. goal)
+					notify("Bought " .. goal, "Your new ability is ready")
+				end
+			end
+		else
+			saving = goalPrice
+			table.insert(parts, string.format("Saving for %s: %s/%s coins", goal, shortNumber(coins), shortNumber(goalPrice)))
+		end
+	end
+
+	if STATE.autoEquipAbility == true and goal and ownsAbility(goal) and equippedAbility() ~= goal then
+		local event = remote("EquipAbility")
+		if event then
+			event:FireServer(goal)
+			noteActivity("Equipped " .. goal)
+		end
+	end
+
+	if STATE.autoBuyPacks == true then
+		local bought = false
+		for _, packName in ipairs(PACK_NAMES[STATE.packChoice] or {}) do
+			local pack = PackInfo[packName]
+			local price = pack and tonumber(pack.Price) or math.huge
+			if not packComplete(packName) and coins - price >= saving then
+				local ok, result = pcall(Net.Invoke, Net, "BuyPack", packName)
+				elevate()
+				if ok and result then
+					shopTotals.packs += 1
+					bought = true
+					coins = tonumber(dataGet("Money")) or (coins - price)
+					noteActivity("Opened " .. packName)
+				end
+				break
+			end
+		end
+		if not bought and saving > 0 then
+			table.insert(parts, "packs wait until the ability is bought")
+		end
+	end
+	if shopTotals.packs > 0 then
+		table.insert(parts, shopTotals.packs .. " packs opened")
+	end
+	STATE.shopStatus = #parts > 0 and table.concat(parts, " · ") or "Nothing to buy right now"
+end
+
+-- Votes for your game mode once per vote.
+local votedFor = nil
+local function stepVote()
+	local voting = workspace:GetAttribute("Voting")
+	if STATE.autoVote ~= true or not voting then
+		return
+	end
+	local key = tostring(voting) .. STATE.voteMode
+	if votedFor == key then
+		return
+	end
+	local event = remote("VoteTeammode")
+	if event then
+		event:FireServer(STATE.voteMode)
+		votedFor = key
+		noteActivity("Voted " .. STATE.voteMode)
+	end
+end
+trackConnection(workspace:GetAttributeChangedSignal("Voting"):Connect(function()
+	task.wait(0.5)
+	if running() then
+		pcall(stepVote)
+	end
+end))
 
 -- Player -----------------------------------------------------------------------
 local function pulseAntiAfk()
@@ -962,6 +1171,8 @@ local function installHub()
 			OnlyMobile = false,
 			Enabled = true,
 			Draggable = true,
+			-- Right side, so it doesn't cover the game's round text at the top.
+			Position = UDim2.new(1, -110, 0.42, 0),
 		},
 	})
 	elevate()
@@ -1215,6 +1426,7 @@ local function installHub()
 	-- Tabs -----------------------------------------------------------------
 	local homeTab = Window:Tab({ Title = "Home", Icon = "house" })
 	local playTab = Window:Tab({ Title = "Auto Play", Icon = "volleyball" })
+	local shopTab = Window:Tab({ Title = "Shop", Icon = "shopping-cart" })
 	local rewardTab = Window:Tab({ Title = "Rewards", Icon = "gift" })
 	local playerTab = Window:Tab({ Title = "Player", Icon = "user" })
 	local settingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
@@ -1246,7 +1458,29 @@ local function installHub()
 	toggle(aimBox, "Show Landing Spot", "showLanding", "Purple circle where the ball will land")
 	local abilityBox = section(playTab, "Ability", "zap")
 	local abilityInfo = info(abilityBox, "Equipped", "Checking...")
-	toggle(abilityBox, "Auto Use Ability", "autoAbility", "Uses your ability right before a spike")
+	toggle(abilityBox, "Auto Use Ability", "autoAbility", "Uses it at the right moment: spike abilities before a spike, Moonball/Portal/Tornado before a hit, Adrenaline when the ball comes your way, Frozen/Magnet/Forcefield to save a ball you can't reach")
+	local lobbyBox = section(playTab, "Lobby", "users")
+	toggle(lobbyBox, "Auto Vote Game Mode", "autoVote", "Votes for you when the round vote opens")
+	choice(lobbyBox, "Vote For", "Trios needs 12 players in the server", VOTE_OPTIONS, "voteMode")
+	toggle(lobbyBox, "On-screen Tracker", "showTracker", "Small box with wins, eliminations and coins made this session")
+
+	-- Shop
+	local shopBox = section(shopTab, "Abilities", "zap")
+	local shopInfo = info(shopBox, "Status", "Waiting")
+	toggle(shopBox, "Auto Buy Ability", "autoBuyAbility", "Saves your coins and buys the ability below as soon as you can afford it")
+	local abilityLabels = {}
+	choice(shopBox, "Ability To Get", "Guardian = survive one blast every game", ABILITY_OPTIONS, "abilityGoal")
+	toggle(shopBox, "Auto Equip It", "autoEquipAbility", "Equips it once you own it")
+	local priceInfo = info(shopBox, "Prices", (function()
+		for _, name in ipairs(ABILITY_OPTIONS) do
+			local data = AbilityInfo[name]
+			table.insert(abilityLabels, string.format("%s  %s coins", name, shortNumber(data and data.Price or 0)))
+		end
+		return table.concat(abilityLabels, "\n")
+	end)())
+	local packBox = section(shopTab, "Packs", "package")
+	toggle(packBox, "Auto Buy Packs", "autoBuyPacks", "Uses spare coins on ball and explosion packs (only after the ability above is bought, and stops once you own everything in a pack)")
+	choice(packBox, "Packs", nil, PACK_OPTIONS, "packChoice")
 
 	-- Rewards
 	local rewardBox = section(rewardTab, "Free Rewards", "gift")
@@ -1301,6 +1535,8 @@ local function installHub()
 			local defaults = {
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
+				autoVote = true, voteMode = "Solo", autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
+				autoBuyPacks = true, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
 				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false,
 			}
@@ -1376,9 +1612,9 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
-			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.lastHit
+			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0, stats.lastHit
 		))
 		local lines = { "Play · " .. tostring(STATE.playStatus), "Rewards · " .. tostring(STATE.rewardStatus) }
 		for _, item in ipairs(STATE.activity) do
@@ -1391,6 +1627,7 @@ local function installHub()
 		setInfo(abilityInfo, ability and (tostring(abilityData and abilityData.DisplayName or ability)
 			.. (abilityData and abilityData.Description and ("\n" .. abilityData.Description) or "")) or "None equipped")
 		setInfo(rewardInfo, tostring(STATE.rewardStatus))
+		setInfo(shopInfo, tostring(STATE.shopStatus))
 		setInfo(questInfo, questText())
 	end
 
@@ -1428,9 +1665,93 @@ task.spawn(function()
 		elevate()
 		pcall(stepRewards)
 		elevate()
+		pcall(stepVote)
+		elevate()
+		pcall(stepShop)
+		elevate()
 		task.wait(5)
 	end
 end)
+
+-- On-screen tracker: a small box in the top-right with this session's results.
+do
+	local gui, label, stroke
+	local function build()
+		elevate()
+		gui = Instance.new("ScreenGui")
+		gui.Name = "ZinoosVolleyTracker"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = false
+		gui.DisplayOrder = 50
+		local pill = Instance.new("Frame")
+		pill.AnchorPoint = Vector2.new(1, 0)
+		pill.Position = UDim2.new(1, -12, 0, 14)
+		pill.Size = UDim2.fromOffset(0, 30)
+		pill.AutomaticSize = Enum.AutomaticSize.X
+		pill.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+		pill.BackgroundTransparency = 0.15
+		pill.Parent = gui
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = pill
+		stroke = Instance.new("UIStroke")
+		stroke.Thickness = 2
+		stroke.Color = Color3.fromHex("8268FF")
+		stroke.Parent = pill
+		local pad = Instance.new("UIPadding")
+		pad.PaddingLeft = UDim.new(0, 12)
+		pad.PaddingRight = UDim.new(0, 12)
+		pad.Parent = pill
+		label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.AutomaticSize = Enum.AutomaticSize.X
+		label.Size = UDim2.fromOffset(0, 30)
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 14
+		label.TextColor3 = Color3.new(1, 1, 1)
+		label.Text = ""
+		label.Parent = pill
+		local placed = pcall(function()
+			gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+		end)
+		if not placed then
+			gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+		end
+	end
+	hubCleanup(function()
+		if gui then
+			elevate()
+			pcall(gui.Destroy, gui)
+			gui = nil
+		end
+	end)
+	task.spawn(function()
+		while running() do
+			local show = STATE.showTracker == true
+			if show and not gui then
+				pcall(build)
+			end
+			if gui then
+				local wins, elims = leaderstat("Wins"), leaderstat("Eliminations")
+				local cash = tonumber(dataGet("Money")) or 0
+				stats.wins0 = stats.wins0 or wins
+				stats.elims0 = stats.elims0 or elims
+				stats.money0 = stats.money0 or cash
+				elevate()
+				pcall(function()
+					gui.Enabled = show
+					local playing = STATE.autoHit == true
+					stroke.Color = playing and Color3.fromHex("8268FF") or Color3.fromHex("8C8896")
+					label.Text = string.format("%s  WINS +%d · KILLS +%d · COINS +%s · SPIKES %d",
+						playing and "AUTO" or "OFF",
+						wins - (stats.wins0 or wins), elims - (stats.elims0 or elims),
+						shortNumber(math.max(0, cash - (stats.money0 or cash))), stats.spikes)
+				end)
+			end
+			task.wait(1)
+		end
+	end)
+end
 
 task.spawn(function()
 	while running() do
