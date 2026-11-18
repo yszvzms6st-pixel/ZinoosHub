@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.0.1"
+local VERSION = "1.0.2"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -519,6 +519,47 @@ local function recordThrow(result)
 	end
 end
 
+-- Standing on the strip makes the game open its own throw meter and lock the
+-- camera; it stays up until you walk. The game closes it on W, so tap W
+-- (and call the game's own abort if a phone executor can't send keys).
+local gameAbort
+local function gameAiming()
+	local fx = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("ThrowFX")
+	return fx ~= nil and fx:GetAttribute("State") == "aiming"
+end
+
+local function closeGameAim()
+	if not gameAiming() then
+		return
+	end
+	pcall(function()
+		local vim = game:GetService("VirtualInputManager")
+		vim:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+		task.wait(0.05)
+		vim:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+	end)
+	task.wait(0.3)
+	if not gameAiming() then
+		return
+	end
+	if gameAbort == nil then
+		gameAbort = false
+		pcall(function()
+			local found = typeof(filtergc) == "function" and filtergc("function", { Name = "abort" }, false) or {}
+			for _, fn in ipairs(found) do
+				local src = debug.info(fn, "s")
+				if type(src) == "string" and src:find("ThrowClient") then
+					gameAbort = fn
+					break
+				end
+			end
+		end)
+	end
+	if gameAbort then
+		pcall(gameAbort)
+	end
+end
+
 local function throwOnce()
 	local char = character()
 	if not char then
@@ -532,12 +573,16 @@ local function throwOnce()
 	end
 	-- Right after pull-ups the server refuses throws from behind the strip
 	-- (seen every time live), so the first one goes from on the strip.
-	local spot = throwSpot(throwState.refusedRow >= 3 or throwState.afterTrain == true)
+	local fromStrip = throwState.refusedRow >= 3 or throwState.afterTrain == true
+	local spot = throwSpot(fromStrip)
 	if not spot then
 		return false, "Launch strip not found"
 	end
 	if moveTo(spot, 6) then
 		task.wait(0.1)
+	end
+	if not fromStrip then
+		closeGameAim()
 	end
 	local started = os.clock()
 	AimRemote:FireServer()
@@ -560,6 +605,9 @@ local function throwOnce()
 		end
 	end
 	STATE.throwLog = throwState.log
+	if fromStrip then
+		closeGameAim()
+	end
 	if not ok or type(result) ~= "table" then
 		return false, "Server said wait (cooldown)"
 	end
