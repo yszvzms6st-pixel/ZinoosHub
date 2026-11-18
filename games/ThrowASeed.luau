@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -132,6 +132,7 @@ local STATE = {
 	tradeSpares = 3,
 	keepMutationMin = "Ruby and up",
 	indexHunt = false,
+	historyFilter = "All",
 	-- Rewards
 	autoDaily = true,
 	autoGifts = true,
@@ -240,7 +241,7 @@ local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(
 local SAVE_KEYS = {
 	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "showCycleTimer", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
-	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin", "indexHunt",
+	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin", "indexHunt", "historyFilter",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
@@ -498,8 +499,183 @@ end
 -- again now and then, and as a last resort respawn the character.
 local throwState = { lastOkSent = 0, sentAt = 0, learned = 6.9, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0 }
 
+-- Catch history -------------------------------------------------------------------
+-- Every plant you catch, saved per account so it survives reloads and server
+-- changes: the newest 500 in full, totals for ever.
+local HISTORY_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_history_" .. tostring(LocalPlayer.UserId) .. ".json"
+local history = { entries = {}, total = 0, newCount = 0, byRarity = {}, best = nil, version = 0, dirty = false, savedAt = 0, lastSeen = nil }
+STATE.history = history
+
+do
+	local ok, data = pcall(function()
+		if typeof(isfile) == "function" and isfile(HISTORY_PATH) then
+			return HttpService:JSONDecode(readfile(HISTORY_PATH))
+		end
+		return nil
+	end)
+	if ok and type(data) == "table" then
+		history.entries = type(data.entries) == "table" and data.entries or {}
+		history.total = tonumber(data.total) or #history.entries
+		history.newCount = tonumber(data.newCount) or 0
+		history.byRarity = type(data.byRarity) == "table" and data.byRarity or {}
+		history.best = type(data.best) == "table" and data.best or nil
+	end
+end
+
+function history.save(force)
+	if not history.dirty or (not force and os.clock() - history.savedAt < 10) then
+		return
+	end
+	history.savedAt = os.clock()
+	history.dirty = false
+	pcall(function()
+		writefile(HISTORY_PATH, HttpService:JSONEncode({
+			entries = history.entries, total = history.total, newCount = history.newCount,
+			byRarity = history.byRarity, best = history.best,
+		}))
+	end)
+end
+
+function history.plantNumber(plant)
+	return tonumber(tostring(plant and plant.id or ""):match("%d+"))
+end
+
+function history.newestNumber()
+	local best = 0
+	for _, plant in pairs(type(ClientState.plants) == "table" and ClientState.plants or {}) do
+		best = math.max(best, history.plantNumber(plant) or 0)
+	end
+	return best
+end
+
+-- Start linking from the plants you already have, so the first catch counts too.
+pcall(function()
+	history.lastSeen = history.newestNumber()
+end)
+
+function history.clear()
+	history.entries, history.total, history.newCount, history.byRarity, history.best = {}, 0, 0, {}, nil
+	history.version += 1
+	history.dirty = true
+	history.save(true)
+end
+
+function history.add(result)
+	if history.lastSeen == nil then
+		history.lastSeen = history.newestNumber()
+	end
+	local tier = tonumber(result.rarity) or 1
+	local entry = {
+		t = os.time(),
+		plant = tostring(result.plant or "Plant"),
+		tier = tier,
+		size = tonumber(result.size) or 1,
+		mutation = tonumber(result.mutation) or 1,
+		income = tonumber(result.income) or 0,
+		new = result.isNew == true or nil,
+	}
+	table.insert(history.entries, 1, entry)
+	while #history.entries > 500 do
+		table.remove(history.entries)
+	end
+	history.total += 1
+	if entry.new then
+		history.newCount += 1
+	end
+	local rarity = rarityName(tier)
+	history.byRarity[rarity] = (tonumber(history.byRarity[rarity]) or 0) + 1
+	local best = history.best
+	if not best or tier > (tonumber(best.tier) or 0) or (tier == tonumber(best.tier) and entry.income > (tonumber(best.income) or 0)) then
+		history.best = entry
+	end
+	-- Link it to the plant the game adds, so the list can show garden / kept / sold.
+	task.delay(1.5, function()
+		local found, foundNumber
+		for _, plant in pairs(type(ClientState.plants) == "table" and ClientState.plants or {}) do
+			local number = history.plantNumber(plant)
+			if number and number > (history.lastSeen or 0) and plant.plant == entry.plant and (not foundNumber or number < foundNumber) then
+				found, foundNumber = plant, number
+			end
+		end
+		if found then
+			entry.id = found.id
+			history.lastSeen = foundNumber
+			history.version += 1
+			history.dirty = true
+		end
+	end)
+	history.version += 1
+	history.dirty = true
+	history.save()
+end
+
+local HISTORY_FILTERS = { "All", "New to index", "Mutated", "Ruby and Rainbow", "Huge and bigger", "Still mine (garden or kept)" }
+
+function history.summaryText()
+	if history.total == 0 then
+		return "No catches yet. Every plant you throw shows up here."
+	end
+	local lines = {
+		string.format("Catches: %s · new to index: %s", shortNumber(history.total), shortNumber(history.newCount)),
+	}
+	local best = history.best
+	if best then
+		table.insert(lines, string.format("Best ever: %s (%s) · $%s/s", describePlant(best), rarityName(best.tier), shortNumber(best.income)))
+	end
+	local rarities = {}
+	for name, count in pairs(history.byRarity) do
+		table.insert(rarities, { name = name, count = tonumber(count) or 0, tier = rarityTier(name) or 0 })
+	end
+	table.sort(rarities, function(a, b)
+		return a.tier > b.tier
+	end)
+	local parts = {}
+	for i = 1, math.min(#rarities, 6) do
+		table.insert(parts, rarities[i].name .. " " .. shortNumber(rarities[i].count))
+	end
+	if #parts > 0 then
+		table.insert(lines, table.concat(parts, " · "))
+	end
+	return table.concat(lines, "\n")
+end
+
+function history.listText(filter, limit)
+	local where = {}
+	for _, plant in pairs(type(ClientState.plants) == "table" and ClientState.plants or {}) do
+		if plant.id then
+			where[plant.id] = plant.placed and "garden" or "kept"
+		end
+	end
+	local today = os.date("%d/%m")
+	local lines = {}
+	for _, entry in ipairs(history.entries) do
+		local status = entry.id and (where[entry.id] or "sold") or nil
+		local mutation, size = tonumber(entry.mutation) or 1, tonumber(entry.size) or 1
+		local show = filter == "All"
+			or (filter == "New to index" and entry.new)
+			or (filter == "Mutated" and mutation > 1)
+			or (filter == "Ruby and Rainbow" and mutation >= 5)
+			or (filter == "Huge and bigger" and size >= 4)
+			or (filter == "Still mine (garden or kept)" and (status == "garden" or status == "kept"))
+		if show then
+			local stamp = os.date("%d/%m", entry.t) == today and os.date("%H:%M", entry.t) or os.date("%d/%m %H:%M", entry.t)
+			table.insert(lines, string.format("%s  %s · %s · $%s/s%s%s", stamp, describePlant(entry), rarityName(entry.tier),
+				shortNumber(entry.income), entry.new and " · NEW" or "", status and (" · " .. status) or ""))
+			if #lines >= limit then
+				break
+			end
+		end
+	end
+	return #lines > 0 and table.concat(lines, "\n") or "Nothing here yet."
+end
+
+hubCleanup(function()
+	history.save(true)
+end)
+
 local function recordThrow(result)
 	stats.throws += 1
+	pcall(history.add, result)
 	if result.perfect then
 		stats.perfect += 1
 	end
@@ -2459,6 +2635,7 @@ local function installHub()
 	local farmTab = Window:Tab({ Title = "Farming", Icon = "target" })
 	local upgradeTab = Window:Tab({ Title = "Upgrades", Icon = "trending-up" })
 	local gardenTab = Window:Tab({ Title = "Garden", Icon = "flower-2" })
+	local historyTab = Window:Tab({ Title = "History", Icon = "history" })
 	local rewardTab = Window:Tab({ Title = "Rewards", Icon = "gift" })
 	local playerTab = Window:Tab({ Title = "Player", Icon = "user" })
 	local settingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
@@ -2532,6 +2709,30 @@ local function installHub()
 	toggle(sellBox, "Keep Huge And Bigger", "keepBigSizes", "Huge, Massive and bigger are never fused or sold by the manual options")
 	local indexBox = section(gardenTab, "Index", "book-open")
 	local indexInfo = info(indexBox, "Progress", "Loading...")
+	-- History
+	local historyBox = section(historyTab, "Catch History", "history")
+	local historySummary = info(historyBox, "All Time", history.summaryText())
+	choice(historyBox, "Show", "Which catches the list below shows", HISTORY_FILTERS, "historyFilter", function()
+		history.version += 1
+	end)
+	button(historyBox, "Clear History", "Deletes the saved list and totals", "trash-2", function()
+		confirm("Clear your catch history?", "The list and all-time totals are deleted. Your plants are not touched.", function()
+			history.clear()
+		end)
+	end)
+	local historyListBox = section(historyTab, "Latest Catches", "list")
+	local historyList = info(historyListBox, "Newest First (last 30)", history.listText(tostring(STATE.historyFilter), 30))
+	local historyDrawn, historyDrawnAt = -1, 0
+	STATE.drawHistory = function()
+		if history.version == historyDrawn and os.clock() - historyDrawnAt < 10 then
+			return
+		end
+		historyDrawn, historyDrawnAt = history.version, os.clock()
+		setInfo(historySummary, history.summaryText())
+		setInfo(historyList, history.listText(tostring(STATE.historyFilter), 30))
+		history.save()
+	end
+
 	toggle(indexBox, "Auto Complete Index", "indexHunt", "On throwing turns, sets Throw Power and seed for the best chance of plants you're missing (low power for commons), then goes back to 100% and your best seed")
 
 	-- Rewards
@@ -2609,7 +2810,7 @@ local function installHub()
 				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2, showCycleTimer = true,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
-				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up", indexHunt = false,
+				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up", indexHunt = false, historyFilter = "All",
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
@@ -2733,6 +2934,7 @@ local function installHub()
 		))
 		setInfo(gardenInfo, tostring(STATE.gardenStatus))
 		setInfo(indexInfo, indexHunt.trackerText(found, total))
+		pcall(STATE.drawHistory)
 		setInfo(rewardInfo, tostring(STATE.rewardStatus) .. string.format("\nCodes used: %d of %d", #STATE.redeemedCodes, (function()
 			local n = 0
 			for _ in pairs(Balance.Codes or {}) do n += 1 end
