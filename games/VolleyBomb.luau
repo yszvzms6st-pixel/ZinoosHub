@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.6.1"
+local VERSION = "1.6.2"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -773,6 +773,23 @@ local function tryTip(char, root, state, zones, myZone, ballPos, now)
 	return false
 end
 
+-- How far the game's dive slides in t seconds (same curve as the game:
+-- speed eases from 120 down to 30 over half a second, times Dive.Boost).
+function brain.diveReach(t)
+	local module = AbilityModules.Dive
+	local boost = module and tonumber(module.Boost) or 1
+	local duration = module and tonumber(module.Duration) or 0.5
+	local distance, step = 0, 1 / 120
+	local s = 0
+	while s < math.min(t, duration) do
+		local x = math.min(s / duration, 1)
+		local ease = 1 - (1 - x) ^ 2
+		distance += (120 + (30 - 120) * ease) * boost * step
+		s += step
+	end
+	return distance
+end
+
 -- Turn like a mouse would: fast, but never an instant snap.
 local function yawOf(vector)
 	return math.atan2(-vector.X, -vector.Z)
@@ -1156,6 +1173,13 @@ local function stepBrain()
 			break
 		end
 	end
+	-- Never lose sight of a ball that is going to land in your square.
+	if not target then
+		local land, landTime = landingSpot(state, now)
+		if land and Ball.ZoneAt(zones, land) == myZone and landTime > now then
+			target, targetTime = land, landTime
+		end
+	end
 	if target and not reacted then
 		STATE.playStatus = "Reacting"
 	elseif target then
@@ -1180,9 +1204,18 @@ local function stepBrain()
 		if lands and need > left and left < 1 then
 			useAbility("save")
 		end
-		if STATE.autoDive == true and lands and need > left and left < 0.5 and dist < 30 and os.clock() - brain.lastDive > 1 then
+		-- Dive timed to the distance: the game's dive is a fast slide (about
+		-- 35 studs in half a second), so start it when the slide will arrive
+		-- with the ball, not a fixed half second early (that overshoots close
+		-- balls).
+		local landFlat = land and Vector3.new(land.X, root.Position.Y, land.Z)
+		local landDist = landFlat and (landFlat - root.Position).Magnitude or dist
+		local slide = brain.diveReach(math.max(left - 0.04, 0))
+		local walkTooSlow = landDist / math.max(hum.WalkSpeed, 1) > left
+		if STATE.autoDive == true and lands and walkTooSlow and left <= 0.55 and slide <= landDist + 3
+			and landDist < 40 and os.clock() - brain.lastDive > 1 then
 			brain.lastDive = os.clock()
-			face(root, (flat - root.Position).Unit)
+			face(root, ((landFlat or flat) - root.Position).Unit)
 			local ok = pcall(AbilityController.Activate, AbilityController, "Dive")
 			elevate()
 			if ok then
@@ -1722,8 +1755,10 @@ local lastDodge = 0
 trackConnection(workspace.ChildAdded:Connect(function(child)
 	if child.Name == "Shockwave" and child:IsA("BasePart") then
 		shockwaves[child] = { r = child.Size.X / 2, t = os.clock(), rate = 14.5 }
+		stats.shockwavesSeen = (stats.shockwavesSeen or 0) + 1
 	end
 end))
+STATE.shockwaves = shockwaves
 trackConnection(RunService.Heartbeat:Connect(function()
 	if not running() or next(shockwaves) == nil then
 		return
@@ -1745,6 +1780,9 @@ trackConnection(RunService.Heartbeat:Connect(function()
 			local dist = ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude
 			local gap = dist - radius
 			local reaches = dist <= 31
+			if reaches then
+				info.inRange = true
+			end
 			if reaches and gap > -2.5 and gap / math.max(info.rate, 1) <= 0.35
 				and hum.FloorMaterial ~= Enum.Material.Air and now - lastDodge > 0.6 then
 				lastDodge = now
@@ -1755,6 +1793,112 @@ trackConnection(RunService.Heartbeat:Connect(function()
 		end
 	end
 end))
+
+-- Loss recorder: when the ball lands in your square or you die, write down
+-- what happened (who hit it, how, what you were doing, any ability or
+-- Shockwave involved) so a lost point can be explained instead of guessed.
+STATE.losses = {}
+local statusTrail = {}
+local lastTrailStatus = nil
+local function recordLoss(entry)
+	entry.at = os.date("%H:%M:%S")
+	entry.clock = os.clock()
+	entry.trail = table.concat(statusTrail, " > ")
+	entry.lastEnemyAbility = STATE.lastEnemyAbility
+	table.insert(STATE.losses, 1, entry)
+	while #STATE.losses > 5 do
+		table.remove(STATE.losses)
+	end
+end
+do
+	local wasDead = true
+	trackConnection(RunService.Heartbeat:Connect(function()
+		if not running() then
+			return
+		end
+		local status = STATE.playStatus
+		if status ~= lastTrailStatus then
+			lastTrailStatus = status
+			table.insert(statusTrail, string.format("%.1f %s", os.clock() % 100, tostring(status)))
+			while #statusTrail > 6 do
+				table.remove(statusTrail, 1)
+			end
+		end
+		local ball = arenaBall()
+		local state = ball and ball.State
+		if type(state) ~= "table" then
+			return
+		end
+		if state.Dead and not wasDead then
+			local _, root = character()
+			local zones = ball.Zones
+			local myZone = root and type(zones) == "table" and Ball.ZoneAt(zones, root.Position)
+			if myZone and Ball.ZoneAt(zones, state.Origin) == myZone then
+				local tags = {}
+				for _, key in ipairs({ "Magnet", "Tornado", "Frozen", "Burst" }) do
+					if state[key] then
+						table.insert(tags, key)
+					end
+				end
+				recordLoss({
+					what = "Ball landed in your square",
+					hitBy = state.HitBy and state.HitBy.Name or "?",
+					touchesUsed = state.HitZone == myZone and state.Hits or 0,
+					distance = math.floor(((root.Position - state.Origin) * Vector3.new(1, 0, 1)).Magnitude + 0.5),
+					ballEffects = #tags > 0 and table.concat(tags, ",") or nil,
+				})
+			end
+		end
+		wasDead = state.Dead == true
+	end))
+	local function watchCharacter(char)
+		local hum = char:WaitForChild("Humanoid", 10)
+		if not hum then
+			return
+		end
+		trackConnection(hum.Died:Connect(function()
+			local root = char:FindFirstChild("HumanoidRootPart")
+			local ring
+			for part, info in pairs(shockwaves) do
+				if part.Parent and root then
+					local gap = ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude - part.Size.X / 2
+					if math.abs(gap) < 8 then
+						ring = string.format("ring edge %.1f studs away, in range=%s", gap, tostring(info.inRange == true))
+					end
+				end
+			end
+			-- Dying because the ball landed in your square is already recorded.
+			local last = STATE.losses[1]
+			if not ring and last and last.what == "Ball landed in your square" and os.clock() - (last.clock or 0) < 2 then
+				return
+			end
+			-- Where the ball was: a blast just over the line can still reach you.
+			local ball = arenaBall()
+			local state = ball and ball.State
+			local blast
+			if root and type(state) == "table" then
+				local spot = state.Dead and state.Origin or Ball.At(state, workspace:GetServerTimeNow())
+				local away = ((root.Position - spot) * Vector3.new(1, 0, 1)).Magnitude
+				local zones = ball.Zones
+				local mine = type(zones) == "table" and Ball.ZoneAt(zones, root.Position)
+				local theirs = type(zones) == "table" and Ball.ZoneAt(zones, spot)
+				blast = string.format("ball %d studs away%s", math.floor(away + 0.5),
+					(mine and theirs and mine ~= theirs) and " in the next square (blast reaches 15)" or "")
+			end
+			recordLoss({
+				what = ring and "Killed by a Shockwave ring" or "You died",
+				shockwave = ring,
+				ball = blast,
+				hitBy = type(state) == "table" and state.HitBy and state.HitBy.Name or nil,
+				inAir = hum.FloorMaterial == Enum.Material.Air,
+			})
+		end))
+	end
+	if LocalPlayer.Character then
+		task.spawn(watchCharacter, LocalPlayer.Character)
+	end
+	trackConnection(LocalPlayer.CharacterAdded:Connect(watchCharacter))
+end
 
 -- Remember which abilities other players use on you (the game announces them).
 do
@@ -2285,9 +2429,19 @@ local function installHub()
 			table.insert(parts, name .. " x" .. count)
 		end
 		table.sort(parts)
+		local loss = STATE.losses and STATE.losses[1]
+		local lossText = "No lost points recorded yet"
+		if loss then
+			lossText = string.format("Last lost point (%s): %s", loss.at, loss.what)
+				.. (loss.hitBy and (" · hit by " .. loss.hitBy) or "")
+				.. (loss.distance and (" · " .. loss.distance .. " studs from you") or "")
+				.. (loss.shockwave and (" · " .. loss.shockwave) or "")
+				.. (loss.ball and (" · " .. loss.ball) or "")
+		end
 		setInfo(dangerInfo, (#parts > 0 and table.concat(parts, " · ") or "None yet")
-			.. string.format("\nShockwaves jumped: %d", stats.dodges or 0)
-			.. (STATE.lastEnemyAbility and ("\nLast: " .. STATE.lastEnemyAbility) or ""))
+			.. string.format("\nShockwaves seen: %d · jumped: %d", stats.shockwavesSeen or 0, stats.dodges or 0)
+			.. (STATE.lastEnemyAbility and ("\nLast: " .. STATE.lastEnemyAbility) or "")
+			.. "\n" .. lossText)
 	end
 	local abilityBox = section(playTab, "Ability", "zap")
 	local abilityInfo = info(abilityBox, "Equipped", "Checking...")
