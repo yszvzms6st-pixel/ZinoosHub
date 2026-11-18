@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.4.0"
+local VERSION = "1.4.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -667,6 +667,246 @@ function history.listText(filter, limit)
 		end
 	end
 	return #lines > 0 and table.concat(lines, "\n") or "Nothing here yet."
+end
+
+-- Picture list: a scrolling panel inside the WindUI box, one row per catch with
+-- the plant's own 3D model (ReplicatedStorage.PlantModels[rarity][name],
+-- framed like the game's inventory slots), tinted with its mutation colours.
+local MUTATION_LOOK = {
+	[2] = Color3.fromHex("FFC83A"), -- Gold
+	[3] = Color3.fromHex("BFF4FF"), -- Diamond
+	[4] = Color3.fromHex("2EE07A"), -- Emerald
+	[5] = Color3.fromHex("FF3150"), -- Ruby
+}
+
+function history.buildList(paragraph, title)
+	elevate()
+	local root = type(paragraph) == "table" and (paragraph.ElementFrame or (type(paragraph.UIElements) == "table" and paragraph.UIElements.Main)) or nil
+	if typeof(root) ~= "Instance" then
+		root = nil
+		local guiRoot = typeof(gethui) == "function" and gethui() or game:GetService("CoreGui")
+		local windGui = guiRoot and guiRoot:FindFirstChild("WindUI")
+		for _, label in ipairs(windGui and windGui:GetDescendants() or {}) do
+			if label:IsA("TextLabel") and label.Text == title and label.Parent and label.Parent.Name == "TitleFrame" then
+				local node = label
+				while node and not node:IsA("ImageButton") do
+					node = node.Parent
+				end
+				root = node
+				break
+			end
+		end
+	end
+	local inner
+	for _, child in ipairs(root and root:GetChildren() or {}) do
+		if child:IsA("Frame") and child:FindFirstChildOfClass("UIListLayout") and child:FindFirstChild("TitleFrame") then
+			inner = child
+			break
+		end
+	end
+	if not inner then
+		return nil
+	end
+	local fontFace
+	for _, label in ipairs(inner:GetDescendants()) do
+		if label:IsA("TextLabel") then
+			fontFace = label.FontFace
+			break
+		end
+	end
+	local ink = Color3.fromRGB(240, 238, 245)
+	local dim = Color3.fromRGB(170, 166, 185)
+	local statusHex = { garden = "58D68D", kept = "B05AFF", sold = "8C8896" }
+
+	local function round(parent, radius)
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, radius)
+		corner.Parent = parent
+	end
+	local function text(parent, value, size, weight)
+		local label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.Text = value
+		label.TextSize = size
+		label.TextColor3 = ink
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextYAlignment = Enum.TextYAlignment.Center
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.RichText = true
+		if fontFace then
+			label.FontFace = Font.new(fontFace.Family, weight or Enum.FontWeight.Medium)
+		end
+		label.Parent = parent
+		return label
+	end
+
+	local panel = Instance.new("ScrollingFrame")
+	panel.Name = "ZinoosHistoryList"
+	panel.LayoutOrder = 50
+	panel.Size = UDim2.new(1, 0, 0, 360)
+	panel.BackgroundColor3 = Color3.new(0, 0, 0)
+	panel.BackgroundTransparency = 0.55
+	panel.BorderSizePixel = 0
+	panel.ScrollBarThickness = 3
+	panel.ScrollingDirection = Enum.ScrollingDirection.Y
+	panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	panel.CanvasSize = UDim2.new()
+	round(panel, 12)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+	pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 10)
+	pad.Parent = panel
+	local layout = Instance.new("UIListLayout")
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 6)
+	layout.Parent = panel
+	local empty = text(panel, "Nothing here yet.", 14)
+	empty.Size = UDim2.new(1, 0, 0, 24)
+	empty.TextColor3 = dim
+	panel.Parent = inner
+
+	local function picture(holder, entry)
+		local models = ReplicatedStorage:FindFirstChild("PlantModels")
+		local folder = models and models:FindFirstChild(rarityName(entry.tier))
+		local model = folder and folder:FindFirstChild((tostring(entry.plant):gsub(" ", "")))
+		if not model then
+			local letter = text(holder, string.sub(tostring(entry.plant), 1, 1), 20, Enum.FontWeight.Bold)
+			letter.Size = UDim2.fromScale(1, 1)
+			letter.TextXAlignment = Enum.TextXAlignment.Center
+			return
+		end
+		local view = Instance.new("ViewportFrame")
+		view.BackgroundTransparency = 1
+		view.Size = UDim2.fromScale(1, 1)
+		view.Ambient = Color3.fromRGB(170, 170, 180)
+		view.LightColor = Color3.new(1, 1, 1)
+		view.LightDirection = Vector3.new(-0.6, -1, -0.5)
+		local clone = model:Clone()
+		local mutation = tonumber(entry.mutation) or 1
+		local index = 0
+		for _, part in ipairs(clone:GetDescendants()) do
+			if part:IsA("ParticleEmitter") or part:IsA("Beam") or part:IsA("Trail") or part:IsA("BillboardGui")
+				or part:IsA("Script") or part:IsA("LocalScript") or part:IsA("Sound") then
+				part:Destroy()
+			elseif part:IsA("BasePart") then
+				index += 1
+				if mutation == 6 then
+					part.Color = Color3.fromHSV((index * 0.13) % 1, 0.75, 1)
+				elseif MUTATION_LOOK[mutation] then
+					part.Color = part.Color:Lerp(MUTATION_LOOK[mutation], 0.65)
+				end
+			end
+		end
+		if clone:IsA("Model") then
+			clone:PivotTo(CFrame.new())
+		end
+		clone.Parent = view
+		local ok, center, size = pcall(function()
+			return clone:GetBoundingBox()
+		end)
+		if not ok then
+			center, size = CFrame.new(), Vector3.new(4, 4, 4)
+		end
+		local camera = Instance.new("Camera")
+		camera.FieldOfView = 34
+		local distance = math.max(size.X, size.Y, size.Z) * 0.62 / 0.3057306814586604
+		camera.CFrame = CFrame.lookAt(center.Position + Vector3.new(0.45, 0.32, -1).Unit * distance, center.Position)
+		camera.Parent = view
+		view.CurrentCamera = camera
+		view.Parent = holder
+	end
+
+	local rows = {}
+	local function makeRow(entry)
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, 0, 0, 54)
+		row.BackgroundColor3 = Color3.new(1, 1, 1)
+		row.BackgroundTransparency = 0.95
+		row.BorderSizePixel = 0
+		round(row, 10)
+		local pic = Instance.new("Frame")
+		pic.Size = UDim2.fromOffset(46, 46)
+		pic.Position = UDim2.fromOffset(4, 4)
+		pic.BackgroundColor3 = Color3.fromRGB(28, 26, 36)
+		pic.BorderSizePixel = 0
+		pic.ClipsDescendants = true
+		pic.Parent = row
+		round(pic, 10)
+		local ring = Instance.new("UIStroke")
+		ring.Thickness = 2
+		local mutation = tonumber(entry.mutation) or 1
+		if mutation == 6 then
+			ring.Color = Color3.new(1, 1, 1)
+			local gradient = Instance.new("UIGradient")
+			gradient.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 80, 80)),
+				ColorSequenceKeypoint.new(0.33, Color3.fromRGB(255, 220, 60)),
+				ColorSequenceKeypoint.new(0.66, Color3.fromRGB(70, 210, 255)),
+				ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 90, 255)),
+			})
+			gradient.Parent = ring
+		else
+			ring.Color = MUTATION_LOOK[mutation] or Color3.fromRGB(70, 66, 84)
+		end
+		ring.Parent = pic
+		pcall(picture, pic, entry)
+		local name = text(row, describePlant(entry), 15, Enum.FontWeight.Bold)
+		name.Position = UDim2.fromOffset(60, 7)
+		name.Size = UDim2.new(1, -66, 0, 20)
+		local sub = text(row, "", 13)
+		sub.Position = UDim2.fromOffset(60, 29)
+		sub.Size = UDim2.new(1, -66, 0, 18)
+		sub.TextColor3 = dim
+		return { frame = row, sub = sub }
+	end
+
+	return function(filter, limit)
+		elevate()
+		local where = {}
+		for _, plant in pairs(type(ClientState.plants) == "table" and ClientState.plants or {}) do
+			if plant.id then
+				where[plant.id] = plant.placed and "garden" or "kept"
+			end
+		end
+		local today = os.date("%d/%m")
+		local shown = {}
+		local count = 0
+		for _, entry in ipairs(history.entries) do
+			local status = entry.id and (where[entry.id] or "sold") or nil
+			local mutation, size = tonumber(entry.mutation) or 1, tonumber(entry.size) or 1
+			local show = filter == "All"
+				or (filter == "New to index" and entry.new)
+				or (filter == "Mutated" and mutation > 1)
+				or (filter == "Ruby and Rainbow" and mutation >= 5)
+				or (filter == "Huge and bigger" and size >= 4)
+				or (filter == "Still mine (garden or kept)" and (status == "garden" or status == "kept"))
+			if show then
+				count += 1
+				local row = rows[entry]
+				if not row then
+					row = makeRow(entry)
+					rows[entry] = row
+				end
+				shown[entry] = true
+				row.frame.LayoutOrder = count
+				row.frame.Parent = panel
+				local stamp = os.date("%d/%m", entry.t) == today and os.date("%H:%M", entry.t) or os.date("%d/%m %H:%M", entry.t)
+				row.sub.Text = string.format("%s · %s · $%s/s%s%s", stamp, rarityName(entry.tier), shortNumber(entry.income),
+					entry.new and ' · <font color="#FFD23A">NEW</font>' or "",
+					status and string.format(' · <font color="#%s">%s</font>', statusHex[status], status) or "")
+				if count >= limit then
+					break
+				end
+			end
+		end
+		for entry, row in pairs(rows) do
+			if not shown[entry] then
+				row.frame:Destroy()
+				rows[entry] = nil
+			end
+		end
+		empty.Visible = count == 0
+	end
 end
 
 hubCleanup(function()
@@ -2723,13 +2963,30 @@ local function installHub()
 	local historyListBox = section(historyTab, "Latest Catches", "list")
 	local historyList = info(historyListBox, "Newest First (last 30)", history.listText(tostring(STATE.historyFilter), 30))
 	local historyDrawn, historyDrawnAt = -1, 0
+	local drawRows = nil
+	task.defer(function()
+		local ok, update = pcall(history.buildList, historyList, "Newest First (last 30)")
+		if ok and type(update) == "function" then
+			drawRows = update
+			historyDrawn = -1
+			setInfo(historyList, "Scroll the list. The picture ring shows the mutation; garden / kept / sold is where the plant is now.")
+			queueReflow(historyListBox)
+		end
+	end)
 	STATE.drawHistory = function()
 		if history.version == historyDrawn and os.clock() - historyDrawnAt < 10 then
 			return
 		end
 		historyDrawn, historyDrawnAt = history.version, os.clock()
 		setInfo(historySummary, history.summaryText())
-		setInfo(historyList, history.listText(tostring(STATE.historyFilter), 30))
+		if drawRows then
+			local ok = pcall(drawRows, tostring(STATE.historyFilter), 30)
+			if not ok then
+				drawRows = nil
+			end
+		else
+			setInfo(historyList, history.listText(tostring(STATE.historyFilter), 30))
+		end
 		history.save()
 	end
 
