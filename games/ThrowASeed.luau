@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.2.5"
+local VERSION = "1.2.6"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -130,6 +130,7 @@ local STATE = {
 	smartStorage = false,
 	keepTradeDupes = true,
 	tradeSpares = 3,
+	keepMutationMin = "Ruby and up",
 	-- Rewards
 	autoDaily = true,
 	autoGifts = true,
@@ -228,13 +229,17 @@ local CASH_RESERVE_VALUES = {
 local NOTIFY_OPTIONS = table.clone(RARITIES)
 table.insert(NOTIFY_OPTIONS, 1, "All")
 local FUSE_OPTIONS = { "Common", "Uncommon", "Rare" }
+-- Always Keep Mutations: the lowest mutation that is never sold or fused
+-- (Balance.Mutations: 2 Gold, 3 Diamond, 4 Emerald, 5 Ruby, 6 Rainbow).
+local KEEP_MUTATION_OPTIONS = { "Off", "Rainbow only", "Ruby and up", "Emerald and up", "Diamond and up", "Gold and up" }
+local KEEP_MUTATION_MIN = { ["Rainbow only"] = 6, ["Ruby and up"] = 5, ["Emerald and up"] = 4, ["Diamond and up"] = 3, ["Gold and up"] = 2 }
 
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
 	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "showCycleTimer", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
-	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares",
+	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
@@ -1244,18 +1249,22 @@ local function stepSmartStorage(stored)
 	table.sort(pool, function(a, b)
 		return plantIncome(a) > plantIncome(b)
 	end)
-	-- Keep Duplicates For Trading: an exact copy (same plant, mutation and
-	-- size) of a plant in the garden is kept, up to the chosen number of
-	-- spares of each kind; it is never fused or sold.
+	-- Kept for trading, never fused or sold:
+	-- * Always Keep Mutations: every plant with that mutation or rarer.
+	-- * Keep Duplicates For Trading: an exact copy (same plant, mutation and
+	--   size) of a plant in the garden, up to the chosen spares of each kind.
 	local keptForTrade = 0
-	if STATE.keepTradeDupes == true then
+	local minMutation = KEEP_MUTATION_MIN[tostring(STATE.keepMutationMin)]
+	if STATE.keepTradeDupes == true or minMutation then
 		local function kindOf(plant)
 			return string.format("%s|%d|%d", tostring(plant.plant), tonumber(plant.mutation) or 1, tonumber(plant.size) or 1)
 		end
 		local gardenKinds = {}
-		for _, plant in ipairs(plants()) do
-			if plant.placed then
-				gardenKinds[kindOf(plant)] = true
+		if STATE.keepTradeDupes == true then
+			for _, plant in ipairs(plants()) do
+				if plant.placed then
+					gardenKinds[kindOf(plant)] = true
+				end
 			end
 		end
 		local spares = math.clamp(math.floor(tonumber(STATE.tradeSpares) or 3), 1, 20)
@@ -1263,7 +1272,9 @@ local function stepSmartStorage(stored)
 		local rest = {}
 		for _, plant in ipairs(pool) do
 			local kind = kindOf(plant)
-			if gardenKinds[kind] and (keptOf[kind] or 0) < spares then
+			if minMutation and (tonumber(plant.mutation) or 1) >= minMutation then
+				keptForTrade += 1
+			elseif gardenKinds[kind] and (keptOf[kind] or 0) < spares then
 				keptOf[kind] = (keptOf[kind] or 0) + 1
 				keptForTrade += 1
 			else
@@ -2294,6 +2305,7 @@ local function installHub()
 	toggle(sellBox, "Fuse Or Sell Leftovers (Best)", "smartStorage", "Fuses 3 plants only when the result is sure to go into your garden, sells the rest. While on, the manual options below are skipped")
 	toggle(sellBox, "Keep Duplicates For Trading", "keepTradeDupes", "Keeps exact copies (same plant, mutation and size) of plants in your garden instead of selling them")
 	slider(sellBox, "Spares Of Each Kind", "How many copies of each garden plant to keep for trading", "tradeSpares", 1, 20, 1)
+	choice(sellBox, "Always Keep Mutations", "Every plant with this mutation or rarer is kept, never sold or fused", KEEP_MUTATION_OPTIONS, "keepMutationMin")
 	info(sellBox, "Always Safe", "Plants in your garden, the one in your hand and Secret plants are never sold or fused. Your index stays either way.")
 	info(sellBox, "Or Set It Up Yourself", "Turn the switch above off to use these instead.")
 	toggle(sellBox, "Auto Fuse", "autoFuse", "Fuses 3 weak stored plants into a stronger one")
@@ -2380,7 +2392,7 @@ local function installHub()
 				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2, showCycleTimer = true,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
-				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3,
+				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up",
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
