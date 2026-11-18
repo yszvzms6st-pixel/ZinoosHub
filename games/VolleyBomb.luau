@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.5.0"
+local VERSION = "1.5.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -688,26 +688,34 @@ local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, seco
 	end
 	local center = Vector3.new(myZone.Position.X, ballPos.Y, myZone.Position.Z)
 	local toCenter = (center - ballPos) * Vector3.new(1, 0, 1)
-	local dir = toCenter.Magnitude > 3 and toCenter.Unit or (root.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
 	-- Check the pop stays in your square and comes down at spike height.
-	local origin, unit = Ball.Inside(zones, ballPos, dir)
-	local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
-	if not ok or type(popped) ~= "table" then
-		return false
-	end
-	local fine = false
-	for t = now + 0.5, math.min(popped.EndTime, now + 3), 0.05 do
-		local p = Ball.At(popped, t)
-		if Ball.ZoneAt(zones, p) ~= myZone then
+	local function popWorks(dir)
+		local origin, unit = Ball.Inside(zones, ballPos, dir)
+		local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
+		if not ok or type(popped) ~= "table" then
 			return false
 		end
-		local h = p.Y - Ball.Ground(p).Y
-		if Ball.VelocityAt(popped, t).Y < 0 and h <= 15.5 and h >= 8.5 then
-			fine = true
-			break
+		for t = now + 0.5, math.min(popped.EndTime, now + 3), 0.05 do
+			local p = Ball.At(popped, t)
+			if Ball.ZoneAt(zones, p) ~= myZone then
+				return false
+			end
+			local h = p.Y - Ball.Ground(p).Y
+			if Ball.VelocityAt(popped, t).Y < 0 and h <= 15.5 and h >= 8.5 then
+				return true
+			end
 		end
+		return false
 	end
-	if not fine then
+	-- Prefer popping it the way you already face (no turn needed), then
+	-- toward the middle of your square.
+	local look = (root.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
+	local dir
+	if popWorks(look) then
+		dir = look
+	elseif toCenter.Magnitude > 3 and popWorks(toCenter.Unit) then
+		dir = toCenter.Unit
+	else
 		return false
 	end
 	face(root, dir)
@@ -762,14 +770,56 @@ local function tryTip(char, root, state, zones, myZone, ballPos, now)
 	return false
 end
 
-local function moveTo(hum, root, spot)
+-- Turn like a mouse would: fast, but never an instant snap.
+local function yawOf(vector)
+	return math.atan2(-vector.X, -vector.Z)
+end
+local function turnToward(root, dir, rate)
+	local flat = dir * Vector3.new(1, 0, 1)
+	if flat.Magnitude < 0.01 then
+		return true
+	end
+	local current = yawOf(root.CFrame.LookVector)
+	local goal = yawOf(flat.Unit)
+	local diff = (goal - current + math.pi) % (2 * math.pi) - math.pi
+	local step = rate * math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20)
+	local done = math.abs(diff) <= step
+	local yaw = done and goal or (current + math.sign(diff) * step)
+	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+	return done
+end
+brain.turnToward = turnToward
+
+-- Walk like someone on a keyboard: with the camera behind you (shift lock),
+-- WASD only gives 8 directions relative to where you face, so the path is
+-- made of those, with a fine adjustment right at the end. Urgent runs (a
+-- ball about to land) go straight.
+local function moveTo(hum, root, spot, urgent)
 	if STATE.autoMove ~= true then
 		return
 	end
 	if humanizing() then
 		spot += brain.offset
 	end
-	hum:MoveTo(Vector3.new(spot.X, root.Position.Y, spot.Z))
+	local goal = Vector3.new(spot.X, root.Position.Y, spot.Z)
+	local delta = goal - root.Position
+	if STATE.playerMove ~= true or urgent or delta.Magnitude < 2.5 then
+		hum:MoveTo(goal)
+		return
+	end
+	local facing = yawOf(root.CFrame.LookVector)
+	local want = yawOf(delta.Unit)
+	local rel = (want - facing + math.pi) % (2 * math.pi) - math.pi
+	local key = math.floor(rel / (math.pi / 4) + 0.5)
+	-- Hold a "key" for a moment instead of switching every frame.
+	if brain.walkKey and brain.walkKey ~= key and os.clock() - (brain.walkKeyAt or 0) < 0.12 then
+		key = brain.walkKey
+	elseif brain.walkKey ~= key then
+		brain.walkKey, brain.walkKeyAt = key, os.clock()
+	end
+	local yaw = facing + key * math.pi / 4
+	local step = CFrame.Angles(0, yaw, 0).LookVector * math.min(delta.Magnitude, 6)
+	hum:MoveTo(root.Position + Vector3.new(step.X, 0, step.Z))
 end
 
 -- The ball's whole path from now: its current flight plus any wall bounces
@@ -973,13 +1023,26 @@ local function stepBrain()
 		if dir then
 			hum.AutoRotate = false
 			brain.turning = os.clock()
-			local goal = CFrame.lookAt(root.Position, root.Position + dir)
-			root.CFrame = root.CFrame:Lerp(goal, 0.22)
+			if STATE.playerMove == true then
+				turnToward(root, dir, 11)
+			else
+				local goal = CFrame.lookAt(root.Position, root.Position + dir)
+				root.CFrame = root.CFrame:Lerp(goal, 0.22)
+			end
 		end
 	end
 	if brain.turning and os.clock() - brain.turning > 0.6 then
 		brain.turning = nil
-		hum.AutoRotate = true
+		if STATE.playerMove ~= true then
+			hum.AutoRotate = true
+		end
+	end
+	-- Player Movement steers the facing for the whole rally (shift-lock
+	-- style), so the game's auto-turn stays off instead of flicking on/off.
+	if STATE.playerMove == true then
+		hum.AutoRotate = false
+		brain.facing = true
+		brain.lastFaceAt = os.clock()
 	end
 
 	-- In the air: only hit once it really counts as a spike (high enough in the
@@ -998,6 +1061,12 @@ local function stepBrain()
 				return
 			elseif not below and os.clock() - brain.lastJump < 0.9 then
 				STATE.playStatus = "Waiting for the spike"
+				-- Keep turning toward the shot while in the air.
+				if STATE.playerMove == true and brain.aimDir and brain.aimKey == brain.stateKey then
+					hum.AutoRotate = false
+					brain.turning = os.clock()
+					turnToward(root, brain.aimDir, 11)
+				end
 				return
 			end
 		end
@@ -1051,8 +1120,12 @@ local function stepBrain()
 					if STATE.autoMove ~= true and dist > 4 then
 						break
 					end
-					if dist <= hum.WalkSpeed * (t - now - 0.42) + 3 then
-						moveTo(hum, root, flat)
+					-- Once you've committed to a spike on this ball, stick with
+					-- it (no flip-flopping between plans every frame).
+					local slack = brain.spikeKey == brain.stateKey and 6 or 3
+					if dist <= hum.WalkSpeed * (t - now - 0.42) + slack then
+						brain.spikeKey = brain.stateKey
+						moveTo(hum, root, flat, dist > hum.WalkSpeed * (t - now - 0.42) * 0.8)
 						STATE.playStatus = inCombo and "Combo: going up for the spike" or "Lining up a spike"
 						if t - now <= 0.8 then
 							preAim("Spike", p, t, 1)
@@ -1085,13 +1158,15 @@ local function stepBrain()
 	elseif target then
 		local flat = Vector3.new(target.X, root.Position.Y, target.Z)
 		local dist = (flat - root.Position).Magnitude
-		moveTo(hum, root, flat)
+		-- Straight line only when it's tight; otherwise keyboard-style moves.
+		local tight = dist / math.max(hum.WalkSpeed, 1) > (targetTime - now) * 0.75
+		moveTo(hum, root, flat, tight)
 		STATE.playStatus = "Going for the ball"
 		if STATE.playerMove == true then
 			-- Keep eyes on the ball while you move (shift-lock style).
 			if brain.faceBall then brain.faceBall(root, hum, ballNow) end
 		end
-		if targetTime - now <= 0.45 and not (STATE.combos == true and STATE.autoSpike == true) then
+		if targetTime - now <= 0.8 then
 			preAim("Bump", target, targetTime, 1)
 		end
 		useAbility("incoming")
@@ -1138,7 +1213,7 @@ local function stepBrain()
 			end
 			if STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
 				and ((brain.idleSpot - root.Position) * Vector3.new(1, 0, 1)).Magnitude > 1.5 then
-				hum:MoveTo(Vector3.new(brain.idleSpot.X, root.Position.Y, brain.idleSpot.Z))
+				moveTo(hum, root, brain.idleSpot - (humanizing() and brain.offset or Vector3.zero))
 			end
 			if os.clock() >= (brain.hopAt or 0) then
 				brain.hopAt = os.clock() + randomBetween(4, 11)
@@ -1164,16 +1239,19 @@ local function stepBrain()
 	end
 end
 
-trackConnection(RunService.Heartbeat:Connect(function()
+trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if not running() then
 		return
 	end
+	brain.dt = dt
 	local ok, err = pcall(stepBrain)
 	if not ok then
 		STATE.playStatus = "Error: " .. tostring(err)
 	end
-	-- Hand turning back to the game when the hub isn't steering it.
-	if brain.facing and not brain.turning and os.clock() - (brain.lastFaceAt or 0) > 0.4 then
+	-- Hand turning back to the game when the hub isn't steering it (with
+	-- Player Movement that's only once you're out of the round).
+	local keepSteering = STATE.playerMove == true and STATE.autoHit == true and arenaName() ~= nil
+	if brain.facing and not brain.turning and not keepSteering and os.clock() - (brain.lastFaceAt or 0) > 0.4 then
 		brain.facing = false
 		local _, _, hum = character()
 		if hum then
@@ -1203,8 +1281,13 @@ function brain.faceBall(root, hum, ballPos)
 	hum.AutoRotate = false
 	brain.facing = true
 	brain.lastFaceAt = os.clock()
-	local goal = CFrame.lookAt(root.Position, root.Position + flat.Unit)
-	root.CFrame = root.CFrame:Lerp(goal, 0.12)
+	-- Calm tracking: small differences are left alone (no robotic
+	-- locked-on look), bigger ones turn at a human pace.
+	local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > 0.985 then
+		return
+	end
+	turnToward(root, flat.Unit, 5.5)
 end
 
 local function playEmote()
