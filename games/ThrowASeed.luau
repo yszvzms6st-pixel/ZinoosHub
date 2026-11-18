@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.2.1"
+local VERSION = "1.2.2"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -111,6 +111,7 @@ local STATE = {
 	cycleTrain = true,
 	cycleTrainMinutes = 5,
 	cycleThrowMinutes = 2,
+	showCycleTimer = true,
 	autoTrain = false,
 	autoXpOffers = true,
 	-- Upgrades
@@ -229,7 +230,7 @@ local FUSE_OPTIONS = { "Common", "Uncommon", "Rare" }
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "autoTrain", "autoXpOffers",
+	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "showCycleTimer", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
 	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
@@ -2231,6 +2232,7 @@ local function installHub()
 	toggle(trainBox, "Train & Throw Cycle", "cycleTrain", "Trains, then throws, on repeat with the timers below")
 	slider(trainBox, "Train For (minutes)", nil, "cycleTrainMinutes", 1, 30, 1)
 	slider(trainBox, "Throw For (minutes)", nil, "cycleThrowMinutes", 1, 30, 1)
+	toggle(trainBox, "Timer On Screen", "showCycleTimer", "Small Training / Throwing countdown in the top-right of your game screen")
 	toggle(trainBox, "Auto Tap 2x XP Bubbles", "autoXpOffers", "Taps the purple 2x bubble the moment it pops up while training")
 
 	-- Upgrades
@@ -2334,7 +2336,7 @@ local function installHub()
 	button(configBox, "Reset to Defaults", "Auto Sell turns off", "rotate-ccw", function()
 		confirm("Reset every setting?", "All options go back to their defaults and Auto Sell turns off.", function()
 			local defaults = {
-				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2,
+				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2, showCycleTimer = true,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
 				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false,
@@ -2539,6 +2541,100 @@ task.spawn(function()
 		pulseAntiAfk()
 	end
 end)
+
+-- On-screen cycle timer: a small pill in the top-right of the game screen that
+-- counts down the Train & Throw turns while the menu is closed.
+do
+	local gui, label, dot, stroke
+	local function build()
+		elevate()
+		gui = Instance.new("ScreenGui")
+		gui.Name = "ZinoosSeedTimer"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = false
+		gui.DisplayOrder = 50
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		local pill = Instance.new("Frame")
+		pill.Name = "Pill"
+		pill.AnchorPoint = Vector2.new(1, 0)
+		pill.Position = UDim2.new(1, -12, 0, 8)
+		pill.Size = UDim2.fromOffset(0, 34)
+		pill.AutomaticSize = Enum.AutomaticSize.X
+		pill.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+		pill.BackgroundTransparency = 0.15
+		pill.Parent = gui
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = pill
+		stroke = Instance.new("UIStroke")
+		stroke.Thickness = 2
+		stroke.Parent = pill
+		local pad = Instance.new("UIPadding")
+		pad.PaddingLeft = UDim.new(0, 12)
+		pad.PaddingRight = UDim.new(0, 14)
+		pad.Parent = pill
+		local list = Instance.new("UIListLayout")
+		list.FillDirection = Enum.FillDirection.Horizontal
+		list.VerticalAlignment = Enum.VerticalAlignment.Center
+		list.SortOrder = Enum.SortOrder.LayoutOrder
+		list.Padding = UDim.new(0, 8)
+		list.Parent = pill
+		dot = Instance.new("Frame")
+		dot.Size = UDim2.fromOffset(10, 10)
+		dot.LayoutOrder = 1
+		dot.BorderSizePixel = 0
+		dot.Parent = pill
+		local dotCorner = Instance.new("UICorner")
+		dotCorner.CornerRadius = UDim.new(1, 0)
+		dotCorner.Parent = dot
+		label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.AutomaticSize = Enum.AutomaticSize.X
+		label.Size = UDim2.fromOffset(0, 34)
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 16
+		label.TextColor3 = Color3.new(1, 1, 1)
+		label.LayoutOrder = 2
+		label.Text = ""
+		label.Parent = pill
+		local placed = pcall(function()
+			gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+		end)
+		if not placed then
+			gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+		end
+	end
+	hubCleanup(function()
+		if gui then
+			elevate()
+			pcall(gui.Destroy, gui)
+			gui = nil
+		end
+	end)
+	task.spawn(function()
+		while running() do
+			local show = STATE.showCycleTimer ~= false and STATE.cycleTrain == true and cycle.endsAt > 0
+			if show and not gui then
+				pcall(build)
+			end
+			if gui then
+				local left = math.max(0, math.ceil(cycle.endsAt - os.clock()))
+				local training = cycle.phase == "train"
+				local color = training and Color3.fromHex("FF9A2A") or Color3.fromHex("6BE34A")
+				elevate()
+				pcall(function()
+					gui.Enabled = show
+					if show then
+						label.Text = string.format("%s  %d:%02d", training and "TRAINING" or "THROWING", left // 60, left % 60)
+						dot.BackgroundColor3 = color
+						stroke.Color = color
+					end
+				end)
+			end
+			task.wait(0.25)
+		end
+	end)
+end
 
 pcall(STATE.apply3d)
 hubCleanup(stopTraining)
