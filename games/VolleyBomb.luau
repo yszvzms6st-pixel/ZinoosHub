@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.4.0"
+local VERSION = "1.5.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -120,6 +120,9 @@ local STATE = {
 	combos = true,
 	comboChance = "Often",
 	trickShots = true,
+	playerMove = true,
+	emotes = true,
+	lobbyWander = true,
 	autoVote = true,
 	voteMode = "Solo",
 	autoProServer = true,
@@ -246,7 +249,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker",
@@ -1084,6 +1087,10 @@ local function stepBrain()
 		local dist = (flat - root.Position).Magnitude
 		moveTo(hum, root, flat)
 		STATE.playStatus = "Going for the ball"
+		if STATE.playerMove == true then
+			-- Keep eyes on the ball while you move (shift-lock style).
+			if brain.faceBall then brain.faceBall(root, hum, ballNow) end
+		end
 		if targetTime - now <= 0.45 and not (STATE.combos == true and STATE.autoSpike == true) then
 			preAim("Bump", target, targetTime, 1)
 		end
@@ -1115,7 +1122,32 @@ local function stepBrain()
 		-- Wait in your square. Humanized: shuffle around the middle now and
 		-- then instead of standing dead still.
 		local center = Vector3.new(myZone.Position.X, root.Position.Y, myZone.Position.Z)
-		if humanizing() then
+		if STATE.playerMove == true then
+			-- Ready stance: lean toward where the ball is, like you're reading
+			-- the play, with a little wandering, and the odd hop.
+			if not brain.idleSpot or os.clock() >= brain.idleAt then
+				brain.idleAt = os.clock() + randomBetween(1.2, 3)
+				local toward = (ballNow - center) * Vector3.new(1, 0, 1)
+				local lean = toward.Magnitude > 1 and toward.Unit * math.min(toward.Magnitude, 30) * randomBetween(0.15, 0.3) or Vector3.zero
+				local angle = math.random() * math.pi * 2
+				local jitter = Vector3.new(math.cos(angle), 0, math.sin(angle)) * randomBetween(0, 2.5)
+				local spot = center + lean + jitter
+				local rel = myZone.CFrame:PointToObjectSpace(spot)
+				local limitX, limitZ = myZone.Size.X / 2 - 3, myZone.Size.Z / 2 - 3
+				brain.idleSpot = myZone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
+			end
+			if STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
+				and ((brain.idleSpot - root.Position) * Vector3.new(1, 0, 1)).Magnitude > 1.5 then
+				hum:MoveTo(Vector3.new(brain.idleSpot.X, root.Position.Y, brain.idleSpot.Z))
+			end
+			if os.clock() >= (brain.hopAt or 0) then
+				brain.hopAt = os.clock() + randomBetween(4, 11)
+				if math.random() < 0.35 and not airborne then
+					hum:ChangeState(Enum.HumanoidStateType.Jumping)
+				end
+			end
+			if brain.faceBall then brain.faceBall(root, hum, ballNow) end
+		elseif humanizing() then
 			if not brain.idleSpot or os.clock() >= brain.idleAt then
 				brain.idleAt = os.clock() + randomBetween(1.8, 4.5)
 				local angle = math.random() * math.pi * 2
@@ -1140,7 +1172,161 @@ trackConnection(RunService.Heartbeat:Connect(function()
 	if not ok then
 		STATE.playStatus = "Error: " .. tostring(err)
 	end
+	-- Hand turning back to the game when the hub isn't steering it.
+	if brain.facing and not brain.turning and os.clock() - (brain.lastFaceAt or 0) > 0.4 then
+		brain.facing = false
+		local _, _, hum = character()
+		if hum then
+			hum.AutoRotate = true
+		end
+	end
 end))
+
+-- Move Like A Player ------------------------------------------------------------
+-- Face the ball (like shift lock), emote after kills and wins, and walk around
+-- the lobby between rounds instead of standing still.
+local EmoteInfo = safeRequire(Info:FindFirstChild("Emotes")) or {}
+local EmoteController = safeRequire(Controllers:FindFirstChild("EmoteController"))
+local EMOTE_NAMES = {}
+for name in pairs(EmoteInfo) do
+	table.insert(EMOTE_NAMES, name)
+end
+
+function brain.faceBall(root, hum, ballPos)
+	if brain.turning then
+		return
+	end
+	local flat = (ballPos - root.Position) * Vector3.new(1, 0, 1)
+	if flat.Magnitude < 2 then
+		return
+	end
+	hum.AutoRotate = false
+	brain.facing = true
+	brain.lastFaceAt = os.clock()
+	local goal = CFrame.lookAt(root.Position, root.Position + flat.Unit)
+	root.CFrame = root.CFrame:Lerp(goal, 0.12)
+end
+
+local function playEmote()
+	if not EmoteController or #EMOTE_NAMES == 0 or type(EmoteController._tracks) ~= "table" then
+		return false
+	end
+	local name = EMOTE_NAMES[math.random(1, #EMOTE_NAMES)]
+	if not EmoteController._tracks[name] then
+		return false
+	end
+	local ok = pcall(EmoteController.Play, EmoteController, name)
+	elevate()
+	if ok then
+		stats.emotes = (stats.emotes or 0) + 1
+	end
+	return ok
+end
+STATE.playEmote = playEmote
+
+local function ballComingAtMe()
+	local ball = arenaBall()
+	local _, root = character()
+	if not ball or not root or type(ball.State) ~= "table" or ball.State.Dead or type(ball.Zones) ~= "table" then
+		return false
+	end
+	local myZone = Ball.ZoneAt(ball.Zones, root.Position)
+	local land = landingSpot(ball.State, workspace:GetServerTimeNow())
+	local now = Ball.Contain(Ball.At(ball.State, workspace:GetServerTimeNow()))
+	return myZone ~= nil and ((land and Ball.ZoneAt(ball.Zones, land) == myZone) or Ball.ZoneAt(ball.Zones, now) == myZone)
+end
+
+local lobby = { anchor = nil, nextWalk = 0, emoteAt = nil, nextLobbyEmote = 0 }
+local practicePad
+do
+	local objects = workspace:FindFirstChild("GameObjects")
+	practicePad = objects and objects:FindFirstChild("EnterPractice")
+end
+
+local function safeLobbySpot(root, char)
+	for _ = 1, 6 do
+		local angle = math.random() * math.pi * 2
+		local radius = randomBetween(3, 11)
+		local spot = lobby.anchor + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+		local nearPractice = practicePad and ((practicePad.Position - spot) * Vector3.new(1, 0, 1)).Magnitude < 22
+		if not nearPractice then
+			local params = RaycastParams.new()
+			params.FilterDescendantsInstances = { char }
+			local hit = workspace:Raycast(spot + Vector3.new(0, 6, 0), Vector3.new(0, -20, 0), params)
+			if hit and hit.Instance and hit.Instance.CanCollide and math.abs(hit.Position.Y - (root.Position.Y - 3)) < 4 then
+				return Vector3.new(spot.X, root.Position.Y, spot.Z)
+			end
+		end
+	end
+	return nil
+end
+
+local lastWins, lastElims = nil, nil
+task.spawn(function()
+	while running() do
+		pcall(function()
+			if STATE.playerMove ~= true then
+				return
+			end
+			local char, root, hum = character()
+			if not char then
+				return
+			end
+			-- Celebrate kills and wins now and then.
+			local wins, elims = leaderstat("Wins"), leaderstat("Eliminations")
+			if lastWins and STATE.emotes == true then
+				if wins > lastWins and math.random() < 0.6 then
+					lobby.emoteAt = os.clock() + randomBetween(0.8, 2)
+				elseif elims > lastElims and math.random() < 0.35 then
+					lobby.emoteAt = os.clock() + randomBetween(0.5, 1.5)
+				end
+			end
+			lastWins, lastElims = wins, elims
+			if lobby.emoteAt and os.clock() >= lobby.emoteAt then
+				if not ballComingAtMe() and hum.FloorMaterial ~= Enum.Material.Air then
+					lobby.emoteAt = nil
+					playEmote()
+				elseif os.clock() - lobby.emoteAt > 6 then
+					lobby.emoteAt = nil
+				end
+			end
+			-- Lobby: wander around near where you are, hop, sometimes emote.
+			if arenaName() then
+				lobby.anchor = nil
+				return
+			end
+			if STATE.lobbyWander ~= true or os.clock() - (STATE.proJoinAt or 0) < 10 then
+				return
+			end
+			if not lobby.anchor or (lobby.anchor - root.Position).Magnitude > 40 then
+				lobby.anchor = root.Position
+				lobby.nextWalk = os.clock() + randomBetween(2, 5)
+			end
+			if os.clock() >= lobby.nextWalk then
+				lobby.nextWalk = os.clock() + randomBetween(5, 14)
+				local spot = safeLobbySpot(root, char)
+				if spot then
+					hum:MoveTo(spot)
+				end
+				if math.random() < 0.25 then
+					task.delay(randomBetween(0.3, 1.2), function()
+						if running() and not arenaName() then
+							hum:ChangeState(Enum.HumanoidStateType.Jumping)
+						end
+					end)
+				end
+			end
+			if STATE.emotes == true and os.clock() >= lobby.nextLobbyEmote then
+				lobby.nextLobbyEmote = os.clock() + randomBetween(25, 70)
+				if math.random() < 0.3 and hum.MoveDirection.Magnitude < 0.1 then
+					playEmote()
+				end
+			end
+		end)
+		elevate()
+		task.wait(0.5)
+	end
+end)
 
 -- Rewards ----------------------------------------------------------------------
 local DAY = 86400
@@ -1431,6 +1617,7 @@ local function stepProServer()
 		return
 	end
 	proServer.lastTry = os.clock()
+	STATE.proJoinAt = os.clock()
 	proServer.tries += 1
 	root.CFrame = CFrame.new(primary.Position + primary.CFrame.LookVector * 5 + Vector3.new(0, 3, 0))
 	task.wait(0.4)
@@ -1906,6 +2093,10 @@ local function installHub()
 	toggle(humanBox, "Combos", "combos", "Sets the ball up to yourself in your square, then jump-spikes it")
 	choice(humanBox, "Combo How Often", nil, COMBO_OPTIONS, "comboChance")
 	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, set-set-spike long combos, dive then spike, soft tips over the line, and bank shots off the walls")
+	local moveBox = section(playTab, "Move Like A Player", "footprints")
+	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
+	toggle(moveBox, "Emotes", "emotes", "Sometimes emotes after a kill or a win, and now and then in the lobby")
+	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
 	local abilityBox = section(playTab, "Ability", "zap")
 	local abilityInfo = info(abilityBox, "Equipped", "Checking...")
 	toggle(abilityBox, "Auto Use Ability", "autoAbility", "Uses it at the right moment: spike abilities before a spike, Moonball/Portal/Tornado before a hit, Adrenaline when the ball comes your way, Frozen/Magnet/Forcefield to save a ball you can't reach")
@@ -1990,7 +2181,7 @@ local function installHub()
 			local defaults = {
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
-				humanize = true, reaction = "Normal", combos = true, comboChance = "Often", trickShots = true,
+				humanize = true, reaction = "Normal", combos = true, comboChance = "Often", trickShots = true, playerMove = true, emotes = true, lobbyWander = true,
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
