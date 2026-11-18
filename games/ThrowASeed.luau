@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.2.0"
+local VERSION = "1.2.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -109,8 +109,8 @@ local STATE = {
 	throwGap = 6,
 	showAnimation = false,
 	cycleTrain = true,
-	cycleTrainMinutes = 2,
-	cycleThrowMinutes = 5,
+	cycleTrainMinutes = 5,
+	cycleThrowMinutes = 2,
 	autoTrain = false,
 	autoXpOffers = true,
 	-- Upgrades
@@ -259,8 +259,8 @@ local function loadSaved()
 		end
 	end
 	STATE.throwGap = math.clamp(tonumber(STATE.throwGap) or 6, 5.5, 30)
-	STATE.cycleTrainMinutes = math.clamp(math.floor(tonumber(STATE.cycleTrainMinutes) or 2), 1, 60)
-	STATE.cycleThrowMinutes = math.clamp(math.floor(tonumber(STATE.cycleThrowMinutes) or 5), 1, 60)
+	STATE.cycleTrainMinutes = math.clamp(math.floor(tonumber(STATE.cycleTrainMinutes) or 5), 1, 60)
+	STATE.cycleThrowMinutes = math.clamp(math.floor(tonumber(STATE.cycleThrowMinutes) or 2), 1, 60)
 	if CASH_RESERVE_VALUES[STATE.cashReserve] == nil then
 		STATE.cashReserve = "$0"
 	end
@@ -2334,7 +2334,7 @@ local function installHub()
 	button(configBox, "Reset to Defaults", "Auto Sell turns off", "rotate-ccw", function()
 		confirm("Reset every setting?", "All options go back to their defaults and Auto Sell turns off.", function()
 			local defaults = {
-				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 2, cycleThrowMinutes = 5,
+				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
 				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false,
