@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -119,6 +119,7 @@ local STATE = {
 	reaction = "Normal",
 	combos = true,
 	comboChance = "Often",
+	trickShots = true,
 	autoVote = true,
 	voteMode = "Solo",
 	autoProServer = true,
@@ -245,7 +246,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker",
@@ -499,6 +500,7 @@ local function simulate(kind, state, zones, ballPos, dir, now, quality)
 	if not ok or type(nextState) ~= "table" then
 		return nil
 	end
+	local banked = nextState.Reflect == true
 	for _ = 1, 3 do
 		if not nextState.Reflect then
 			break
@@ -509,7 +511,7 @@ local function simulate(kind, state, zones, ballPos, dir, now, quality)
 		end
 		nextState = bounced
 	end
-	return Ball.At(nextState, nextState.EndTime), nextState.EndTime - now
+	return Ball.At(nextState, nextState.EndTime), nextState.EndTime - now, banked
 end
 
 local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality)
@@ -517,7 +519,7 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 	for i = 0, 23 do
 		local angle = i / 24 * math.pi * 2
 		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
-		local land, flight = simulate(kind, state, zones, ballPos, dir, now, quality)
+		local land, flight, banked = simulate(kind, state, zones, ballPos, dir, now, quality)
 		if land then
 			local zone = Ball.ZoneAt(zones, land)
 			if zone and not zone:GetAttribute("Occupied") then
@@ -527,7 +529,7 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 				local who, whoPos = occupantOf(zone)
 				if not isTeammate(who) then
 					local far = whoPos and ((whoPos - land) * Vector3.new(1, 0, 1)).Magnitude or 10
-					table.insert(candidates, { dir = dir, far = far, flight = flight, who = who })
+					table.insert(candidates, { dir = dir, far = far, flight = flight, who = who, banked = banked, land = land })
 				end
 			end
 		end
@@ -556,6 +558,10 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 	else
 		for _, option in ipairs(candidates) do
 			option.score = mode == "Fastest" and -option.flight or (option.far - option.flight * 4)
+			-- Trick shot: now and then go for a bank shot off a wall.
+			if brain.preferBank and option.banked then
+				option.score += 12
+			end
 		end
 		table.sort(candidates, function(a, b)
 			return a.score > b.score
@@ -588,6 +594,13 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	local pick
 	if resolvedKind == "Spike" then
 		brain.comboUntil = 0
+		if brain.jumpServe then
+			stats.jumpServes = (stats.jumpServes or 0) + 1
+		end
+		if brain.diveSpike then
+			stats.diveSpikes = (stats.diveSpikes or 0) + 1
+		end
+		brain.jumpServe, brain.diveSpike = false, false
 	end
 	if STATE.smartAim == true then
 		local dir
@@ -646,8 +659,14 @@ local function countSwingHits()
 			end
 		elseif kind == "Set" then
 			stats.sets = (stats.sets or 0) + 1
+		elseif kind == "Tip" then
+			stats.tips = (stats.tips or 0) + 1
 		else
 			stats.bumps += 1
+		end
+		if pick and pick.banked then
+			stats.banks = (stats.banks or 0) + 1
+			kind = kind .. " off the wall"
 		end
 		local target = pick and pick.who and pick.who.DisplayName or nil
 		stats.lastHit = kind .. (target and (" at " .. target) or "")
@@ -658,7 +677,7 @@ end
 
 -- Combo: set the ball up to yourself (a short pop inside your own square),
 -- then the spike plan below jumps and spikes it.
-local function trySetToSelf(char, root, state, zones, myZone, ballPos, now)
+local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, second)
 	local maxHits = Ball.GetMaxHits()
 	local used = (state.HitZone == myZone and tonumber(state.Hits)) or 0
 	if used + 2 > maxHits then
@@ -700,8 +719,40 @@ local function trySetToSelf(char, root, state, zones, myZone, ballPos, now)
 	if okHit and hit then
 		brain.comboUntil = os.clock() + 2.5
 		brain.skipSpike = false
-		stats.combos = (stats.combos or 0) + 1
-		STATE.playStatus = "Combo: set up a spike"
+		brain.comboSets = (second and brain.comboSets or 0) + 1
+		-- A long combo (set, set, spike) when the touch limit allows it.
+		brain.comboDouble = not second and STATE.trickShots == true and used + 3 <= maxHits and math.random() < 0.35
+		if second then
+			stats.longCombos = (stats.longCombos or 0) + 1
+			STATE.playStatus = "Combo: second set"
+		else
+			stats.combos = (stats.combos or 0) + 1
+			STATE.playStatus = "Combo: set up a spike"
+		end
+		return true
+	end
+	brain.pendingKind = nil
+	return false
+end
+
+-- Tip: a soft set over into the next square, landing far from that player,
+-- instead of a hard hit (pros mix these in so they're hard to read).
+local function tryTip(char, root, state, zones, myZone, ballPos, now)
+	local dir, pick = chooseDirection("Set", state, zones, myZone, ballPos, now, 1)
+	if not dir or not pick or pick.far < 14 then
+		return false
+	end
+	face(root, dir)
+	if humanizing() and type(BallController._tracks) == "table" and BallController._tracks.Bump then
+		pcall(function()
+			BallController._tracks.Bump:Play()
+		end)
+	end
+	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Tip", pick, 1
+	local ok, hit = pcall(BallController.Hit, BallController, "Set")
+	elevate()
+	if ok and hit then
+		STATE.playStatus = "Tipped it over"
 		return true
 	end
 	brain.pendingKind = nil
@@ -718,11 +769,54 @@ local function moveTo(hum, root, spot)
 	hum:MoveTo(Vector3.new(spot.X, root.Position.Y, spot.Z))
 end
 
+-- The ball's whole path from now: its current flight plus any wall bounces
+-- that follow (worked out once per flight, it's a few hundred raycasts).
+local chainCache = { key = nil, chain = nil }
+local function flightChain(state)
+	if chainCache.key == state and chainCache.chain then
+		return chainCache.chain
+	end
+	local chain = { state }
+	local current = state
+	for _ = 1, 3 do
+		if not current.Reflect then
+			break
+		end
+		local ok, bounced = pcall(Ball.Bounce, current)
+		if not ok or type(bounced) ~= "table" then
+			break
+		end
+		table.insert(chain, bounced)
+		current = bounced
+	end
+	chainCache.key, chainCache.chain = state, chain
+	return chain
+end
+
+local function pathAt(chain, t)
+	for _, part in ipairs(chain) do
+		if t <= part.EndTime then
+			return Ball.At(part, t), Ball.VelocityAt(part, t)
+		end
+	end
+	local last = chain[#chain]
+	return Ball.At(last, last.EndTime), Ball.VelocityAt(last, last.EndTime)
+end
+
+local function pathEnd(chain)
+	return chain[#chain].EndTime
+end
+
 local function landingSpot(state, now)
-	if state.Dead or state.Reflect or state.EndTime > now + 10 then
+	if state.Dead then
 		return nil
 	end
-	return Ball.Contain(Ball.At(state, state.EndTime)), state.EndTime
+	local chain = flightChain(state)
+	local last = chain[#chain]
+	if last.Reflect or last.EndTime > now + 10 then
+		return nil
+	end
+	return Ball.Contain(Ball.At(last, last.EndTime)), last.EndTime
 end
 
 local function updateMarker(spot)
@@ -780,15 +874,21 @@ local function stepBrain()
 		return
 	end
 	-- Every new flight of the ball: a fresh human reaction.
-	if state.Time ~= brain.stateKey then
-		brain.stateKey = state.Time
+	-- A new reaction only when a player actually hits it (not when it bounces
+	-- off a wall, which also starts a new flight).
+	local hitKey = state.HitAt or state.Time
+	if hitKey ~= brain.stateKey then
+		brain.stateKey = hitKey
 		local range = REACTION_TIMES[STATE.reaction] or REACTION_TIMES.Normal
-		brain.reactAt = os.clock() + (humanizing() and randomBetween(range[1], range[2]) or 0)
+		-- Your own touch (set, serve toss): you already know where it's going.
+		local mine = state.HitBy == LocalPlayer or now - (tonumber(BallController._lastHit) or 0) < 1.5
+		brain.reactAt = os.clock() + ((humanizing() and not mine) and randomBetween(range[1], range[2]) or 0)
 		local angle = math.random() * math.pi * 2
 		local radius = humanizing() and randomBetween(0.2, 1.3) or 0
 		brain.offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
 		brain.skipSpike = humanizing() and math.random() < 0.12
 		brain.aimDir = nil
+		brain.preferBank = STATE.trickShots == true and math.random() < 0.3
 	end
 	local myZone = Ball.ZoneAt(zones, root.Position)
 	if not myZone then
@@ -811,18 +911,24 @@ local function stepBrain()
 		end
 		if STATE.autoServe == true and os.clock() - brain.lastServe > 0.6 then
 			brain.lastServe = os.clock()
+			local served = false
 			if humanizing() then
-				pcall(BallController.Swing, BallController)
-				elevate()
-				stats.serves += 1
-				STATE.playStatus = "Served"
-				return
+				served = pcall(BallController.Swing, BallController)
+			else
+				local ok, result = pcall(BallController.Hit, BallController, "Toss")
+				served = ok and result
 			end
-			local ok, served = pcall(BallController.Hit, BallController, "Toss")
 			elevate()
-			if ok and served then
+			if served then
 				stats.serves += 1
 				STATE.playStatus = "Served"
+				-- Jump serve: toss it up, then spike it like a pro.
+				if STATE.trickShots == true and STATE.autoSpike == true then
+					brain.comboUntil = os.clock() + 3
+					brain.comboDouble = false
+					brain.skipSpike = false
+					brain.jumpServe = true
+				end
 			end
 		end
 		return
@@ -833,10 +939,22 @@ local function stepBrain()
 	local ballHere = Ball.ZoneAt(zones, ballNow) == myZone
 	local airborne = hum.FloorMaterial == Enum.Material.Air
 	local reacted = os.clock() >= brain.reactAt
-	if state.HitBy ~= LocalPlayer then
+	if not reacted then
+		-- A hard hit about to land in your square: no time to "think".
+		local land, landTime = landingSpot(state, now)
+		if land and Ball.ZoneAt(zones, land) == myZone and landTime - now < 0.75 then
+			reacted = true
+		end
+	end
+	-- Someone else touched it: whatever combo you had going is over.
+	if state.HitBy ~= nil and state.HitBy ~= LocalPlayer then
 		brain.comboUntil = 0
+		brain.jumpServe, brain.diveSpike = false, false
 	end
 	local inCombo = os.clock() < brain.comboUntil
+	if inCombo then
+		brain.skipSpike = false
+	end
 
 	-- Turn towards where you'll hit it a moment before, like a player lining
 	-- up, instead of snapping round on the hit.
@@ -885,16 +1003,27 @@ local function stepBrain()
 	-- Bump when it is in reach (or set it up to yourself for a combo).
 	if ballHere and Ball.InRange("Bump", root.Position, ballNow) and reacted then
 		local low = ballNow.Y - Ball.Ground(ballNow).Y < 6
-		if inCombo and not low and not airborne then
+		local secondSet = inCombo and brain.comboDouble and (brain.comboSets or 0) == 1 and not airborne
+		if secondSet and os.clock() - brain.lastTry > 0.1 then
+			brain.lastTry = os.clock()
+			brain.comboDouble = false
+			if not trySetToSelf(char, root, state, zones, myZone, ballNow, now, true) then
+				STATE.playStatus = "Combo: going for the spike"
+			end
+		elseif inCombo and not low and not airborne then
 			STATE.playStatus = "Combo: waiting to spike"
 		elseif os.clock() - brain.lastTry > 0.1 then
 			brain.lastTry = os.clock()
-			local comboed = false
-			if STATE.combos == true and STATE.autoSpike == true and not airborne and not inCombo
-				and math.random() < (COMBO_CHANCE[STATE.comboChance] or 70) / 100 then
-				comboed = trySetToSelf(char, root, state, zones, myZone, ballNow, now)
+			local done = false
+			-- Pro plays: now and then tip it softly over instead.
+			if STATE.trickShots == true and not airborne and not inCombo and math.random() < 0.18 then
+				done = tryTip(char, root, state, zones, myZone, ballNow, now)
 			end
-			if not comboed then
+			if not done and STATE.combos == true and STATE.autoSpike == true and not airborne and not inCombo
+				and math.random() < (COMBO_CHANCE[STATE.comboChance] or 70) / 100 then
+				done = trySetToSelf(char, root, state, zones, myZone, ballNow, now)
+			end
+			if not done then
 				tryHit("Bump", char, root, state, zones, myZone, ballNow, now)
 			end
 		end
@@ -904,11 +1033,14 @@ local function stepBrain()
 	-- Spike plan: a point on the way down that you can get under, where the
 	-- ball will be 0-2.5 studs above your head at the top of your jump (that's
 	-- a PERFECT spike in the game's maths, which also powers Superspike).
-	if STATE.autoSpike == true and not airborne and reacted and (inCombo or not brain.skipSpike) then
+	local waitForSecondSet = inCombo and brain.comboDouble and (brain.comboSets or 0) == 1
+	if STATE.autoSpike == true and not airborne and reacted and (inCombo or not brain.skipSpike) and not waitForSecondSet then
 		local headTop = char.Head.Position.Y + 7.4
-		for t = now + 0.42, math.min(state.EndTime, now + 4), 0.03 do
-			local p = Ball.Contain(Ball.At(state, t))
-			if Ball.ZoneAt(zones, p) == myZone and Ball.VelocityAt(state, t).Y < 0 then
+		local chain = flightChain(state)
+		for t = now + 0.42, math.min(pathEnd(chain), now + 4), 0.03 do
+			local raw, velocity = pathAt(chain, t)
+			local p = Ball.Contain(raw)
+			if Ball.ZoneAt(zones, p) == myZone and velocity.Y < 0 then
 				local above = p.Y - headTop
 				if above <= 2.5 and above >= -0.3 then
 					local flat = Vector3.new(p.X, root.Position.Y, p.Z)
@@ -937,8 +1069,9 @@ local function stepBrain()
 
 	-- Walk to the first point where the ball is low enough to hit in your square.
 	local target, targetTime
-	for t = now, math.min(state.EndTime, now + 4), 0.03 do
-		local p = Ball.Contain(Ball.At(state, t))
+	local fullPath = flightChain(state)
+	for t = now, math.min(pathEnd(fullPath), now + 4), 0.03 do
+		local p = Ball.Contain((pathAt(fullPath, t)))
 		if Ball.ZoneAt(zones, p) == myZone and p.Y - Ball.Ground(p).Y <= 8 then
 			target, targetTime = p, t
 			break
@@ -970,6 +1103,12 @@ local function stepBrain()
 			if ok then
 				stats.dives += 1
 				STATE.playStatus = "Dived"
+				-- Dive saves pop the ball up: follow it with a spike if you can.
+				if STATE.trickShots == true and STATE.autoSpike == true then
+					brain.comboUntil = os.clock() + 2.5
+					brain.comboDouble = false
+					brain.diveSpike = true
+				end
 			end
 		end
 	else
@@ -1766,6 +1905,7 @@ local function installHub()
 	choice(humanBox, "Reaction Speed", "Fast 0.07-0.16s · Normal 0.14-0.28s · Relaxed 0.24-0.42s", REACTION_OPTIONS, "reaction")
 	toggle(humanBox, "Combos", "combos", "Sets the ball up to yourself in your square, then jump-spikes it")
 	choice(humanBox, "Combo How Often", nil, COMBO_OPTIONS, "comboChance")
+	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, set-set-spike long combos, dive then spike, soft tips over the line, and bank shots off the walls")
 	local abilityBox = section(playTab, "Ability", "zap")
 	local abilityInfo = info(abilityBox, "Equipped", "Checking...")
 	toggle(abilityBox, "Auto Use Ability", "autoAbility", "Uses it at the right moment: spike abilities before a spike, Moonball/Portal/Tornado before a hit, Adrenaline when the ball comes your way, Frozen/Magnet/Forcefield to save a ball you can't reach")
@@ -1850,7 +1990,7 @@ local function installHub()
 			local defaults = {
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
-				humanize = true, reaction = "Normal", combos = true, comboChance = "Often",
+				humanize = true, reaction = "Normal", combos = true, comboChance = "Often", trickShots = true,
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
@@ -1928,9 +2068,11 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · jump serves %d · dive→spikes %d · tips %d · wall shots %d\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
-			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.combos or 0, stats.dives, stats.serves, stats.abilities or 0, stats.lastHit
+			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0,
+			stats.combos or 0, stats.longCombos or 0, stats.jumpServes or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0,
+			stats.lastHit
 		))
 		local lines = { "Play · " .. tostring(STATE.playStatus), "Rewards · " .. tostring(STATE.rewardStatus) }
 		for _, item in ipairs(STATE.activity) do
