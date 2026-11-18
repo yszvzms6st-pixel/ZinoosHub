@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.1.1"
+local VERSION = "1.2.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -126,12 +126,14 @@ local STATE = {
 	sellRarities = { "Common" },
 	keepMutations = true,
 	keepBigSizes = true,
+	smartStorage = false,
 	-- Rewards
 	autoDaily = true,
 	autoGifts = true,
 	autoCodes = true,
 	autoOffline = true,
 	autoPotions = false,
+	useLuckyThrows = false,
 	-- Alerts
 	notifications = true,
 	notifyMinRarity = "Epic",
@@ -229,8 +231,8 @@ local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(
 local SAVE_KEYS = {
 	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
-	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes",
-	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions",
+	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage",
+	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme", "redeemedCodes",
@@ -1191,6 +1193,137 @@ STATE.request = request
 
 local fuseWait = 0
 local gardenWait = 0
+
+-- The game's fuse maths (Balance.FuseCandidates): 3 plants make 1 random
+-- plant worth 0.72-1.2x their total, capped at the best plant the machine can
+-- make. Returns the lowest income the fuse can give, i.e. what is guaranteed.
+local function fuseSureIncome(trio)
+	local ok, candidates = pcall(Balance.FuseCandidates, trio)
+	if not ok or type(candidates) ~= "table" or #candidates == 0 then
+		return nil
+	end
+	local base, actual = 0, 0
+	for _, plant in ipairs(trio) do
+		local okIncome, value = pcall(Balance.Income, tonumber(plant.rarity) or 1, plant.size, plant.mutation, 1, plant.plant)
+		base += okIncome and tonumber(value) or 0
+		actual += plantIncome(plant)
+	end
+	local scale = base > 0 and actual / base or 1
+	local low = math.huge
+	for _, candidate in ipairs(candidates) do
+		low = math.min(low, (tonumber(candidate.inc) or 0) * scale)
+	end
+	return low < math.huge and low or nil
+end
+
+-- Fuse or Sell Leftovers: fuse only when the result is sure to go straight
+-- into the garden; when nothing in storage can do that, sell it. Placed,
+-- held and Secret plants are never touched. Returns notes for the status.
+local function stepSmartStorage(stored)
+	local notes = {}
+	local capacity = tonumber(ClientState.capacity) or tonumber(attr("Capacity")) or 8
+	local placed, weakest = placedStats()
+	if placed < capacity or weakest == math.huge then
+		return notes
+	end
+	local pool = {}
+	for _, plant in ipairs(stored) do
+		-- A plant that beats the garden belongs in it (and may have just been
+		-- placed before the game's data caught up): never fuse or sell it.
+		if not plant.placed and attr("Holding") ~= plant.id and (tonumber(plant.rarity) or 1) ~= Balance.SecretTier
+			and plantIncome(plant) <= weakest then
+			table.insert(pool, plant)
+		end
+	end
+	if #pool == 0 then
+		return notes
+	end
+	table.sort(pool, function(a, b)
+		return plantIncome(a) > plantIncome(b)
+	end)
+	local count = Balance.FuseCount or 3
+	local fuses = {}
+	local index = 1
+	while #fuses < 12 and index + count - 1 <= #pool do
+		local trio = {}
+		for offset = 0, count - 1 do
+			table.insert(trio, pool[index + offset])
+		end
+		local sure = fuseSureIncome(trio)
+		if not sure or sure <= weakest * 1.001 then
+			break
+		end
+		table.insert(fuses, trio)
+		index += count
+	end
+	if #fuses > 0 then
+		-- Worth fusing: do that first (on a throwing turn), sell nothing yet.
+		if os.clock() >= fuseWait and STATE.mode ~= "train" then
+			fuseWait = os.clock() + 30
+			local fused = 0
+			withTrip(propCFrame("FuseMachine"), function()
+				for _, trio in ipairs(fuses) do
+					if not running() then
+						break
+					end
+					local ids = {}
+					for _, plant in ipairs(trio) do
+						table.insert(ids, plant.id)
+					end
+					local ok, message = request("Fuse", { ids = ids })
+					if not ok then
+						table.insert(notes, "Fuse: " .. tostring(message))
+						break
+					end
+					fused += 1
+				end
+			end)
+			if fused > 0 then
+				noteActivity(string.format("Fused %d plants into %d better ones", fused * count, fused))
+				table.insert(notes, "Fused " .. fused .. "x (garden upgrades)")
+			end
+		else
+			table.insert(notes, #fuses .. " fuse(s) will upgrade the garden")
+		end
+		return notes
+	end
+	-- Nothing can beat the garden: sell (in batches the server handles easily).
+	local sold, before = 0, money()
+	local batch = {}
+	local function flush()
+		if #batch == 0 then
+			return true
+		end
+		local ok, message = request("SellMany", { ids = batch })
+		if not ok and type(message) == "string" and string.find(message, "Go to", 1, true) and STATE.mode ~= "train" then
+			withTrip(propCFrame("SellStall"), function()
+				ok, message = request("SellMany", { ids = batch })
+			end)
+		end
+		if ok then
+			sold += #batch
+		else
+			table.insert(notes, "Sell: " .. tostring(message))
+		end
+		batch = {}
+		return ok
+	end
+	for _, plant in ipairs(pool) do
+		table.insert(batch, plant.id)
+		if #batch >= 200 and not flush() then
+			break
+		end
+	end
+	flush()
+	if sold > 0 then
+		task.wait(0.4)
+		local gained = money() - before
+		noteActivity(string.format("Sold %d leftover plants%s", sold, gained > 0 and (" for $" .. shortNumber(gained)) or ""))
+		table.insert(notes, "Sold " .. sold .. " (fusing can't beat your garden)")
+	end
+	return notes
+end
+
 local function stepGarden()
 	if os.clock() < gardenWait then
 		return
@@ -1221,8 +1354,14 @@ local function stepGarden()
 			stored = storedPlants()
 		end
 	end
+	if STATE.smartStorage == true then
+		for _, note in ipairs(stepSmartStorage(stored)) do
+			table.insert(notes, note)
+		end
+		stored = storedPlants()
+	end
 	-- Fuse three weak stored plants into a stronger one.
-	if STATE.autoFuse == true then
+	if STATE.autoFuse == true and STATE.smartStorage ~= true then
 		local maxTier = rarityTier(STATE.fuseMaxRarity)
 		local pool = {}
 		for _, plant in ipairs(stored) do
@@ -1262,7 +1401,7 @@ local function stepGarden()
 	end
 	-- Sell: only stored plants of the chosen rarities; placed, mutated and
 	-- big plants are always kept.
-	if STATE.autoSell == true and #STATE.sellRarities > 0 then
+	if STATE.autoSell == true and STATE.smartStorage ~= true and #STATE.sellRarities > 0 then
 		local ids = {}
 		for _, plant in ipairs(stored) do
 			if not protectedPlant(plant) and table.find(STATE.sellRarities, rarityName(plant.rarity)) then
@@ -1374,21 +1513,84 @@ local function stepRewards()
 			notify("Codes redeemed", redeemed .. " new code" .. (redeemed == 1 and "" or "s"))
 		end
 	end
-	if STATE.autoPotions == true then
+	if STATE.autoPotions == true or STATE.useLuckyThrows == true then
 		local okItems, items = pcall(function()
 			return HttpService:JSONDecode(tostring(attr("Items") or "{}"))
 		end)
 		if okItems and type(items) == "table" then
 			local now = workspace:GetServerTimeNow()
-			for key, count in pairs(items) do
-				local kind = string.match(tostring(key), "^(%w+):")
-				local active = kind and (tonumber(attr("Boost_" .. kind)) or 0) > now
-				if kind and (tonumber(count) or 0) > 0 and not active then
-					local ok = request("UseItem", { key = key })
-					if ok then
-						noteActivity("Used potion " .. kind)
+			-- Boost_<kind> is the seconds left (an extra potion adds time).
+			local function boostLeft(kind)
+				local value = tonumber(attr("Boost_" .. kind)) or 0
+				if value > 1e9 then
+					value -= now
+				end
+				return math.max(0, value)
+			end
+			local function owned(prefix)
+				local keys = {}
+				for key, count in pairs(items) do
+					if (tonumber(count) or 0) > 0 and string.match(tostring(key), "^(%w+):") == prefix then
+						table.insert(keys, key)
 					end
-					task.wait(0.4)
+				end
+				-- Shortest potion first, so long ones are kept for later.
+				table.sort(keys, function(a, b)
+					return (tonumber(string.match(a, ":(%d+)")) or 0) < (tonumber(string.match(b, ":(%d+)")) or 0)
+				end)
+				return keys
+			end
+			local function use(key, label)
+				local ok = request("UseItem", { key = key })
+				if ok then
+					items[key] = (tonumber(items[key]) or 1) - 1
+					noteActivity("Used " .. label)
+				end
+				task.wait(0.4)
+				return ok
+			end
+			if STATE.autoPotions == true then
+				-- Luck only helps while throwing, 2x XP only while training,
+				-- 2x Money always.
+				local wanted = { Money = true }
+				if STATE.mode == "throw" then
+					wanted.Luck2, wanted.Luck5 = true, true
+				elseif STATE.mode == "train" then
+					wanted.Train = true
+				end
+				for _, kind in ipairs({ "Luck5", "Luck2", "Money", "Train" }) do
+					if wanted[kind] and boostLeft(kind) <= 0 then
+						local key = owned(kind)[1]
+						if key then
+							use(key, kind == "Train" and "2x XP potion" or (kind == "Money" and "2x Money potion" or (kind == "Luck5" and "5x Luck potion" or "2x Luck potion")))
+						end
+					end
+				end
+			end
+			-- Lucky Throws (50x and 10x luck on one throw): save them for a 5x Luck
+			-- potion when you have one, then load one at a time so each lands
+			-- inside the boost. Without 5x potions they are used straight away.
+			if STATE.useLuckyThrows == true and STATE.mode == "throw" then
+				local loaded = (tonumber(attr("LuckyThrows")) or 0) + (tonumber(attr("LuckyThrows10")) or 0)
+				local lucky = (tonumber(items.Lucky) or 0) > 0 and "Lucky" or ((tonumber(items.Lucky10) or 0) > 0 and "Lucky10" or nil)
+				if loaded == 0 and lucky then
+					local luck5Left = boostLeft("Luck5")
+					local hasLuck5 = #owned("Luck5") > 0
+					if luck5Left <= 15 and hasLuck5 then
+						-- Start a 5x Luck potion for them (Auto Use Potions may be off).
+						use(owned("Luck5")[1], "5x Luck potion for Lucky Throws")
+						luck5Left = boostLeft("Luck5")
+					end
+					if luck5Left > 15 or not hasLuck5 then
+						-- One throw every ~8 s: load as many as fit in the boost (max 3).
+						local fit = luck5Left > 15 and math.clamp(math.floor((luck5Left - 10) / 8), 1, 3) or 1
+						for _ = 1, fit do
+							lucky = (tonumber(items.Lucky) or 0) > 0 and "Lucky" or ((tonumber(items.Lucky10) or 0) > 0 and "Lucky10" or nil)
+							if not lucky or not use(lucky, lucky == "Lucky" and "Lucky Throw (50x luck)" or "Lucky Throw (10x luck)") then
+								break
+							end
+						end
+					end
 				end
 			end
 		end
@@ -2045,6 +2247,9 @@ local function installHub()
 	local gardenBox = section(gardenTab, "Garden", "flower-2")
 	local gardenInfo = info(gardenBox, "Status", "Waiting")
 	toggle(gardenBox, "Auto Place Best", "autoPlace", "Keeps your best plants in the garden")
+	local smartBox = section(gardenTab, "Clean Up Storage", "sparkles")
+	toggle(smartBox, "Fuse Or Sell Leftovers", "smartStorage", "Fuses 3 plants only when the result is sure to go into your garden; sells the rest. Garden, held and Secret plants are kept. Replaces Auto Fuse and Auto Sell below")
+	info(smartBox, "How It Decides", "Uses the game's own fuse maths: 3 plants make one worth 0.72-1.2x their total, capped at the best plant the machine can make. Selling pays 10x a plant's income. Your index is kept either way.")
 	local fuseBox = section(gardenTab, "Fuse Machine", "combine")
 	toggle(fuseBox, "Auto Fuse", "autoFuse", "Fuses 3 weak stored plants into a stronger one")
 	choice(fuseBox, "Fuse Up To", "Highest rarity that gets fused", FUSE_OPTIONS, "fuseMaxRarity")
@@ -2064,7 +2269,8 @@ local function installHub()
 	toggle(rewardBox, "Auto Playtime Gifts", "autoGifts")
 	toggle(rewardBox, "Auto Redeem Codes", "autoCodes", "Redeems every code in the game once")
 	toggle(rewardBox, "Auto Collect Offline Cash", "autoOffline")
-	toggle(rewardBox, "Auto Use Potions", "autoPotions", "Uses luck/money/XP potions when that boost is not active")
+	toggle(rewardBox, "Auto Use Potions", "autoPotions", "Luck potions while throwing, 2x XP while training, 2x Money any time; never stacks the same boost")
+	toggle(rewardBox, "Use Lucky Throws", "useLuckyThrows", "Uses your 50x and 10x Lucky Throws, timed inside a 5x Luck potion when you have one")
 	button(rewardBox, "Redeem Codes Now", nil, "ticket", function()
 		STATE.redeemedCodes = {}
 		table.clear(codeTries)
@@ -2131,8 +2337,8 @@ local function installHub()
 				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 2, cycleThrowMinutes = 5,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
-				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true,
-				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false,
+				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false,
+				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
 			}
