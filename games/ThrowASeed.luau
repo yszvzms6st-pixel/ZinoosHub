@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1396,19 +1396,62 @@ local function stepRewards()
 	STATE.rewardStatus = #notes > 0 and table.concat(notes, " · ") or "On"
 end
 
--- XP offers pop up while training; claim them for free bonus XP.
-trackConnection(NotifyRemote.OnClientEvent:Connect(function(kind, data)
-	if kind == "XPOffer" and STATE.autoXpOffers == true and type(data) == "table" and data.id ~= nil then
-		task.delay(0.35, function()
-			if running() then
-				local ok = request("XPBoost", { id = data.id })
-				if ok then
-					STATE.xpOffers = (STATE.xpOffers or 0) + 1
-				end
+-- XP offers (the purple "2x" bubble) pop up while training. Tap the bubble the
+-- way a player would, so the game claims it and clears it from the screen at
+-- once; if that doesn't land, claim it straight from the server. The server's
+-- "XPBoost" reply is what counts a claim.
+do
+	local pendingXp = {}
+
+	local function findXpBubble()
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		if not pg then
+			return nil
+		end
+		for _, gui in ipairs(pg:GetChildren()) do
+			local bubble = gui:FindFirstChild("XPOffer", true)
+			if bubble and bubble:IsA("GuiButton") then
+				return bubble
 			end
-		end)
+		end
+		return nil
 	end
-end))
+
+	trackConnection(NotifyRemote.OnClientEvent:Connect(function(kind, data)
+		if type(data) ~= "table" or data.id == nil then
+			return
+		end
+		if kind == "XPBoost" then
+			if pendingXp[data.id] then
+				pendingXp[data.id] = nil
+				STATE.xpOffers = (STATE.xpOffers or 0) + 1
+			end
+		elseif kind == "XPOffer" and STATE.autoXpOffers == true then
+			local id = data.id
+			pendingXp[id] = true
+			task.delay(8, function()
+				pendingXp[id] = nil
+			end)
+			task.delay(0.35, function()
+				if not running() or not pendingXp[id] then
+					return
+				end
+				local bubble = findXpBubble()
+				if bubble then
+					pcall(function()
+						for _, conn in ipairs(getconnections(bubble.Activated)) do
+							conn:Fire()
+						end
+					end)
+				end
+				task.wait(1.2)
+				if running() and pendingXp[id] then
+					request("XPBoost", { id = id })
+				end
+			end)
+		end
+	end))
+end
 
 -- Player -----------------------------------------------------------------------
 local function stepSpeed()
@@ -1986,7 +2029,7 @@ local function installHub()
 	toggle(trainBox, "Train & Throw Cycle", "cycleTrain", "Trains, then throws, on repeat with the timers below")
 	slider(trainBox, "Train For (minutes)", nil, "cycleTrainMinutes", 1, 30, 1)
 	slider(trainBox, "Throw For (minutes)", nil, "cycleThrowMinutes", 1, 30, 1)
-	toggle(trainBox, "Auto Claim XP Offers", "autoXpOffers", "Taps the bonus XP bubbles that pop up while training")
+	toggle(trainBox, "Auto Tap 2x XP Bubbles", "autoXpOffers", "Taps the purple 2x bubble the moment it pops up while training")
 
 	-- Upgrades
 	local upgradeBox = section(upgradeTab, "Auto Buy", "shopping-cart")
@@ -2195,7 +2238,7 @@ local function installHub()
 		end
 		setInfo(activityInfo, table.concat(lines, "\n"))
 		setInfo(throwInfo, tostring(STATE.throwStatus) .. "\n" .. strengthLine())
-		setInfo(trainInfo, tostring(STATE.trainStatus) .. (STATE.cycleTrain == true and ("\nCycle: " .. STATE.cycleStatus) or "") .. ((STATE.xpOffers or 0) > 0 and ("\nXP offers claimed: " .. STATE.xpOffers) or ""))
+		setInfo(trainInfo, tostring(STATE.trainStatus) .. (STATE.cycleTrain == true and ("\nCycle: " .. STATE.cycleStatus) or "") .. ((STATE.xpOffers or 0) > 0 and ("\n2x bubbles tapped: " .. STATE.xpOffers) or ""))
 		setInfo(upgradeInfo, tostring(STATE.upgradeStatus))
 		local nextSeedIndex, nextSeedEntry = nextSeed()
 		local nextBarIndex, nextBarEntry = nextBar()
