@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.2.2"
+local VERSION = "1.2.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1100,7 +1100,7 @@ end
 local function protectedPlant(plant)
 	-- "Holding" is the plant in your hand. (The plant's own "hand" field only
 	-- means it is in your inventory, so it is not used here.)
-	if plant.placed or attr("Holding") == plant.id then
+	if plant.placed or attr("Holding") == plant.id or (tonumber(plant.rarity) or 1) == Balance.SecretTier then
 		return true
 	end
 	if STATE.keepMutations == true and (tonumber(plant.mutation) or 1) > 1 then
@@ -2249,18 +2249,17 @@ local function installHub()
 	local gardenBox = section(gardenTab, "Garden", "flower-2")
 	local gardenInfo = info(gardenBox, "Status", "Waiting")
 	toggle(gardenBox, "Auto Place Best", "autoPlace", "Keeps your best plants in the garden")
-	local smartBox = section(gardenTab, "Clean Up Storage", "sparkles")
-	toggle(smartBox, "Fuse Or Sell Leftovers", "smartStorage", "Fuses 3 plants only when the result is sure to go into your garden; sells the rest. Garden, held and Secret plants are kept. Replaces Auto Fuse and Auto Sell below")
-	info(smartBox, "How It Decides", "Uses the game's own fuse maths: 3 plants make one worth 0.72-1.2x their total, capped at the best plant the machine can make. Selling pays 10x a plant's income. Your index is kept either way.")
-	local fuseBox = section(gardenTab, "Fuse Machine", "combine")
-	toggle(fuseBox, "Auto Fuse", "autoFuse", "Fuses 3 weak stored plants into a stronger one")
-	choice(fuseBox, "Fuse Up To", "Highest rarity that gets fused", FUSE_OPTIONS, "fuseMaxRarity")
-	local sellBox = section(gardenTab, "Selling", "badge-dollar-sign")
-	toggle(sellBox, "Auto Sell", "autoSell", "Sells stored plants of the rarities below. Off by default")
+	-- One box for everything that fuses or sells stored plants.
+	local sellBox = section(gardenTab, "Fuse & Sell", "badge-dollar-sign")
+	toggle(sellBox, "Fuse Or Sell Leftovers (Best)", "smartStorage", "Fuses 3 plants only when the result is sure to go into your garden, sells the rest. While on, the manual options below are skipped")
+	info(sellBox, "Always Safe", "Plants in your garden, the one in your hand and Secret plants are never sold or fused. Your index stays either way.")
+	info(sellBox, "Or Set It Up Yourself", "Turn the switch above off to use these instead.")
+	toggle(sellBox, "Auto Fuse", "autoFuse", "Fuses 3 weak stored plants into a stronger one")
+	choice(sellBox, "Fuse Up To", "Highest rarity that gets fused", FUSE_OPTIONS, "fuseMaxRarity")
+	toggle(sellBox, "Auto Sell", "autoSell", "Sells stored plants of the rarities below")
 	multiChoice(sellBox, "Sell Rarities", nil, RARITIES, "sellRarities")
-	toggle(sellBox, "Keep Mutated Plants", "keepMutations", "Gold, Diamond, Emerald, Ruby and Rainbow are never fused or sold")
-	toggle(sellBox, "Keep Huge And Bigger", "keepBigSizes", "Huge, Massive and bigger are never fused or sold")
-	info(sellBox, "Always Safe", "Plants in your garden and the one in your hand are never sold or fused.")
+	toggle(sellBox, "Keep Mutated Plants", "keepMutations", "Gold, Diamond, Emerald, Ruby and Rainbow are never fused or sold by the manual options")
+	toggle(sellBox, "Keep Huge And Bigger", "keepBigSizes", "Huge, Massive and bigger are never fused or sold by the manual options")
 	local indexBox = section(gardenTab, "Index", "book-open")
 	local indexInfo = info(indexBox, "Progress", "Loading...")
 
