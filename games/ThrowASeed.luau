@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.2.3"
+local VERSION = "1.2.5"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -128,6 +128,8 @@ local STATE = {
 	keepMutations = true,
 	keepBigSizes = true,
 	smartStorage = false,
+	keepTradeDupes = true,
+	tradeSpares = 3,
 	-- Rewards
 	autoDaily = true,
 	autoGifts = true,
@@ -232,7 +234,7 @@ local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(
 local SAVE_KEYS = {
 	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "showCycleTimer", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
-	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage",
+	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
@@ -1242,6 +1244,40 @@ local function stepSmartStorage(stored)
 	table.sort(pool, function(a, b)
 		return plantIncome(a) > plantIncome(b)
 	end)
+	-- Keep Duplicates For Trading: an exact copy (same plant, mutation and
+	-- size) of a plant in the garden is kept, up to the chosen number of
+	-- spares of each kind; it is never fused or sold.
+	local keptForTrade = 0
+	if STATE.keepTradeDupes == true then
+		local function kindOf(plant)
+			return string.format("%s|%d|%d", tostring(plant.plant), tonumber(plant.mutation) or 1, tonumber(plant.size) or 1)
+		end
+		local gardenKinds = {}
+		for _, plant in ipairs(plants()) do
+			if plant.placed then
+				gardenKinds[kindOf(plant)] = true
+			end
+		end
+		local spares = math.clamp(math.floor(tonumber(STATE.tradeSpares) or 3), 1, 20)
+		local keptOf = {}
+		local rest = {}
+		for _, plant in ipairs(pool) do
+			local kind = kindOf(plant)
+			if gardenKinds[kind] and (keptOf[kind] or 0) < spares then
+				keptOf[kind] = (keptOf[kind] or 0) + 1
+				keptForTrade += 1
+			else
+				table.insert(rest, plant)
+			end
+		end
+		pool = rest
+		if keptForTrade > 0 then
+			table.insert(notes, "Keeping " .. keptForTrade .. " for trading")
+		end
+		if #pool == 0 then
+			return notes
+		end
+	end
 	local count = Balance.FuseCount or 3
 	local fuses = {}
 	local index = 1
@@ -1289,8 +1325,11 @@ local function stepSmartStorage(stored)
 		return notes
 	end
 	-- Nothing can beat the garden: sell (in batches the server handles easily).
-	local sold, before = 0, money()
-	local batch = {}
+	-- The game pays SellMultiplier (10) x a plant's income. Counted from the
+	-- plants themselves: the money change would also include garden income.
+	local sellMult = tonumber(Balance.SellMultiplier) or 10
+	local sold, gained = 0, 0
+	local batch, batchValue = {}, 0
 	local function flush()
 		if #batch == 0 then
 			return true
@@ -1303,27 +1342,29 @@ local function stepSmartStorage(stored)
 		end
 		if ok then
 			sold += #batch
+			gained += batchValue
 		else
 			table.insert(notes, "Sell: " .. tostring(message))
 		end
-		batch = {}
+		batch, batchValue = {}, 0
 		return ok
 	end
 	for _, plant in ipairs(pool) do
 		table.insert(batch, plant.id)
+		batchValue += plantIncome(plant) * sellMult
 		if #batch >= 200 and not flush() then
 			break
 		end
 	end
 	flush()
 	if sold > 0 then
-		task.wait(0.4)
-		local gained = money() - before
-		noteActivity(string.format("Sold %d leftover plants%s", sold, gained > 0 and (" for $" .. shortNumber(gained)) or ""))
+		noteActivity(string.format("Sold %d leftover plant%s%s", sold, sold == 1 and "" or "s", gained > 0 and (" for $" .. shortNumber(gained)) or ""))
 		table.insert(notes, "Sold " .. sold .. " (fusing can't beat your garden)")
 	end
 	return notes
 end
+
+STATE.smartStorageStep = stepSmartStorage
 
 local function stepGarden()
 	if os.clock() < gardenWait then
@@ -1404,13 +1445,14 @@ local function stepGarden()
 	-- big plants are always kept.
 	if STATE.autoSell == true and STATE.smartStorage ~= true and #STATE.sellRarities > 0 then
 		local ids = {}
+		local value = 0
 		for _, plant in ipairs(stored) do
 			if not protectedPlant(plant) and table.find(STATE.sellRarities, rarityName(plant.rarity)) then
 				table.insert(ids, plant.id)
+				value += plantIncome(plant) * (tonumber(Balance.SellMultiplier) or 10)
 			end
 		end
 		if #ids > 0 then
-			local before = money()
 			local ok, message = request("SellMany", { ids = ids })
 			if not ok and type(message) == "string" and string.find(message, "Go to", 1, true) and STATE.mode ~= "train" then
 				withTrip(propCFrame("SellStall"), function()
@@ -1418,9 +1460,7 @@ local function stepGarden()
 				end)
 			end
 			if ok then
-				task.wait(0.4)
-				local gained = money() - before
-				noteActivity(string.format("Sold %d plants%s", #ids, gained > 0 and (" for $" .. shortNumber(gained)) or ""))
+				noteActivity(string.format("Sold %d plants%s", #ids, value > 0 and (" for $" .. shortNumber(value)) or ""))
 				table.insert(notes, "Sold " .. #ids)
 			else
 				table.insert(notes, "Sell: " .. tostring(message))
@@ -2252,6 +2292,8 @@ local function installHub()
 	-- One box for everything that fuses or sells stored plants.
 	local sellBox = section(gardenTab, "Fuse & Sell", "badge-dollar-sign")
 	toggle(sellBox, "Fuse Or Sell Leftovers (Best)", "smartStorage", "Fuses 3 plants only when the result is sure to go into your garden, sells the rest. While on, the manual options below are skipped")
+	toggle(sellBox, "Keep Duplicates For Trading", "keepTradeDupes", "Keeps exact copies (same plant, mutation and size) of plants in your garden instead of selling them")
+	slider(sellBox, "Spares Of Each Kind", "How many copies of each garden plant to keep for trading", "tradeSpares", 1, 20, 1)
 	info(sellBox, "Always Safe", "Plants in your garden, the one in your hand and Secret plants are never sold or fused. Your index stays either way.")
 	info(sellBox, "Or Set It Up Yourself", "Turn the switch above off to use these instead.")
 	toggle(sellBox, "Auto Fuse", "autoFuse", "Fuses 3 weak stored plants into a stronger one")
@@ -2338,7 +2380,7 @@ local function installHub()
 				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 5, cycleThrowMinutes = 2, showCycleTimer = true,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
-				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false,
+				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3,
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
