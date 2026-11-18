@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.5.0",
+	version = "3.5.1",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
@@ -2574,7 +2574,9 @@ end
 hubCleanup(stopTraining)
 
 local function stopTrainingAtTarget()
-	if STATE.autoTrain ~= true or STATE.trainToTarget ~= true or boostTraining.active then
+	-- The Train & Throw cycle owns training while it runs; a reached target
+	-- here used to switch it to throwing for the rest of its training turn.
+	if STATE.autoTrain ~= true or STATE.trainToTarget ~= true or boostTraining.active or STATE.cycleTrain == true then
 		return false
 	end
 	local level = tonumber(getData("Level")) or 1
@@ -3371,6 +3373,24 @@ do
 			setPhase("train")
 		elseif os.clock() >= cycle.endsAt then
 			setPhase(cycle.phase == "train" and "throw" or "train")
+		else
+			-- Keep the turn honest: if anything else switched training or
+			-- throwing (a target, a preset, the Auto Throw switch), put the
+			-- current turn back without restarting its timer.
+			local wantTrain = cycle.phase == "train"
+			if (STATE.autoTrain == true) ~= wantTrain or (STATE.autoThrow == true) == wantTrain then
+				if wantTrain then
+					STATE.autoThrow = false
+					STATE.autoTrain = true
+				else
+					STATE.autoTrain = false
+					stopTraining()
+					STATE.autoThrow = true
+				end
+				elevate()
+				syncThrowTrainToggles()
+				noteActivity(wantTrain and "Cycle: back to training" or "Cycle: back to throwing")
+			end
 		end
 		STATE.cycleStatus = string.format("%s · %s next in %s",
 			cycle.phase == "train" and "Training" or "Throwing",
