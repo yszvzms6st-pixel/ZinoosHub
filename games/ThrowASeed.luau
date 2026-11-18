@@ -100,13 +100,14 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.0.2"
+local VERSION = "1.1.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
 	-- Farming
 	autoThrow = true,
 	throwGap = 6,
+	showAnimation = false,
 	cycleTrain = true,
 	cycleTrainMinutes = 2,
 	cycleThrowMinutes = 5,
@@ -226,7 +227,7 @@ local FUSE_OPTIONS = { "Common", "Uncommon", "Rare" }
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/ThrowASeed_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoThrow", "throwGap", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "autoTrain", "autoXpOffers",
+	"autoThrow", "throwGap", "showAnimation", "cycleTrain", "cycleTrainMinutes", "cycleThrowMinutes", "autoTrain", "autoXpOffers",
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
 	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions",
@@ -616,6 +617,192 @@ local function throwOnce()
 	return true, result
 end
 
+-- Show Throw Animation: let the game do its own throw (meter, flight, reveal)
+-- and only press at the top of the meter and Throw Again for the player.
+-- One full throw takes about 15-35 s, so this is slower than plain throwing.
+local animated = { pressedAt = 0, maxPlant = nil }
+
+function animated.gui(name)
+	local pg = LocalPlayer:FindFirstChild("PlayerGui")
+	return pg and pg:FindFirstChild(name)
+end
+
+function animated.choiceButton(name)
+	local gui = animated.gui("ChoixApresLancer")
+	if not gui or not gui.Enabled then
+		return nil
+	end
+	local buttons = gui:FindFirstChild("Boutons", true)
+	local button = buttons and buttons:FindFirstChild(name)
+	if button and button.Visible and buttons.Visible then
+		local frame = buttons
+		while frame and frame ~= gui do
+			if frame:IsA("GuiObject") and not frame.Visible then
+				return nil
+			end
+			frame = frame.Parent
+		end
+		return button
+	end
+	return nil
+end
+
+function animated.click(button)
+	local done = false
+	pcall(function()
+		for _, conn in ipairs(getconnections(button.Activated)) do
+			conn:Fire()
+			done = true
+		end
+	end)
+	if not done and typeof(firesignal) == "function" then
+		pcall(firesignal, button.Activated)
+	end
+end
+
+function animated.meter()
+	local hud = animated.gui("HudLancer")
+	local jauge = hud and hud:FindFirstChild("Jauge")
+	if not jauge or not jauge.Visible then
+		return nil
+	end
+	local cursor = jauge:FindFirstChild("Capsule") and jauge.Capsule:FindFirstChild("Curseur")
+	return cursor and (317 - cursor.Position.Y.Offset) / 304 or nil
+end
+
+function animated.press()
+	local sent = pcall(function()
+		local vim = game:GetService("VirtualInputManager")
+		vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+		task.wait(0.03)
+		vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+	end)
+	-- The game hides the meter 0.4 s after a press it took.
+	task.wait(0.6)
+	if sent and animated.meter() == nil then
+		return
+	end
+	do
+		-- The key didn't land (some phone executors): call the game's own input handler.
+		pcall(function()
+			local fake = { KeyCode = Enum.KeyCode.Space, UserInputType = Enum.UserInputType.Keyboard }
+			for _, conn in ipairs(getconnections(UserInputService.InputBegan)) do
+				local fn = conn.Function
+				local src = fn and debug.info(fn, "s")
+				if type(src) == "string" and src:find("ThrowClient") then
+					fn(fake, false)
+				end
+			end
+		end)
+	end
+end
+
+function animated.newestPlantNumber()
+	local best = 0
+	for _, plant in pairs(type(ClientState.plants) == "table" and ClientState.plants or {}) do
+		local number = tonumber(tostring(plant.id or ""):match("%d+"))
+		if number and number > best then
+			best = number
+		end
+	end
+	return best
+end
+
+function animated.recordNew()
+	local seen = animated.maxPlant or animated.newestPlantNumber()
+	local newest, newestNumber = nil, seen
+	for _, plant in pairs(type(ClientState.plants) == "table" and ClientState.plants or {}) do
+		local number = tonumber(tostring(plant.id or ""):match("%d+"))
+		if number and number > newestNumber then
+			newest, newestNumber = plant, number
+		end
+	end
+	animated.maxPlant = newestNumber
+	if newest then
+		recordThrow({
+			plant = newest.plant, rarity = newest.rarity, size = newest.size, mutation = newest.mutation,
+			income = newest.income, perfect = true,
+		})
+	end
+end
+
+-- True while the game is in the middle of a throw it started.
+function animated.busy()
+	local camera = workspace.CurrentCamera
+	return os.clock() - animated.pressedAt < 60 and camera and camera.CameraType == Enum.CameraType.Scriptable
+		and animated.meter() == nil and animated.choiceButton("Encore") == nil
+end
+
+-- Leaves the game's throw screens (used when the animation is turned off or
+-- the cycle wants pull-ups). Returns true while it still has to wait.
+function animated.finish()
+	if animated.busy() then
+		STATE.throwStatus = "Letting the throw animation finish"
+		return true
+	end
+	local again = animated.choiceButton("Encore")
+	if again then
+		animated.click(again)
+		task.delay(1, animated.recordNew)
+		task.wait(0.5)
+	end
+	closeGameAim()
+	return false
+end
+
+-- One step of the animated loop; returns how long to wait.
+function animated.step()
+	if animated.maxPlant == nil then
+		animated.maxPlant = animated.newestPlantNumber()
+	end
+	if isTraining() or throwState.needStop then
+		throwState.needStop = false
+		throwState.lastStop = os.clock()
+		request("StopTrain")
+		task.wait(1)
+	end
+	local again = animated.choiceButton("Encore")
+	if again then
+		animated.click(again)
+		task.delay(1, animated.recordNew)
+		STATE.throwStatus = string.format("Throw Again · %d done", stats.throws)
+		STATE.status = "Throwing"
+		return 1
+	end
+	if animated.busy() then
+		STATE.throwStatus = string.format("Watching the throw · %d done", stats.throws)
+		STATE.status = "Throwing"
+		return 0.3
+	end
+	local level = animated.meter()
+	if level then
+		-- The meter peaks every 1.5 s; press near the top (PERFECT band).
+		local started = os.clock()
+		while os.clock() - started < 3 do
+			level = animated.meter()
+			if not level then
+				break
+			end
+			if level >= 0.965 then
+				animated.pressedAt = os.clock()
+				animated.press()
+				STATE.throwStatus = "PERFECT! Watching the throw"
+				return 1
+			end
+			RunService.RenderStepped:Wait()
+		end
+		return 0.2
+	end
+	-- Stand on the strip; the game opens its meter by itself.
+	local _, _, root = character()
+	if root and root.Anchored then
+		root.Anchored = false
+	end
+	moveTo(throwSpot(true), 3)
+	STATE.throwStatus = "Walking onto the strip"
+	return 0.5
+end
+
 -- Training -------------------------------------------------------------------
 local function startTraining()
 	if isTraining() then
@@ -694,6 +881,12 @@ local function stepFarm()
 	end
 	if mode == "throw" then
 		STATE.trainStatus = STATE.cycleTrain == true and "Waiting for the cycle" or "Off"
+		if STATE.showAnimation == true then
+			return animated.step()
+		end
+		if animated.finish() then
+			return 0.5
+		end
 		local gap = math.max(tonumber(STATE.throwGap) or 6, throwState.learned)
 		-- Aim 0.85 s early so the throw itself lands right on the gap.
 		local wait = throwState.lastOkSent + gap - 0.85 - os.clock()
@@ -751,6 +944,9 @@ local function stepFarm()
 		throwState.needStop = true
 		throwState.afterTrain = true
 		STATE.throwStatus = STATE.cycleTrain == true and "Waiting for the cycle" or "Off"
+		if animated.finish() then
+			return 0.5
+		end
 		if not isTraining() then
 			STATE.trainStatus = "Getting on the bar..."
 			if not startTraining() then
@@ -961,6 +1157,19 @@ local function withTrip(cf, work)
 	-- Let a throw that is already flying finish first.
 	task.wait(1)
 	local ok, err = pcall(function()
+		-- An animated throw: wait for it, then leave the game's throw screens.
+		local waited = 0
+		while animated.busy() and waited < 45 do
+			task.wait(0.5)
+			waited += 0.5
+		end
+		local back = animated.choiceButton("Retour")
+		if back then
+			animated.click(back)
+			task.delay(1, animated.recordNew)
+			task.wait(1)
+		end
+		closeGameAim()
 		if isTraining() then
 			stopTraining()
 			task.wait(0.5)
@@ -1769,6 +1978,7 @@ local function installHub()
 	local throwBox = section(farmTab, "Throwing", "target")
 	local throwInfo = info(throwBox, "Status", "Waiting")
 	toggle(throwBox, "Auto Throw", "autoThrow", "PERFECT throw every time, no throw screen")
+	toggle(throwBox, "Show Throw Animation", "showAnimation", "Plays the game's real throw, flight and reveal (still PERFECT, presses Throw Again for you). Slower: about 15-35s a throw")
 	slider(throwBox, "Slowest Throw Pace (seconds)", "The hub learns the server wait (about 6.6s) and never goes faster. Raise it to look more human", "throwGap", 5.5, 20, 0.5)
 	local trainBox = section(farmTab, "Training", "dumbbell")
 	local trainInfo = info(trainBox, "Status", "Off")
@@ -1875,7 +2085,7 @@ local function installHub()
 	button(configBox, "Reset to Defaults", "Auto Sell turns off", "rotate-ccw", function()
 		confirm("Reset every setting?", "All options go back to their defaults and Auto Sell turns off.", function()
 			local defaults = {
-				autoThrow = true, throwGap = 6, cycleTrain = true, cycleTrainMinutes = 2, cycleThrowMinutes = 5,
+				autoThrow = true, throwGap = 6, showAnimation = false, cycleTrain = true, cycleTrainMinutes = 2, cycleThrowMinutes = 5,
 				autoTrain = false, autoXpOffers = true, autoSeed = true, autoBar = true, autoCapacity = true,
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
 				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true,
