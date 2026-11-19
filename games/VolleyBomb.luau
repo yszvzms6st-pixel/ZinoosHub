@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.7.0"
+local VERSION = "1.8.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -121,6 +121,7 @@ local STATE = {
 	comboChance = "Often",
 	trickShots = true,
 	playerMove = true,
+	proPosition = true,
 	emotes = true,
 	lobbyWander = true,
 	autoVote = true,
@@ -256,7 +257,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "emotes", "lobbyWander",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts",
@@ -860,6 +861,81 @@ function brain.diveReach(t)
 	return distance
 end
 
+-- Learned base: remember where balls hit into your square came down (relative
+-- to the square) and wait at a spot that covers them, nudged 60% of the way
+-- from the middle toward their average. Needs a few balls before it moves.
+local landingMemory = {}
+function brain.rememberLanding(zone, spot)
+	local rel = zone.CFrame:PointToObjectSpace(spot)
+	table.insert(landingMemory, Vector3.new(rel.X, 0, rel.Z))
+	while #landingMemory > 24 do
+		table.remove(landingMemory, 1)
+	end
+end
+function brain.learnedBase(zone)
+	if #landingMemory < 4 then
+		return Vector3.zero
+	end
+	local sum = Vector3.zero
+	for _, rel in ipairs(landingMemory) do
+		sum += rel
+	end
+	local avg = sum / #landingMemory * 0.6
+	local limitX, limitZ = zone.Size.X / 2 - 5, zone.Size.Z / 2 - 5
+	local clamped = Vector3.new(math.clamp(avg.X, -limitX, limitX), 0, math.clamp(avg.Z, -limitZ, limitZ))
+	return zone.CFrame:VectorToWorldSpace(clamped) * Vector3.new(1, 0, 1)
+end
+STATE.landingMemory = landingMemory
+
+-- Read the hitter: the ball is about to come down in another player's square.
+-- Look at which way they're facing and work out (with the game's own ball
+-- maths) where a hit that way would land. If that's in your square, return
+-- the spot so you can start leaning there before they even touch it.
+local landingSpot -- defined further down (needs the flight chain helpers)
+local readCache = { at = 0, key = nil, spot = nil }
+function brain.readHitter(state, zones, myZone, now)
+	if os.clock() - readCache.at < 0.2 and readCache.key == brain.stateKey then
+		return readCache.spot
+	end
+	readCache.at, readCache.key, readCache.spot = os.clock(), brain.stateKey, nil
+	if state.Dead or state.HitBy == LocalPlayer then
+		return nil
+	end
+	local land, landTime = landingSpot(state, now)
+	-- Only in the last moment before their touch: in this game you aim with
+	-- the way you face, and players keep turning until they hit.
+	if not land or landTime - now > 0.7 then
+		return nil
+	end
+	local theirZone = Ball.ZoneAt(zones, land)
+	if not theirZone or theirZone == myZone then
+		return nil
+	end
+	-- The player in that square nearest to where it comes down.
+	local hitter, best
+	for _, entry in ipairs(occupantsOf(theirZone)) do
+		local d = ((entry.pos - land) * Vector3.new(1, 0, 1)).Magnitude
+		if not best or d < best then
+			hitter, best = entry, d
+		end
+	end
+	local char = hitter and hitter.player.Character
+	local theirRoot = char and char:FindFirstChild("HumanoidRootPart")
+	if not theirRoot then
+		return nil
+	end
+	local look = theirRoot.CFrame.LookVector * Vector3.new(1, 0, 1)
+	if look.Magnitude < 0.1 then
+		return nil
+	end
+	local contact = land + Vector3.new(0, 5, 0)
+	local spot = simulate("Bump", state, zones, contact, look.Unit, landTime, 1)
+	if spot and Ball.ZoneAt(zones, spot) == myZone then
+		readCache.spot = Ball.Contain(spot)
+	end
+	return readCache.spot
+end
+
 -- Turn like a mouse would: fast, but never an instant snap.
 local function yawOf(vector)
 	return math.atan2(-vector.X, -vector.Z)
@@ -950,7 +1026,7 @@ local function pathEnd(chain)
 	return chain[#chain].EndTime
 end
 
-local function landingSpot(state, now)
+function landingSpot(state, now)
 	if state.Dead then
 		return nil
 	end
@@ -1037,6 +1113,14 @@ local function stepBrain()
 	if not myZone then
 		STATE.playStatus = "Not in a square"
 		return
+	end
+	-- Learn where other players' hits into your square come down.
+	if brain.learnKey ~= brain.stateKey and state.HitBy and state.HitBy ~= LocalPlayer then
+		brain.learnKey = brain.stateKey
+		local land = landingSpot(state, now)
+		if land and Ball.ZoneAt(zones, land) == myZone then
+			brain.rememberLanding(myZone, land)
+		end
 	end
 	if STATE.autoHit ~= true then
 		STATE.playStatus = "Auto Hit is off"
@@ -1348,7 +1432,33 @@ local function stepBrain()
 		if STATE.playerMove == true then
 			-- Ready stance: lean toward where the ball is, like you're reading
 			-- the play, with a little wandering, and the odd hop.
-			if not brain.idleSpot or os.clock() >= brain.idleAt then
+			-- (Reading a hitter's facing was tried live and was right only
+			-- 3 of 12 times: players turn at the last moment. Not used.)
+			local read = nil
+			brain.reading = false
+			local justHit = now - (tonumber(BallController._lastHit) or 0) < 1.2
+			if STATE.proPosition == true then
+				-- Pro positioning: wait where balls into your square have
+				-- actually been landing this session (it learns), and get back
+				-- there right after each of your own touches.
+				if brain.readKey ~= brain.stateKey then
+					brain.readKey = brain.stateKey
+					local angle = math.random() * math.pi * 2
+					brain.baseJitter = Vector3.new(math.cos(angle), 0, math.sin(angle)) * randomBetween(0, 1.5)
+				end
+				if not brain.idleSpot or os.clock() >= brain.idleAt or justHit then
+					brain.idleAt = os.clock() + randomBetween(1.2, 3)
+					local learned = brain.learnedBase and brain.learnedBase(myZone) or Vector3.zero
+					local spot = center + learned + (brain.baseJitter or Vector3.zero)
+					if justHit and brain.recoverKey ~= BallController._lastHit then
+						brain.recoverKey = BallController._lastHit
+						stats.recoveries = (stats.recoveries or 0) + 1
+					end
+					local rel = myZone.CFrame:PointToObjectSpace(spot)
+					local limitX, limitZ = myZone.Size.X / 2 - 3, myZone.Size.Z / 2 - 3
+					brain.idleSpot = myZone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
+				end
+			elseif not brain.idleSpot or os.clock() >= brain.idleAt then
 				brain.idleAt = os.clock() + randomBetween(1.2, 3)
 				local toward = (ballNow - center) * Vector3.new(1, 0, 1)
 				local lean = toward.Magnitude > 1 and toward.Unit * math.min(toward.Magnitude, 30) * randomBetween(0.15, 0.3) or Vector3.zero
@@ -1365,7 +1475,8 @@ local function stepBrain()
 			end
 			if os.clock() >= (brain.hopAt or 0) then
 				brain.hopAt = os.clock() + randomBetween(4, 11)
-				if math.random() < 0.35 and not airborne then
+				-- No idle hops while reading a hitter: be ready to move.
+				if math.random() < 0.35 and not airborne and not read then
 					hum:ChangeState(Enum.HumanoidStateType.Jumping)
 				end
 			end
@@ -1383,7 +1494,7 @@ local function stepBrain()
 		elseif (center - root.Position).Magnitude > 4 then
 			moveTo(hum, root, center)
 		end
-		STATE.playStatus = "In position"
+		STATE.playStatus = brain.reading and "Reading the hitter" or "In position"
 	end
 end
 
@@ -2551,6 +2662,7 @@ local function installHub()
 	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, set-set-spike long combos, dive then spike, soft tips over the line, and bank shots off the walls")
 	local moveBox = section(playTab, "Move Like A Player", "footprints")
 	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
+	toggle(moveBox, "Pro Positioning", "proPosition", "Learns where balls land in your square this session and waits in the spot that covers them best, and gets back there right after each of your touches")
 	toggle(moveBox, "Emotes", "emotes", "Sometimes emotes after a kill or a win, and now and then in the lobby")
 	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
 	local dangerBox = section(playTab, "Enemy Abilities", "shield")
@@ -2704,7 +2816,7 @@ local function installHub()
 			local defaults = {
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
-				humanize = true, reaction = "Normal", combos = true, comboChance = "Often", trickShots = true, playerMove = true, emotes = true, lobbyWander = true,
+				humanize = true, reaction = "Normal", combos = true, comboChance = "Often", trickShots = true, playerMove = true, proPosition = true, emotes = true, lobbyWander = true,
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
