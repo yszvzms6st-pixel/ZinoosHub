@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.0"
+local VERSION = "1.9.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -585,7 +585,7 @@ local function simulate(kind, state, zones, ballPos, dir, now, quality)
 		end
 		nextState = bounced
 	end
-	return Ball.At(nextState, nextState.EndTime), nextState.EndTime - now, banked
+	return Ball.At(nextState, nextState.EndTime), nextState.EndTime - now, banked, nextState
 end
 
 local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality)
@@ -593,11 +593,24 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 	for i = 0, 23 do
 		local angle = i / 24 * math.pi * 2
 		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
-		local land, flight, banked = simulate(kind, state, zones, ballPos, dir, now, quality)
+		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality)
+		local viaEmpty = false
 		if land then
 			local zone = Ball.ZoneAt(zones, land)
 			if zone and not zone:GetAttribute("Occupied") then
-				zone = Ball.BounceTarget(zones, land) or zone
+				-- An empty square doesn't end the point: the game bounces the
+				-- ball slowly into the MIDDLE of the nearest player's square
+				-- (Ball.BounceTo), so judge the shot by where that lands.
+				local target = Ball.BounceTarget(zones, land)
+				zone = target or zone
+				if target and finalState then
+					local ok, bounced = pcall(Ball.BounceTo, finalState, target.Position)
+					if ok and type(bounced) == "table" then
+						land = Ball.At(bounced, bounced.EndTime)
+						flight = bounced.EndTime - now
+						viaEmpty = true
+					end
+				end
 			end
 			if zone and zone ~= myZone and zone:GetAttribute("Occupied") then
 				-- Score by the nearest enemy in that square (team modes have
@@ -614,7 +627,7 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 					end
 				end
 				if not friendly then
-					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land })
+					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land, viaEmpty = viaEmpty })
 				end
 			end
 		end
@@ -753,6 +766,12 @@ local function countSwingHits()
 			stats.tips = (stats.tips or 0) + 1
 		else
 			stats.bumps += 1
+		end
+		if pick then
+			stats.aimed = (stats.aimed or 0) + 1
+			if pick.viaEmpty then
+				stats.emptyAims = (stats.emptyAims or 0) + 1
+			end
 		end
 		if pick and pick.banked then
 			stats.banks = (stats.banks or 0) + 1
