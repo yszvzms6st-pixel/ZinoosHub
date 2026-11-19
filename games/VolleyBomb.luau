@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.5"
+local VERSION = "1.9.6"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -2403,12 +2403,13 @@ do
 		end
 		trackConnection(hum.Died:Connect(function()
 			local root = char:FindFirstChild("HumanoidRootPart")
-			local ring
+			local ring, ringHit
 			for part, info in pairs(shockwaves) do
 				if part.Parent and root then
 					local gap = ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude - part.Size.X / 2
 					if math.abs(gap) < 20 then
 						ring = string.format("ring edge %.1f studs away, in range=%s", gap, tostring(info.inRange == true))
+						ringHit = ringHit or math.abs(gap) < 4
 					end
 				end
 			end
@@ -2439,7 +2440,8 @@ do
 					(mine and theirs and mine ~= theirs) and " in the next square (blast reaches 15)" or "")
 			end
 			recordLoss({
-				what = ring and "Killed by a Shockwave ring" or "You died",
+				-- Only blame the ring when its edge was actually on you.
+				what = ringHit and "Killed by a Shockwave ring" or "You died",
 				shockwave = ring,
 				ball = blast,
 				hitBy = type(state) == "table" and state.HitBy and state.HitBy.Name or nil,
