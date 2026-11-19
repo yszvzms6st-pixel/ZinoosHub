@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.12.0"
+local VERSION = "1.13.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -455,7 +455,17 @@ local function useAbility(moment)
 	end
 	local okLeft, left = pcall(AbilityController.Remaining, AbilityController, name)
 	if okLeft and tonumber(left) and left > 0 then
+		STATE.superReadySince = nil
 		return false
+	end
+	-- Superspike is saved for a kill shot (the brain opens the window when
+	-- the spike it's lining up is a good one), unless it's been sitting
+	-- ready for 12 seconds.
+	if name == "Superspike" then
+		STATE.superReadySince = STATE.superReadySince or os.clock()
+		if not (STATE.superOkUntil and os.clock() < STATE.superOkUntil) and os.clock() - STATE.superReadySince < 12 then
+			return false
+		end
 	end
 	if type(AbilityController._active) == "table" and AbilityController._active[name] then
 		return false
@@ -464,6 +474,10 @@ local function useAbility(moment)
 	elevate()
 	if ok then
 		stats.abilities = (stats.abilities or 0) + 1
+		if name == "Superspike" then
+			STATE.superReadySince = nil
+			stats.superspikes = (stats.superspikes or 0) + 1
+		end
 	end
 	return ok
 end
@@ -593,10 +607,36 @@ local function teammateCloser(myZone, root, spot)
 	return nil
 end
 
+-- Superspike (Burst 1.6, MinSpeed 60.9 from the game's module): the hit
+-- modifiers a Superspike adds, if it will power this spike. "armed" = it's
+-- already active; "ready" = off cooldown and the kill-shot window is open.
+function brain.superMods(allowReady)
+	if equippedAbility() ~= "Superspike" then
+		return nil
+	end
+	local armed = type(AbilityController._active) == "table" and AbilityController._active.Superspike
+	if not armed then
+		if not allowReady or STATE.autoAbility ~= true then
+			return nil
+		end
+		local ok, left = pcall(AbilityController.Remaining, AbilityController, "Superspike")
+		if not ok or (tonumber(left) or 1) > 0 then
+			return nil
+		end
+	end
+	local m = AbilityModules.Superspike
+	return {
+		Boost = 1,
+		Burst = m and tonumber(m.Burst) or 1.6,
+		Decay = m and tonumber(m.Decay) or 3,
+		MinSpeed = m and tonumber(m.MinSpeed) or 60.9,
+	}
+end
+
 -- Where a hit in direction dir would end up, following wall bounces.
-local function simulate(kind, state, zones, ballPos, dir, now, quality)
+local function simulate(kind, state, zones, ballPos, dir, now, quality, mods)
 	local origin, unit = Ball.Inside(zones, ballPos, dir)
-	local ok, nextState = pcall(Ball.Hits[kind], state.Multipliers, origin, unit, now, quality, { Boost = 1 })
+	local ok, nextState = pcall(Ball.Hits[kind], state.Multipliers, origin, unit, now, quality, mods and table.clone(mods) or { Boost = 1 })
 	if not ok or type(nextState) ~= "table" then
 		return nil
 	end
@@ -614,15 +654,17 @@ local function simulate(kind, state, zones, ballPos, dir, now, quality)
 	return Ball.At(nextState, nextState.EndTime), nextState.EndTime - now, banked, nextState
 end
 
-local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality)
+local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality, mods)
 	local candidates = {}
 	-- Last resort: any direction whose ball ends up outside your own square
 	-- (never hit it into your own square just because nothing looked good).
 	local fallback, fallbackScore
-	for i = 0, 23 do
-		local angle = i / 24 * math.pi * 2
+	-- A Superspike gets 36 angles (it's the kill shot, so aim it finely).
+	local steps = mods and mods.Burst and 36 or 24
+	for i = 0, steps - 1 do
+		local angle = i / steps * math.pi * 2
 		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
-		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality)
+		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality, mods)
 		local viaEmpty = false
 		if land then
 			local endZone = Ball.ZoneAt(zones, land)
@@ -790,26 +832,31 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	end
 	if STATE.smartAim == true then
 		local dir
-		if brain.aimDir and brain.aimKey == brain.stateKey and resolvedKind == brain.aimKind then
+		-- An armed Superspike powers this spike: aim with its extra speed.
+		local mods = resolvedKind == "Spike" and brain.superMods(false) or nil
+		if brain.aimDir and brain.aimKey == brain.stateKey and resolvedKind == brain.aimKind and (brain.aimSuper == true) == (mods ~= nil) then
 			dir, pick = brain.aimDir, brain.aimPick
 			-- The aim was picked a moment ago for where you planned to hit it.
 			-- Check it again from where the ball really is now (a wall bounce
 			-- or a late jump moves the contact point; seen live: a spike aimed
 			-- that way came down in your own square). Aim again if it would.
-			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality)
+			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality, mods)
 			local landZone = land and Ball.ZoneAt(zones, land)
 			if landZone and not landZone:GetAttribute("Occupied") then
 				landZone = Ball.BounceTarget(zones, land) or landZone
 			end
 			if not land or landZone == myZone then
-				dir, pick = chooseDirection(resolvedKind, state, zones, myZone, ballPos, now, quality)
+				dir, pick = chooseDirection(resolvedKind, state, zones, myZone, ballPos, now, quality, mods)
 				stats.aimFixes = (stats.aimFixes or 0) + 1
 				-- Keep turning toward the new aim (not the old one) until the
 				-- swing lands.
 				brain.aimDir, brain.aimPick = dir, pick
 			end
 		else
-			dir, pick = chooseDirection(resolvedKind, state, zones, myZone, ballPos, now, quality)
+			dir, pick = chooseDirection(resolvedKind, state, zones, myZone, ballPos, now, quality, mods)
+			if resolvedKind == brain.aimKind then
+				brain.aimDir, brain.aimPick, brain.aimSuper = dir, pick, mods ~= nil
+			end
 		end
 		face(root, dir)
 	end
@@ -1506,7 +1553,26 @@ local function stepBrain()
 		end
 		if brain.aimKey ~= brain.stateKey or brain.aimKind ~= kind then
 			brain.aimKey, brain.aimKind = brain.stateKey, kind
-			brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1)
+			brain.aimSuper = false
+			-- Superspike kill shot: if it's ready, plan this spike with its
+			-- extra speed, and fire it only when that shot is a real killer
+			-- (lands far from them, or they're in the air / mid-dive and can't
+			-- dive for it). Otherwise keep it for a better one.
+			local mods = kind == "Spike" and brain.superMods(true) or nil
+			if mods then
+				local armed = type(AbilityController._active) == "table" and AbilityController._active.Superspike
+				local dir, pick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1, mods)
+				local held = STATE.superReadySince and os.clock() - STATE.superReadySince >= 12
+				if dir and pick and (armed or held or pick.cantDive or (pick.far or 0) >= 12) then
+					STATE.superOkUntil = os.clock() + 1.5
+					brain.aimDir, brain.aimPick, brain.aimSuper = dir, pick, true
+				else
+					mods = nil
+				end
+			end
+			if not mods then
+				brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1)
+			end
 		end
 		local dir = brain.aimDir
 		if dir then
@@ -3527,10 +3593,10 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d\nServes: jump %d · tip %d · float %d\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d · superspike kill shots %d\nServes: jump %d · tip %d · float %d\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
 			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0,
-			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0,
+			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0, stats.superspikes or 0,
 			stats.jumpServes or 0, stats.tipServes or 0, stats.floatServes or 0,
 			stats.lastHit
 		))
