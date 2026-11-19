@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.1"
+local VERSION = "1.9.2"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -595,6 +595,33 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
 		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality)
 		local viaEmpty = false
+		-- Wall shots that come back over your own square, or that land right
+		-- on a square's edge, are too easy to get wrong (one came back into
+		-- your own square live), so skip them.
+		if land and banked and finalState then
+			local okOrigin, back = pcall(function()
+				for t = finalState.Time, finalState.EndTime, 0.05 do
+					local p = Ball.At(finalState, t)
+					if Ball.ZoneAt(zones, p) == myZone and p.Y - Ball.Ground(p).Y < 14 then
+						return true
+					end
+				end
+				return false
+			end)
+			if okOrigin and back then
+				land = nil
+			end
+		end
+		if land then
+			local edgeZone = Ball.ZoneAt(zones, land)
+			if edgeZone then
+				local rel = edgeZone.CFrame:PointToObjectSpace(land)
+				local margin = math.min(edgeZone.Size.X / 2 - math.abs(rel.X), edgeZone.Size.Z / 2 - math.abs(rel.Z))
+				if margin < 2.5 then
+					land = nil
+				end
+			end
+		end
 		if land then
 			local zone = Ball.ZoneAt(zones, land)
 			if zone and not zone:GetAttribute("Occupied") then
@@ -1471,7 +1498,7 @@ local function stepBrain()
 						if t - now <= 0.8 then
 							preAim("Spike", p, t, 1)
 						end
-						if t - now <= 0.46 and os.clock() - brain.lastJump > 0.8 then
+						if t - now <= 0.46 and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
 							brain.lastJump = os.clock()
 							-- Now and then this jump is a fake: tip instead of spike.
 							brain.fakeJump = STATE.trickShots == true and not brain.jumpServe
@@ -1552,7 +1579,7 @@ local function stepBrain()
 		local landDist = landFlat and (landFlat - root.Position).Magnitude or dist
 		local slide = brain.diveReach(math.max(left - 0.04, 0))
 		local walkTooSlow = landDist / math.max(hum.WalkSpeed, 1) > left
-		if STATE.autoDive == true and lands and walkTooSlow and left <= 0.55 and slide <= landDist + 3
+		if STATE.autoDive == true and lands and walkTooSlow and left <= 0.55 and slide <= landDist + 3 and not (STATE.ringIncoming and STATE.ringIncoming(1.1))
 			and landDist < 40 and os.clock() - brain.lastDive > 1 then
 			brain.lastDive = os.clock()
 			face(root, ((landFlat or flat) - root.Position).Unit)
@@ -2168,6 +2195,27 @@ end
 -- ring's edge reaches you.
 local shockwaves = {}
 local lastDodge = 0
+-- Is a Shockwave ring going to reach you within `within` seconds? Then hold
+-- dives and spike jumps so you're on the ground and can jump it.
+function STATE.ringIncoming(within)
+	if STATE.dodgeShockwave ~= true or next(shockwaves) == nil then
+		return false
+	end
+	local _, root = character()
+	if not root then
+		return false
+	end
+	for part, info in pairs(shockwaves) do
+		if part.Parent then
+			local dist = ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude
+			local gap = dist - part.Size.X / 2
+			if dist <= 31 and gap > -2.5 and gap / math.max(info.rate or 14.5, 1) <= within then
+				return true
+			end
+		end
+	end
+	return false
+end
 trackConnection(workspace.ChildAdded:Connect(function(child)
 	if child.Name == "Shockwave" and child:IsA("BasePart") then
 		shockwaves[child] = { r = child.Size.X / 2, t = os.clock(), rate = 14.5 }
@@ -2278,7 +2326,7 @@ do
 			for part, info in pairs(shockwaves) do
 				if part.Parent and root then
 					local gap = ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude - part.Size.X / 2
-					if math.abs(gap) < 8 then
+					if math.abs(gap) < 20 then
 						ring = string.format("ring edge %.1f studs away, in range=%s", gap, tostring(info.inRange == true))
 					end
 				end
