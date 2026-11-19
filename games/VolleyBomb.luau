@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.10.0"
+local VERSION = "1.10.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1239,6 +1239,20 @@ local function stepBrain()
 	local now = workspace:GetServerTimeNow()
 	updateMarker(landingSpot(state, now))
 	countSwingHits()
+	-- How did the last dive go? (caught and counted by the server / touched
+	-- on your screen only / missed)
+	local check = brain.diveCheck
+	if check and os.clock() - check.at > 0.7 then
+		brain.diveCheck = nil
+		local touched = (tonumber(BallController._lastHit) or 0) > check.hit
+		if touched and state.HitBy == LocalPlayer then
+			stats.diveSaves = (stats.diveSaves or 0) + 1
+		elseif touched then
+			stats.diveNotCounted = (stats.diveNotCounted or 0) + 1
+		else
+			stats.diveMisses = (stats.diveMisses or 0) + 1
+		end
+	end
 	local char, root, hum = character()
 	if not char or state.Dead then
 		STATE.playStatus = state.Dead and "Waiting for the next serve" or "Waiting to respawn"
@@ -1616,7 +1630,24 @@ local function stepBrain()
 		-- balls).
 		local landFlat = land and Vector3.new(land.X, root.Position.Y, land.Z)
 		local landDist = landFlat and (landFlat - root.Position).Magnitude or dist
-		local slide = brain.diveReach(math.max(left - 0.04, 0))
+		-- Catch it a moment before it lands, while it's still ~4 studs up: the
+		-- dive grabs the ball when it's low near you, and a grab in the last
+		-- split second can lose to the ball touching the ground. The game's
+		-- dive also remembers the last 0.2s of its path, so arriving a little
+		-- early still catches it, while arriving late never does.
+		local catchSpot, catchTime = landFlat, (lands and landTime or targetTime)
+		if lands then
+			for t = math.max(now, landTime - 0.5), landTime, 0.02 do
+				local p = pathAt(fullPath, t)
+				if p.Y - Ball.Ground(p).Y <= 4.5 then
+					catchSpot, catchTime = Vector3.new(p.X, root.Position.Y, p.Z), t
+					break
+				end
+			end
+		end
+		local catchDist = catchSpot and (catchSpot - root.Position).Magnitude or landDist
+		local early = 0.08
+		local slide = brain.diveReach(math.max(catchTime - now - early, 0))
 		local walkTooSlow = landDist / math.max(hum.WalkSpeed, 1) > left
 		-- Can a dive still get there? The slide plus the dive's catch box
 		-- (about 4.5 studs) must reach the ball. A dive that falls short only
@@ -1625,10 +1656,11 @@ local function stepBrain()
 		-- Best case: walk now, then dive in the last half second.
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
-		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.55 and slide <= landDist + 3 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
+		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.6 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
 			and landDist < 40 and os.clock() - brain.lastDive > 1 then
 			brain.lastDive = os.clock()
-			face(root, ((landFlat or flat) - root.Position).Unit)
+			brain.diveCheck = { at = os.clock(), hit = tonumber(BallController._lastHit) or 0, key = brain.stateKey }
+			face(root, ((catchSpot or landFlat or flat) - root.Position).Unit)
 			local ok = pcall(AbilityController.Activate, AbilityController, "Dive")
 			elevate()
 			if ok then
