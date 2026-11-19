@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.11.0"
+local VERSION = "1.11.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1889,7 +1889,40 @@ local function stepBrain()
 				local limitX, limitZ = myZone.Size.X / 2 - 3, myZone.Size.Z / 2 - 3
 				brain.idleSpot = myZone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
 			end
-			if STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
+			-- Run about (Spin Moves): while the ball is safely flying to someone
+			-- else, keep moving like the pros do (seen live: a top player ran
+			-- 78% of the round and spun ~10 times a minute): quick tight loops
+			-- around your spot, facing the way you run so every loop is a spin,
+			-- with short rests. The character turns itself here (no forced
+			-- turning), so it never slows you down, and you're back on your
+			-- spot as soon as a ball can come your way.
+			local runAbout = false
+			if STATE.spinMoves == true and STATE.autoMove == true and not airborne then
+				local land, landTime = landingSpot(state, now)
+				local safe = land and landTime - now > 0.9 and Ball.ZoneAt(zones, land) ~= myZone
+				if safe then
+					if not brain.loop or os.clock() > brain.loop.untilT then
+						local rest = brain.loop and not brain.loop.rest and math.random() < 0.35
+						brain.loop = rest and { rest = true, untilT = os.clock() + randomBetween(0.4, 1.2) }
+							or { untilT = os.clock() + randomBetween(0.8, 2.2), dir = math.random() < 0.5 and -1 or 1, r = randomBetween(2.5, 4.5), a = math.random() * math.pi * 2 }
+					end
+					local loop = brain.loop
+					if not loop.rest then
+						runAbout = true
+						loop.a += loop.dir * (hum.WalkSpeed / loop.r) * math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20)
+						local ahead = loop.a + loop.dir * 0.9
+						local c = brain.idleSpot
+						hum.AutoRotate = true
+						brain.walkingUntil = os.clock() + 0.12
+						hum:MoveTo(Vector3.new(c.X + math.cos(ahead) * loop.r, root.Position.Y, c.Z + math.sin(ahead) * loop.r))
+						if brain.loopKey ~= loop then
+							brain.loopKey = loop
+							stats.loops = (stats.loops or 0) + 1
+						end
+					end
+				end
+			end
+			if not runAbout and STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
 				and ((brain.idleSpot - root.Position) * Vector3.new(1, 0, 1)).Magnitude > 1.5 then
 				moveTo(hum, root, brain.idleSpot - (humanizing() and brain.offset or Vector3.zero))
 			end
@@ -1910,7 +1943,7 @@ local function stepBrain()
 					hum:ChangeState(Enum.HumanoidStateType.Jumping)
 				end
 			end
-			if brain.faceBall then brain.faceBall(root, hum, ballNow) end
+			if brain.faceBall and not runAbout then brain.faceBall(root, hum, ballNow) end
 		elseif humanizing() then
 			if not brain.idleSpot or os.clock() >= brain.idleAt then
 				brain.idleAt = os.clock() + randomBetween(1.8, 4.5)
@@ -3206,7 +3239,7 @@ local function installHub()
 	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, set-set-spike long combos, dive then spike, soft tips over the line, and bank shots off the walls")
 	local moveBox = section(playTab, "Move Like A Player", "footprints")
 	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
-	toggle(moveBox, "Spin Moves", "spinMoves", "Style: sometimes a 360 on the way up before slapping a spike, and livelier hops (with the odd 360) while the ball is flying to someone else. Only in the air and only when it's safe, so it never slows you down")
+	toggle(moveBox, "Spin Moves", "spinMoves", "Style like the pros: runs quick loops and spins around your spot, hops about (with the odd 360) while the ball is flying to someone else, and sometimes does a 360 on the way up before slapping a spike. Only when it's safe, and back on your spot the moment a ball can come your way")
 	toggle(moveBox, "Pro Positioning", "proPosition", "Learns where balls land in your square this session and waits in the spot that covers them best, and gets back there right after each of your touches")
 	toggle(moveBox, "Emotes", "emotes", "Sometimes emotes after a kill or a win, and now and then in the lobby")
 	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
