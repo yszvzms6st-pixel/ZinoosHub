@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.11.1"
+local VERSION = "1.12.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -121,6 +121,7 @@ local STATE = {
 	comboChance = "Often",
 	trickShots = true,
 	spinMoves = true,
+	noDiveCooldown = true,
 	playerMove = true,
 	proPosition = true,
 	emotes = true,
@@ -261,7 +262,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "spinMoves", "playerMove", "proPosition", "emotes", "lobbyWander",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "spinMoves", "noDiveCooldown", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
@@ -934,6 +935,13 @@ local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, seco
 			end
 			local h = p.Y - Ball.Ground(p).Y
 			if velocity.Y < 0 and h <= 15.5 and h >= 8.5 then
+				-- Not right by the line: a set-up that comes down at the edge is
+				-- easy to lose (seen live: one fell short there).
+				local rel = myZone.CFrame:PointToObjectSpace(p)
+				local margin = math.min(myZone.Size.X / 2 - math.abs(rel.X), myZone.Size.Z / 2 - math.abs(rel.Z))
+				if margin < 3.5 then
+					return false
+				end
 				return true, #chain > 1
 			end
 		end
@@ -1208,6 +1216,38 @@ local function moveTo(hum, root, spot, urgent)
 	hum:MoveTo(root.Position + Vector3.new(step.X, 0, step.Z))
 end
 
+-- Always moving (Spin Moves). The character turns itself in loops (no forced
+-- turning, which would stall the run).
+-- Loops: quick tight circles around a spot, facing the way you run, so every
+-- loop is a spin. Direction and size change every second or two.
+function brain.runLoop(hum, root, center)
+	if not brain.loop or os.clock() > brain.loop.untilT then
+		brain.loop = { untilT = os.clock() + randomBetween(0.8, 2.2), dir = math.random() < 0.5 and -1 or 1, r = randomBetween(2.5, 4.5), a = math.random() * math.pi * 2 }
+		stats.loops = (stats.loops or 0) + 1
+	end
+	local loop = brain.loop
+	loop.a += loop.dir * (hum.WalkSpeed / loop.r) * math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20)
+	local ahead = loop.a + loop.dir * 0.9
+	hum.AutoRotate = true
+	brain.walkingUntil = os.clock() + 0.12
+	hum:MoveTo(Vector3.new(center.X + math.cos(ahead) * loop.r, root.Position.Y, center.Z + math.sin(ahead) * loop.r))
+end
+-- Side steps: shuffle left and right across a spot, keeping your facing,
+-- switching every third of a second or so (never more than ~3 studs away).
+function brain.sideStep(hum, root, center, ballPos)
+	local toBall = (ballPos - center) * Vector3.new(1, 0, 1)
+	local side = toBall.Magnitude > 0.5 and Vector3.new(-toBall.Z, 0, toBall.X).Unit or Vector3.new(1, 0, 0)
+	local step = brain.step
+	if not step or os.clock() > step.untilT then
+		brain.step = { untilT = os.clock() + randomBetween(0.25, 0.5), sign = step and -step.sign or (math.random() < 0.5 and -1 or 1) }
+		step = brain.step
+	end
+	hum.AutoRotate = false
+	brain.walkingUntil = os.clock() + 0.12
+	local goal = center + side * step.sign * 3
+	hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
+end
+
 -- The ball's whole path from now: its current flight plus any wall bounces
 -- that follow (worked out once per flight, it's a few hundred raycasts).
 local chainCache = { key = nil, chain = nil }
@@ -1332,10 +1372,14 @@ local function stepBrain()
 			if readyZone then
 				local ready = Vector3.new(readyZone.Position.X, root.Position.Y, readyZone.Position.Z)
 					+ (brain.learnedBase and brain.learnedBase(readyZone) or Vector3.zero) * 0.5
-				if ((ready - root.Position) * Vector3.new(1, 0, 1)).Magnitude > 2.5 then
+				local away = ((ready - root.Position) * Vector3.new(1, 0, 1)).Magnitude
+				if away > 6 or (away > 2.5 and STATE.spinMoves ~= true) then
 					hum.AutoRotate = true
 					hum:MoveTo(ready)
 					STATE.playStatus = "Getting ready for the serve"
+				elseif STATE.spinMoves == true and hum.FloorMaterial ~= Enum.Material.Air then
+					-- Keep moving while you wait: loops around the ready spot.
+					brain.runLoop(hum, root, ready)
 				end
 			end
 		end
@@ -1772,12 +1816,21 @@ local function stepBrain()
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
 		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.6 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
-			and landDist < 40 and os.clock() - brain.lastDive > 1
+			and landDist < 40 and os.clock() - brain.lastDive > 0.55
 			-- Only when the game will actually start the dive (on the ground, not
 			-- mid-swing, off cooldown): turning to dive while a swing is still
 			-- going would send that hit the wrong way.
 			and hum.FloorMaterial ~= Enum.Material.Air and not BallController:Busy()
 			and (function()
+				-- No Dive Cooldown: the dive's cooldown is kept on your side, so
+				-- once the last dive has finished you can go again straight away.
+				if STATE.noDiveCooldown == true and type(AbilityController._active) == "table" and not AbilityController._active.Dive
+					and type(AbilityController._lastUsed) == "table" and AbilityController._lastUsed.Dive then
+					local duration = AbilityModules.Dive and tonumber(AbilityModules.Dive.Duration) or 0.5
+					if os.clock() - AbilityController._lastUsed.Dive >= duration then
+						AbilityController._lastUsed.Dive = os.clock() - 60
+					end
+				end
 				local okLeft, leftDive = pcall(AbilityController.Remaining, AbilityController, "Dive")
 				return not okLeft or tonumber(leftDive) == 0
 			end)() then
@@ -1823,6 +1876,12 @@ local function stepBrain()
 		-- going to land near you in someone else's square, get clear.
 		local land, landTime = landingSpot(state, now)
 		if not land or landTime - now > 1.6 or Ball.ZoneAt(zones, land) == myZone then
+			return false
+		end
+		-- Never back away from your own set-up (seen live: a combo set near
+		-- the line looked like a blast next door, you stepped away and the
+		-- spike was lost).
+		if inCombo or (state.HitBy == LocalPlayer and state.Kind == "Set") then
 			return false
 		end
 		local mult = type(state.Multipliers) == "table" and tonumber(state.Multipliers.BlastRadius) or 1
@@ -1897,29 +1956,18 @@ local function stepBrain()
 			-- turning), so it never slows you down, and you're back on your
 			-- spot as soon as a ball can come your way.
 			local runAbout = false
-			if STATE.spinMoves == true and STATE.autoMove == true and not airborne then
+			if STATE.spinMoves == true and STATE.autoMove == true and not airborne
+				and ((brain.idleSpot - root.Position) * Vector3.new(1, 0, 1)).Magnitude < 6 then
 				local land, landTime = landingSpot(state, now)
 				local safe = land and landTime - now > 0.9 and Ball.ZoneAt(zones, land) ~= myZone
+				runAbout = true
 				if safe then
-					if not brain.loop or os.clock() > brain.loop.untilT then
-						local rest = brain.loop and not brain.loop.rest and math.random() < 0.35
-						brain.loop = rest and { rest = true, untilT = os.clock() + randomBetween(0.4, 1.2) }
-							or { untilT = os.clock() + randomBetween(0.8, 2.2), dir = math.random() < 0.5 and -1 or 1, r = randomBetween(2.5, 4.5), a = math.random() * math.pi * 2 }
-					end
-					local loop = brain.loop
-					if not loop.rest then
-						runAbout = true
-						loop.a += loop.dir * (hum.WalkSpeed / loop.r) * math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20)
-						local ahead = loop.a + loop.dir * 0.9
-						local c = brain.idleSpot
-						hum.AutoRotate = true
-						brain.walkingUntil = os.clock() + 0.12
-						hum:MoveTo(Vector3.new(c.X + math.cos(ahead) * loop.r, root.Position.Y, c.Z + math.sin(ahead) * loop.r))
-						if brain.loopKey ~= loop then
-							brain.loopKey = loop
-							stats.loops = (stats.loops or 0) + 1
-						end
-					end
+					brain.runLoop(hum, root, brain.idleSpot)
+				else
+					-- A ball could come your way: keep your feet moving with
+					-- quick side steps across your spot (still facing the play)
+					-- instead of standing still.
+					brain.sideStep(hum, root, brain.idleSpot, ballNow)
 				end
 			end
 			if not runAbout and STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
@@ -3226,6 +3274,7 @@ local function installHub()
 	toggle(playBox, "Auto Move", "autoMove", "Walks under the ball. Turn off to move yourself and only auto hit")
 	toggle(playBox, "Auto Spike", "autoSpike", "Jumps and spikes when the ball drops at the right height (much faster than a bump)")
 	toggle(playBox, "Auto Dive", "autoDive", "Dives for balls you can't walk to in time")
+	toggle(playBox, "No Dive Cooldown", "noDiveCooldown", "Skips the short wait after a dive, so you can dive again as soon as the last one ends (the dive's cooldown is kept on your side; your equipped ability's cooldown is the game server's and can't be changed)")
 	toggle(playBox, "Auto Serve", "autoServe", "Serves straight away when it's your turn")
 	local aimBox = section(playTab, "Aiming", "crosshair")
 	toggle(aimBox, "Smart Aim", "smartAim", "Works out where each hit lands and sends it into another player's square")
