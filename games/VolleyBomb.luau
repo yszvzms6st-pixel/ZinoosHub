@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.7"
+local VERSION = "1.10.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -151,6 +151,7 @@ local STATE = {
 	customFov = false,
 	fov = 90,
 	dodgeShockwave = true,
+	autoHopEmpty = false,
 	avoidBlasts = true,
 	-- Menu
 	toggleKey = "RightControl",
@@ -262,7 +263,7 @@ local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts",
+	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -2559,6 +2560,65 @@ function STATE.hop()
 	return false
 end
 
+-- The busiest server of this place that still has room (more players =
+-- rounds keep starting). Returns its id and player count, or nil.
+function STATE.fullestServer()
+	local ok, body = pcall(function()
+		return game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true")
+	end)
+	if not ok then
+		return nil
+	end
+	local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, body)
+	if not okDecode then
+		return nil
+	end
+	local best
+	for _, server in ipairs(decoded and decoded.data or {}) do
+		local playing, max = tonumber(server.playing) or 0, tonumber(server.maxPlayers) or 0
+		if server.id ~= game.JobId and playing < max - 1 and (not best or playing > best.playing) then
+			best = { id = server.id, playing = playing }
+		end
+	end
+	return best and best.id, best and best.playing
+end
+
+-- Auto hop when your lobby empties (overnight): if the server stays under
+-- 4 players between rounds for 2 minutes, move to the busiest server with
+-- room. At most once every 10 minutes, and only to a server with more
+-- players than this one.
+do
+	local emptySince, lastHop = nil, 0
+	task.spawn(function()
+		while running() do
+			task.wait(15)
+			if STATE.autoHopEmpty == true and not arenaName() then
+				local count = #Players:GetPlayers()
+				if count < 4 then
+					emptySince = emptySince or os.clock()
+					STATE.hopStatus = string.format("Only %d here; moving to a busier server in %ds", count, math.max(0, math.ceil(120 - (os.clock() - emptySince))))
+					if os.clock() - emptySince >= 120 and os.clock() - lastHop >= 600 then
+						local id, playing = STATE.fullestServer()
+						if id and playing and playing > count then
+							lastHop = os.clock()
+							STATE.hopStatus = "Moving to a server with " .. playing .. " players"
+							noteActivity("Server nearly empty, moving to one with " .. playing .. " players")
+							pcall(function()
+								game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer)
+							end)
+						end
+					end
+				else
+					emptySince = nil
+					STATE.hopStatus = count .. " players here"
+				end
+			elseif arenaName() then
+				emptySince = nil
+			end
+		end
+	end)
+end
+
 -- Reload the hub after a server change (rejoin, hop, practice, update shutdown).
 do
 	local queueTeleport = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
@@ -3093,6 +3153,7 @@ local function installHub()
 	toggle(afkBox, "Stay Active", "stayActive", "Turns the game's AFK button off so you keep getting put in rounds")
 	toggle(afkBox, "Reload Hub After Server Change", "autoReload")
 	local serverBox = section(playerTab, "Server", "server")
+	toggle(serverBox, "Leave Empty Servers", "autoHopEmpty", "If your server stays under 4 players between rounds for 2 minutes, moves you to the busiest server (at most every 10 minutes). Good for leaving it on overnight")
 	button(serverBox, "Rejoin", nil, "rotate-ccw", STATE.rejoin)
 	button(serverBox, "Server Hop", nil, "shuffle", function()
 		if not STATE.hop() then
