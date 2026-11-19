@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.10.1"
+local VERSION = "1.11.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -120,6 +120,7 @@ local STATE = {
 	combos = true,
 	comboChance = "Often",
 	trickShots = true,
+	spinMoves = true,
 	playerMove = true,
 	proPosition = true,
 	emotes = true,
@@ -260,7 +261,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "proPosition", "emotes", "lobbyWander",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "spinMoves", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
@@ -540,6 +541,29 @@ local function occupantsOf(zone)
 	return list
 end
 
+-- Read another player: where they'll be once they react (people keep running
+-- the way they're going for a moment), and whether they can dive right now:
+-- the game's dive only starts from the ground (Grounded) and can't be used
+-- again for 0.7s, so someone in the air or mid-dive can only walk.
+function brain.readPlayer(player)
+	local char = player and player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not root or not hum then
+		return nil
+	end
+	local vel = root.AssemblyLinearVelocity
+	local flatVel = vel * Vector3.new(1, 0, 1)
+	local okGround, ground = pcall(Ball.Ground, root.Position)
+	local height = okGround and (root.Position.Y - ground.Y) or 0
+	-- Standing, the middle of the body is about 3 studs up for every avatar
+	-- type (classic avatars have no hip height, so don't use that).
+	local airborne = height > 4.8 or math.abs(vel.Y) > 10
+	local diving = flatVel.Magnitude > 34
+	local predicted = root.Position + flatVel * (diving and 0.12 or 0.25)
+	return { predicted = predicted, cantDive = airborne or diving }
+end
+
 -- Team modes (Duos/Trios): teammates share one bigger square (seen live: two
 -- players in a 36x36 square, and no "Team" attribute set), so anyone in your
 -- square is on your team.
@@ -655,19 +679,24 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 			if zone and zone ~= myZone and zone:GetAttribute("Occupied") then
 				-- Score by the nearest enemy in that square (team modes have
 				-- two or three), and never aim at a square with a teammate.
-				local friendly, who, far = false, nil, nil
+				local friendly, who, far, stuck = false, nil, nil, false
 				for _, entry in ipairs(occupantsOf(zone)) do
 					if isTeammate(entry.player) then
 						friendly = true
 						break
 					end
-					local d = ((entry.pos - land) * Vector3.new(1, 0, 1)).Magnitude
+					-- Wrong-foot them: judge the shot from where they'll be once
+					-- they react (they keep running the way they're going for a
+					-- moment), not from where they stand right now.
+					local read = brain.readPlayer and brain.readPlayer(entry.player)
+					local from = read and read.predicted or entry.pos
+					local d = ((from - land) * Vector3.new(1, 0, 1)).Magnitude
 					if not far or d < far then
-						far, who = d, entry.player
+						far, who, stuck = d, entry.player, read ~= nil and read.cantDive
 					end
 				end
 				if not friendly then
-					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land, viaEmpty = viaEmpty })
+					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land, viaEmpty = viaEmpty, cantDive = stuck })
 				end
 			end
 		end
@@ -700,6 +729,12 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 	else
 		for _, option in ipairs(candidates) do
 			option.score = mode == "Fastest" and -option.flight or (option.far - option.flight * 4)
+			-- Punish the jump: the game's dive only works from the ground and
+			-- needs 0.7s before it can go again, so a player who is in the air
+			-- or mid-dive can only walk to this one.
+			if option.cantDive and mode ~= "Fastest" then
+				option.score += 8
+			end
 			-- Trick shot: now and then go for a bank shot off a wall.
 			if brain.preferBank and option.banked then
 				option.score += 12
@@ -717,6 +752,10 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 			pick = candidates[math.min(index, #candidates)]
 		end
 	end
+	if pick.cantDive and brain.punishKey ~= brain.stateKey then
+		brain.punishKey = brain.stateKey
+		stats.punishes = (stats.punishes or 0) + 1
+	end
 	return pick.dir, pick
 end
 
@@ -733,6 +772,7 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 		resolvedKind, quality = Ball.Resolve("Spike", char.Head.Position, ballPos, Ball.Jump(char, root.Position))
 	end
 	useAbility(resolvedKind == "Spike" and "spike" or "hit")
+	brain.spinLeft = 0
 	local pick
 	if resolvedKind == "Spike" then
 		brain.comboUntil = 0
@@ -751,6 +791,22 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 		local dir
 		if brain.aimDir and brain.aimKey == brain.stateKey and resolvedKind == brain.aimKind then
 			dir, pick = brain.aimDir, brain.aimPick
+			-- The aim was picked a moment ago for where you planned to hit it.
+			-- Check it again from where the ball really is now (a wall bounce
+			-- or a late jump moves the contact point; seen live: a spike aimed
+			-- that way came down in your own square). Aim again if it would.
+			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality)
+			local landZone = land and Ball.ZoneAt(zones, land)
+			if landZone and not landZone:GetAttribute("Occupied") then
+				landZone = Ball.BounceTarget(zones, land) or landZone
+			end
+			if not land or landZone == myZone then
+				dir, pick = chooseDirection(resolvedKind, state, zones, myZone, ballPos, now, quality)
+				stats.aimFixes = (stats.aimFixes or 0) + 1
+				-- Keep turning toward the new aim (not the old one) until the
+				-- swing lands.
+				brain.aimDir, brain.aimPick = dir, pick
+			end
 		else
 			dir, pick = chooseDirection(resolvedKind, state, zones, myZone, ballPos, now, quality)
 		end
@@ -1098,6 +1154,14 @@ local function turnToward(root, dir, rate)
 	if flat.Magnitude < 0.01 then
 		return true
 	end
+	-- Never turn while running somewhere: setting the character's rotation
+	-- stops the game's walking for that frame (measured live: running for
+	-- the ball while turning, you moved only 24% of the time instead of 98%).
+	-- You keep facing the same way while you run (like shift lock), and turn
+	-- once you've stopped or at the moment you hit.
+	if brain.walkingUntil and os.clock() < brain.walkingUntil then
+		return false
+	end
 	local current = yawOf(root.CFrame.LookVector)
 	local goal = yawOf(flat.Unit)
 	local diff = (goal - current + math.pi) % (2 * math.pi) - math.pi
@@ -1122,6 +1186,9 @@ local function moveTo(hum, root, spot, urgent)
 	end
 	local goal = Vector3.new(spot.X, root.Position.Y, spot.Z)
 	local delta = goal - root.Position
+	if delta.Magnitude > 2 then
+		brain.walkingUntil = os.clock() + 0.12
+	end
 	if STATE.playerMove ~= true or urgent or delta.Magnitude < 2.5 then
 		hum:MoveTo(goal)
 		return
@@ -1257,6 +1324,21 @@ local function stepBrain()
 	if not char or state.Dead then
 		STATE.playStatus = state.Dead and "Waiting for the next serve" or "Waiting to respawn"
 		brain.serveAt = nil
+		-- Get set for the next serve: strong players spike their serve
+		-- straight away (seen live: under 0.15s to react), so wait in your
+		-- ready spot instead of wherever the last point left you.
+		if char and state.Dead and STATE.autoHit == true and STATE.autoMove == true then
+			local readyZone = Ball.ZoneAt(zones, root.Position)
+			if readyZone then
+				local ready = Vector3.new(readyZone.Position.X, root.Position.Y, readyZone.Position.Z)
+					+ (brain.learnedBase and brain.learnedBase(readyZone) or Vector3.zero) * 0.5
+				if ((ready - root.Position) * Vector3.new(1, 0, 1)).Magnitude > 2.5 then
+					hum.AutoRotate = true
+					hum:MoveTo(ready)
+					STATE.playStatus = "Getting ready for the serve"
+				end
+			end
+		end
 		return
 	end
 	-- Every new flight of the ball: a fresh human reaction.
@@ -1348,6 +1430,18 @@ local function stepBrain()
 		local land, landTime = landingSpot(state, now)
 		if land and Ball.ZoneAt(zones, land) == myZone and landTime - now < 0.75 then
 			reacted = true
+		else
+			-- Same when it comes down low in your square soon, even if a wall
+			-- bounce hides where it finally lands (seen live: a fast spike got
+			-- a 0.15s "think" because its landing was off a wall).
+			local chain = flightChain(state)
+			for t = now, math.min(pathEnd(chain), now + 0.75), 0.03 do
+				local p = Ball.Contain((pathAt(chain, t)))
+				if Ball.ZoneAt(zones, p) == myZone and p.Y - Ball.Ground(p).Y <= 12 then
+					reacted = true
+					break
+				end
+			end
 		end
 	end
 	-- Someone else touched it: whatever combo you had going is over.
@@ -1376,7 +1470,7 @@ local function stepBrain()
 			brain.turning = os.clock()
 			if STATE.playerMove == true then
 				turnToward(root, dir, 11)
-			else
+			elseif not (brain.walkingUntil and os.clock() < brain.walkingUntil) then
 				local goal = CFrame.lookAt(root.Position, root.Position + dir)
 				root.CFrame = root.CFrame:Lerp(goal, 0.22)
 			end
@@ -1434,6 +1528,24 @@ local function stepBrain()
 		-- Frozen too low or too high to spike: play it normally below.
 	end
 
+	-- Style: a 360 spin on the way up (spike jumps and some hops). Only in the
+	-- air (turning on the ground stops your run) and never mid-swing; the hit
+	-- itself always snaps to the aim, so the spin can't change where it goes.
+	if brain.spinLeft and brain.spinLeft > 0 then
+		if airborne and not BallController:Busy() then
+			local step = math.min(brain.spinLeft, 27 * math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20))
+			brain.spinLeft -= step
+			hum.AutoRotate = false
+			brain.turning = os.clock()
+			root.CFrame = root.CFrame * CFrame.Angles(0, step * (brain.spinDir or 1), 0)
+			if brain.spinLeft <= 0 then
+				stats.spins = (stats.spins or 0) + 1
+			end
+		elseif not airborne and os.clock() - brain.lastJump > 0.3 then
+			brain.spinLeft = 0
+		end
+	end
+
 	-- In the air: only hit once it really counts as a spike (high enough in the
 	-- jump, ball not below your head). Hitting earlier would turn it into a bump.
 	if airborne and ballHere and STATE.autoSpike == true then
@@ -1456,8 +1568,8 @@ local function stepBrain()
 				return
 			elseif not below and os.clock() - brain.lastJump < 0.9 then
 				STATE.playStatus = "Waiting for the spike"
-				-- Keep turning toward the shot while in the air.
-				if STATE.playerMove == true and brain.aimDir and brain.aimKey == brain.stateKey then
+				-- Keep turning toward the shot while in the air (after any spin).
+				if STATE.playerMove == true and brain.aimDir and brain.aimKey == brain.stateKey and not (brain.spinLeft and brain.spinLeft > 0) then
 					hum.AutoRotate = false
 					brain.turning = os.clock()
 					turnToward(root, brain.aimDir, 11)
@@ -1547,6 +1659,9 @@ local function stepBrain()
 							if not brain.fakeJump then
 								useAbility("spike")
 							end
+							-- Now and then a 360 on the way up before slapping it.
+							brain.spinLeft = (STATE.spinMoves == true and humanizing() and math.random() < 0.4) and math.pi * 2 or 0
+							brain.spinDir = math.random() < 0.5 and -1 or 1
 							hum:ChangeState(Enum.HumanoidStateType.Jumping)
 						end
 						return
@@ -1657,12 +1772,25 @@ local function stepBrain()
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
 		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.6 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
-			and landDist < 40 and os.clock() - brain.lastDive > 1 then
+			and landDist < 40 and os.clock() - brain.lastDive > 1
+			-- Only when the game will actually start the dive (on the ground, not
+			-- mid-swing, off cooldown): turning to dive while a swing is still
+			-- going would send that hit the wrong way.
+			and hum.FloorMaterial ~= Enum.Material.Air and not BallController:Busy()
+			and (function()
+				local okLeft, leftDive = pcall(AbilityController.Remaining, AbilityController, "Dive")
+				return not okLeft or tonumber(leftDive) == 0
+			end)() then
 			brain.lastDive = os.clock()
 			brain.diveCheck = { at = os.clock(), hit = tonumber(BallController._lastHit) or 0, key = brain.stateKey }
 			face(root, ((catchSpot or landFlat or flat) - root.Position).Unit)
 			local ok = pcall(AbilityController.Activate, AbilityController, "Dive")
 			elevate()
+			-- Count only dives the game really started.
+			if ok and type(AbilityController._active) == "table" and not AbilityController._active.Dive then
+				ok = false
+				brain.diveCheck = nil
+			end
 			if ok then
 				stats.dives += 1
 				STATE.playStatus = "Dived"
@@ -1766,9 +1894,19 @@ local function stepBrain()
 				moveTo(hum, root, brain.idleSpot - (humanizing() and brain.offset or Vector3.zero))
 			end
 			if os.clock() >= (brain.hopAt or 0) then
-				brain.hopAt = os.clock() + randomBetween(4, 11)
-				-- No idle hops while reading a hitter: be ready to move.
-				if math.random() < 0.35 and not airborne and not read then
+				local lively = STATE.spinMoves == true
+				brain.hopAt = os.clock() + (lively and randomBetween(2.5, 6) or randomBetween(4, 11))
+				-- Hop only when nobody can hit it at you for a second (the ball is
+				-- still flying to another square): the game's dive only works
+				-- from the ground, so never be in the air when it matters.
+				local land, landTime = landingSpot(state, now)
+				local safe = land and landTime - now > 1.1 and Ball.ZoneAt(zones, land) ~= myZone
+				if math.random() < (lively and 0.55 or 0.35) and not airborne and not read and (safe or not lively) then
+					brain.lastJump = os.clock()
+					if lively and math.random() < 0.35 then
+						brain.spinLeft = math.pi * 2
+						brain.spinDir = math.random() < 0.5 and -1 or 1
+					end
 					hum:ChangeState(Enum.HumanoidStateType.Jumping)
 				end
 			end
@@ -3068,6 +3206,7 @@ local function installHub()
 	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, set-set-spike long combos, dive then spike, soft tips over the line, and bank shots off the walls")
 	local moveBox = section(playTab, "Move Like A Player", "footprints")
 	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
+	toggle(moveBox, "Spin Moves", "spinMoves", "Style: sometimes a 360 on the way up before slapping a spike, and livelier hops (with the odd 360) while the ball is flying to someone else. Only in the air and only when it's safe, so it never slows you down")
 	toggle(moveBox, "Pro Positioning", "proPosition", "Learns where balls land in your square this session and waits in the spot that covers them best, and gets back there right after each of your touches")
 	toggle(moveBox, "Emotes", "emotes", "Sometimes emotes after a kill or a win, and now and then in the lobby")
 	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
@@ -3306,10 +3445,10 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d\nServes: jump %d · tip %d · float %d\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d\nServes: jump %d · tip %d · float %d\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
 			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0,
-			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0,
+			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0,
 			stats.jumpServes or 0, stats.tipServes or 0, stats.floatServes or 0,
 			stats.lastHit
 		))
