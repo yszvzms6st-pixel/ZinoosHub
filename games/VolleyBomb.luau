@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.15.3"
+local VERSION = "1.16.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1334,20 +1334,39 @@ function brain.runLoop(hum, root, center)
 	brain.walkingUntil = os.clock() + 0.12
 	hum:MoveTo(Vector3.new(center.X + math.cos(ahead) * loop.r, root.Position.Y, center.Z + math.sin(ahead) * loop.r))
 end
--- Side steps: shuffle left and right across a spot, keeping your facing,
--- switching every third of a second or so (never more than ~3 studs away).
+-- Side steps: shuffle across your spot like a player in a ready stance. Each
+-- step goes to a new point on the line (not always a full flip to the other
+-- side), then you settle there facing the play until the next one. The old
+-- version flipped every quarter second, which measured live as ~41 stop-starts
+-- a minute and kept whatever facing the last loop left you with.
 function brain.sideStep(hum, root, center, ballPos)
 	local toBall = (ballPos - center) * Vector3.new(1, 0, 1)
 	local side = toBall.Magnitude > 0.5 and Vector3.new(-toBall.Z, 0, toBall.X).Unit or Vector3.new(1, 0, 0)
 	local step = brain.step
 	if not step or os.clock() > step.untilT then
-		brain.step = { untilT = os.clock() + randomBetween(0.25, 0.5), sign = step and -step.sign or (math.random() < 0.5 and -1 or 1) }
+		local prev = step and step.pos or 0
+		local pos = randomBetween(-3.5, 3.5)
+		if math.abs(pos - prev) < 1.5 then
+			pos = prev + (pos >= prev and 1.5 or -1.5)
+			pos = math.clamp(pos, -3.5, 3.5)
+		end
+		brain.step = { untilT = os.clock() + randomBetween(0.35, 0.65), pos = pos }
 		step = brain.step
 	end
 	hum.AutoRotate = false
-	brain.walkingUntil = os.clock() + 0.12
-	local goal = center + side * step.sign * 3
-	hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
+	local goal = center + side * step.pos
+	local away = ((goal - root.Position) * Vector3.new(1, 0, 1)).Magnitude
+	if away > 0.6 then
+		brain.walkingUntil = os.clock() + 0.12
+		hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
+	else
+		-- Settled: stand and square up to the play (turning only while still,
+		-- because turning stalls a walk).
+		hum:MoveTo(root.Position)
+		if brain.faceBall then
+			brain.faceBall(root, hum, ballPos)
+		end
+	end
 end
 
 -- The ball's whole path from now: its current flight plus any wall bounces
@@ -1857,9 +1876,21 @@ local function stepBrain()
 						if t - now <= 0.46 and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
 							brain.lastJump = os.clock()
 							useAbility("spike")
-							-- Now and then a 360 on the way up before slapping it.
+							-- Now and then a 360 on the way up before slapping it. The
+							-- spin goes the short way round to the shot and ends facing
+							-- it, so there's no snap turn at the hit (seen live: up to
+							-- 135 degrees in one frame after a plain 360).
 							brain.spinLeft = (STATE.spinMoves == true and humanizing() and math.random() < 0.4) and math.pi * 2 or 0
 							brain.spinDir = math.random() < 0.5 and -1 or 1
+							if brain.spinLeft > 0 and brain.aimDir and brain.aimKey == brain.stateKey then
+								local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+								local aimFlat = brain.aimDir * Vector3.new(1, 0, 1)
+								if look.Magnitude > 0.01 and aimFlat.Magnitude > 0.01 then
+									local diff = (yawOf(aimFlat.Unit) - yawOf(look.Unit) + math.pi) % (2 * math.pi) - math.pi
+									brain.spinDir = diff >= 0 and 1 or -1
+									brain.spinLeft = math.pi * 2 + math.abs(diff)
+								end
+							end
 							hum:ChangeState(Enum.HumanoidStateType.Jumping)
 						end
 						return
@@ -2113,6 +2144,14 @@ local function stepBrain()
 				local land, landTime = landingSpot(state, now)
 				local safe = land and landTime - now > 0.9 and Ball.ZoneAt(zones, land) ~= myZone
 				runAbout = true
+				-- Go to side steps the moment a ball could come your way, but only
+				-- start looping again after a short settle, so it doesn't flick
+				-- between the two (and between auto-turn on and off) every frame.
+				if not safe then
+					brain.loopOkAt = os.clock() + randomBetween(0.3, 0.55)
+				elseif os.clock() < (brain.loopOkAt or 0) then
+					safe = false
+				end
 				if safe then
 					brain.runLoop(hum, root, brain.idleSpot)
 				else
