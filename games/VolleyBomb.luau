@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.6.2"
+local VERSION = "1.7.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -129,6 +129,8 @@ local STATE = {
 	-- Shop
 	autoBuyAbility = true,
 	abilityGoal = "Guardian",
+	abilityBuyMode = "Just my main ability",
+	skipAbilities = {},
 	autoEquipAbility = true,
 	autoBuyPacks = true,
 	saveForAbility = false,
@@ -148,6 +150,7 @@ local STATE = {
 	customFov = false,
 	fov = 90,
 	dodgeShockwave = true,
+	avoidBlasts = true,
 	-- Menu
 	toggleKey = "RightControl",
 	hideOnStart = false,
@@ -219,6 +222,7 @@ local COMBO_OPTIONS = { "Sometimes", "Often", "Always" }
 local COMBO_CHANCE = { Sometimes = 40, Often = 70, Always = 100 }
 local VOTE_OPTIONS = { "Solo", "Duos", "Trios" }
 local PACK_OPTIONS = { "Both", "Ball Pack", "Explosions Pack" }
+local BUY_MODE_OPTIONS = { "Just my main ability", "All abilities" }
 local PACK_NAMES = { ["Ball Pack"] = { "Basic Ball Pack" }, ["Explosions Pack"] = { "Basic Explosions Pack" }, Both = { "Basic Ball Pack", "Basic Explosions Pack" } }
 -- Abilities you can buy with coins, cheapest first.
 local ABILITY_OPTIONS = {}
@@ -253,9 +257,9 @@ local ABILITY_MOMENT = {
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "playerMove", "emotes", "lobbyWander",
-	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
+	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave",
+	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -294,6 +298,16 @@ local function loadSaved()
 	if not table.find(PACK_OPTIONS, STATE.packChoice) then
 		STATE.packChoice = "Both"
 	end
+	if not table.find(BUY_MODE_OPTIONS, STATE.abilityBuyMode) then
+		STATE.abilityBuyMode = "Just my main ability"
+	end
+	local skips = {}
+	for _, name in ipairs(type(STATE.skipAbilities) == "table" and STATE.skipAbilities or {}) do
+		if table.find(ABILITY_OPTIONS, name) then
+			table.insert(skips, name)
+		end
+	end
+	STATE.skipAbilities = skips
 	if not table.find(ABILITY_OPTIONS, STATE.abilityGoal) then
 		STATE.abilityGoal = table.find(ABILITY_OPTIONS, "Guardian") and "Guardian" or ABILITY_OPTIONS[#ABILITY_OPTIONS]
 	end
@@ -499,6 +513,51 @@ local function isTeammate(player)
 	return mine ~= nil and player ~= nil and player:GetAttribute("Team") == mine
 end
 
+-- Everyone standing in a square (team modes can have more than one).
+local function occupantsOf(zone)
+	local list = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if root and hum and hum.Health > 0 then
+				local rel = zone.CFrame:PointToObjectSpace(root.Position)
+				if math.abs(rel.X) <= zone.Size.X / 2 and math.abs(rel.Z) <= zone.Size.Z / 2 and math.abs(rel.Y) < 25 then
+					table.insert(list, { player = player, pos = root.Position })
+				end
+			end
+		end
+	end
+	return list
+end
+
+-- Team modes (Duos/Trios): teammates share one bigger square (seen live: two
+-- players in a 36x36 square, and no "Team" attribute set), so anyone in your
+-- square is on your team.
+local function teamMode()
+	local mode = workspace:GetAttribute("Teammode")
+	return mode ~= nil and mode ~= "Solo"
+end
+
+-- Is a teammate in your square clearly closer to this spot? Then it's their
+-- ball (no fighting over it).
+local function teammateCloser(myZone, root, spot)
+	if not LocalPlayer:GetAttribute("Team") and not teamMode() then
+		return nil
+	end
+	local mine = ((root.Position - spot) * Vector3.new(1, 0, 1)).Magnitude
+	for _, entry in ipairs(occupantsOf(myZone)) do
+		if teamMode() or isTeammate(entry.player) then
+			local theirs = ((entry.pos - spot) * Vector3.new(1, 0, 1)).Magnitude
+			if theirs + 3 < mine then
+				return entry
+			end
+		end
+	end
+	return nil
+end
+
 -- Where a hit in direction dir would end up, following wall bounces.
 local function simulate(kind, state, zones, ballPos, dir, now, quality)
 	local origin, unit = Ball.Inside(zones, ballPos, dir)
@@ -532,10 +591,21 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 				zone = Ball.BounceTarget(zones, land) or zone
 			end
 			if zone and zone ~= myZone and zone:GetAttribute("Occupied") then
-				local who, whoPos = occupantOf(zone)
-				if not isTeammate(who) then
-					local far = whoPos and ((whoPos - land) * Vector3.new(1, 0, 1)).Magnitude or 10
-					table.insert(candidates, { dir = dir, far = far, flight = flight, who = who, banked = banked, land = land })
+				-- Score by the nearest enemy in that square (team modes have
+				-- two or three), and never aim at a square with a teammate.
+				local friendly, who, far = false, nil, nil
+				for _, entry in ipairs(occupantsOf(zone)) do
+					if isTeammate(entry.player) then
+						friendly = true
+						break
+					end
+					local d = ((entry.pos - land) * Vector3.new(1, 0, 1)).Magnitude
+					if not far or d < far then
+						far, who = d, entry.player
+					end
+				end
+				if not friendly then
+					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land })
 				end
 			end
 		end
@@ -1143,6 +1213,9 @@ local function stepBrain()
 					-- Once you've committed to a spike on this ball, stick with
 					-- it (no flip-flopping between plans every frame).
 					local slack = brain.spikeKey == brain.stateKey and 6 or 3
+					if brain.spikeKey ~= brain.stateKey and teammateCloser(myZone, root, p) then
+						break -- teammate's spike
+					end
 					if dist <= hum.WalkSpeed * (t - now - 0.42) + slack then
 						brain.spikeKey = brain.stateKey
 						moveTo(hum, root, flat, dist > hum.WalkSpeed * (t - now - 0.42) * 0.8)
@@ -1180,8 +1253,19 @@ local function stepBrain()
 			target, targetTime = land, landTime
 		end
 	end
+	local mate = target and reacted and teammateCloser(myZone, root, target)
 	if target and not reacted then
 		STATE.playStatus = "Reacting"
+	elseif mate then
+		-- Teammate's ball: cover the other side of the square instead.
+		local center = Vector3.new(myZone.Position.X, root.Position.Y, myZone.Position.Z)
+		local fromMate = (center - mate.pos) * Vector3.new(1, 0, 1)
+		local spot = center + (fromMate.Magnitude > 0.5 and fromMate.Unit or Vector3.zero) * math.min(myZone.Size.X, myZone.Size.Z) * 0.22
+		moveTo(hum, root, spot)
+		if STATE.playerMove == true and brain.faceBall then
+			brain.faceBall(root, hum, ballNow)
+		end
+		STATE.playStatus = "Teammate's ball, covering"
 	elseif target then
 		local flat = Vector3.new(target.X, root.Position.Y, target.Z)
 		local dist = (flat - root.Position).Magnitude
@@ -1229,6 +1313,34 @@ local function stepBrain()
 				end
 			end
 		end
+	elseif STATE.avoidBlasts == true and (function()
+		-- The ball blows up when it lands, and the blast reaches 15 studs
+		-- (times the round's multiplier), even into the next square. If it's
+		-- going to land near you in someone else's square, get clear.
+		local land, landTime = landingSpot(state, now)
+		if not land or landTime - now > 1.6 or Ball.ZoneAt(zones, land) == myZone then
+			return false
+		end
+		local mult = type(state.Multipliers) == "table" and tonumber(state.Multipliers.BlastRadius) or 1
+		local radius = (tonumber(Ball.BlastRadius) or 15) * mult + 3
+		local away = (root.Position - land) * Vector3.new(1, 0, 1)
+		if away.Magnitude >= radius then
+			return false
+		end
+		local dir = away.Magnitude > 0.5 and away.Unit or (Vector3.new(myZone.Position.X, 0, myZone.Position.Z) - Vector3.new(land.X, 0, land.Z)).Unit
+		local spot = root.Position + dir * (radius - away.Magnitude + 2)
+		local rel = myZone.CFrame:PointToObjectSpace(spot)
+		local limitX, limitZ = myZone.Size.X / 2 - 2, myZone.Size.Z / 2 - 2
+		spot = myZone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
+		moveTo(hum, root, spot, true)
+		STATE.playStatus = "Getting clear of the blast"
+		if brain.blastKey ~= brain.stateKey then
+			brain.blastKey = brain.stateKey
+			stats.blastsAvoided = (stats.blastsAvoided or 0) + 1
+		end
+		return true
+	end)() then
+		-- moving away from a blast next door
 	else
 		-- Wait in your square. Humanized: shuffle around the middle now and
 		-- then instead of standing dead still.
@@ -1586,14 +1698,32 @@ local function packComplete(packName)
 end
 
 local shopTotals = { abilities = 0, packs = 0 }
+-- The next ability to buy: in "All abilities" mode the cheapest one you don't
+-- own yet (skipping any you said not to buy), otherwise the one you picked.
+local function nextAbilityToBuy()
+	if STATE.abilityBuyMode ~= "All abilities" then
+		return STATE.abilityGoal
+	end
+	for _, name in ipairs(ABILITY_OPTIONS) do
+		if not ownsAbility(name) and not table.find(STATE.skipAbilities or {}, name) then
+			return name
+		end
+	end
+	return nil
+end
+STATE.nextAbilityToBuy = nextAbilityToBuy
+
 local function stepShop()
 	local coins = tonumber(dataGet("Money")) or 0
-	local goal = STATE.abilityGoal
+	local goal = nextAbilityToBuy()
 	local goalData = goal and AbilityInfo[goal]
 	local goalPrice = goalData and tonumber(goalData.Price) or 0
 	local saving = 0
 	local parts = {}
 
+	if STATE.autoBuyAbility == true and STATE.abilityBuyMode == "All abilities" and not goal then
+		table.insert(parts, "Every ability bought" .. (#(STATE.skipAbilities or {}) > 0 and (" (skipping " .. table.concat(STATE.skipAbilities, ", ") .. ")") or ""))
+	end
 	if STATE.autoBuyAbility == true and goalData then
 		if ownsAbility(goal) then
 			table.insert(parts, goal .. " owned")
@@ -1615,11 +1745,14 @@ local function stepShop()
 		end
 	end
 
-	if STATE.autoEquipAbility == true and goal and ownsAbility(goal) and equippedAbility() ~= goal then
+	-- Equip your main ability (the one picked in the menu), not whatever was
+	-- just bought.
+	local main = STATE.abilityGoal
+	if STATE.autoEquipAbility == true and main and ownsAbility(main) and equippedAbility() ~= main then
 		local event = remote("EquipAbility")
 		if event then
-			event:FireServer(goal)
-			noteActivity("Equipped " .. goal)
+			event:FireServer(main)
+			noteActivity("Equipped " .. main)
 		end
 	end
 
@@ -2422,6 +2555,7 @@ local function installHub()
 	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
 	local dangerBox = section(playTab, "Enemy Abilities", "shield")
 	toggle(dangerBox, "Dodge Shockwave", "dodgeShockwave", "Jumps over Shockwave rings (they kill anyone they touch) right before they reach you")
+	toggle(dangerBox, "Avoid Blasts", "avoidBlasts", "Steps away when the ball is about to blow up within blast range of you in the next square (the blast reaches 15 studs)")
 	local dangerInfo = info(dangerBox, "Seen this session", "None yet")
 	STATE.drawDanger = function()
 		local parts = {}
@@ -2439,7 +2573,7 @@ local function installHub()
 				.. (loss.ball and (" · " .. loss.ball) or "")
 		end
 		setInfo(dangerInfo, (#parts > 0 and table.concat(parts, " · ") or "None yet")
-			.. string.format("\nShockwaves seen: %d · jumped: %d", stats.shockwavesSeen or 0, stats.dodges or 0)
+			.. string.format("\nShockwaves seen: %d · jumped: %d · blasts stepped away from: %d", stats.shockwavesSeen or 0, stats.dodges or 0, stats.blastsAvoided or 0)
 			.. (STATE.lastEnemyAbility and ("\nLast: " .. STATE.lastEnemyAbility) or "")
 			.. "\n" .. lossText)
 	end
@@ -2457,10 +2591,37 @@ local function installHub()
 	-- Shop
 	local shopBox = section(shopTab, "Abilities", "zap")
 	local shopInfo = info(shopBox, "Status", "Waiting")
-	toggle(shopBox, "Auto Buy Ability", "autoBuyAbility", "Saves your coins and buys the ability below as soon as you can afford it")
+	toggle(shopBox, "Auto Buy Abilities", "autoBuyAbility", "Buys abilities with your coins as soon as you can afford them")
 	local abilityLabels = {}
-	choice(shopBox, "Ability To Get", "Guardian = survive one blast every game", ABILITY_OPTIONS, "abilityGoal")
-	toggle(shopBox, "Auto Equip It", "autoEquipAbility", "Equips it once you own it")
+	choice(shopBox, "Buy", "All abilities = collects every one, cheapest first", BUY_MODE_OPTIONS, "abilityBuyMode")
+	choice(shopBox, "Main Ability", "The one you play with (and the one bought in 'Just my main ability' mode)", ABILITY_OPTIONS, "abilityGoal")
+	shopBox:Dropdown({
+		Title = "Don't Buy",
+		Desc = "Skipped in 'All abilities' mode",
+		Values = ABILITY_OPTIONS,
+		Value = table.clone(STATE.skipAbilities),
+		Multi = true,
+		AllowNone = true,
+		Callback = function(list)
+			local chosen = {}
+			for _, value in ipairs(type(list) == "table" and list or {}) do
+				local name = optionName(value)
+				if type(name) == "string" and table.find(ABILITY_OPTIONS, name) then
+					table.insert(chosen, name)
+				end
+			end
+			table.sort(chosen)
+			local before = table.clone(STATE.skipAbilities)
+			table.sort(before)
+			if table.concat(chosen, ",") == table.concat(before, ",") then
+				return
+			end
+			elevate()
+			STATE.skipAbilities = chosen
+			saveConfig()
+		end,
+	})
+	toggle(shopBox, "Auto Equip Main Ability", "autoEquipAbility", "Keeps your main ability equipped (new ones you buy don't replace it)")
 	local priceInfo = info(shopBox, "Prices", (function()
 		for _, name in ipairs(ABILITY_OPTIONS) do
 			local data = AbilityInfo[name]
@@ -2544,10 +2705,10 @@ local function installHub()
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
 				humanize = true, reaction = "Normal", combos = true, comboChance = "Often", trickShots = true, playerMove = true, emotes = true, lobbyWander = true,
-				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", autoEquipAbility = true,
+				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
-				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true,
+				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true, avoidBlasts = true,
 			}
 			for key, value in pairs(defaults) do
 				STATE[key] = value
