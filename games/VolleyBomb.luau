@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.4"
+local VERSION = "1.9.5"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1624,7 +1624,7 @@ local function stepBrain()
 		-- Best case: walk now, then dive in the last half second.
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
-		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.55 and slide <= landDist + 3 and not (STATE.ringIncoming and STATE.ringIncoming(1.1))
+		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.55 and slide <= landDist + 3 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
 			and landDist < 40 and os.clock() - brain.lastDive > 1 then
 			brain.lastDive = os.clock()
 			face(root, ((landFlat or flat) - root.Position).Unit)
@@ -2257,6 +2257,27 @@ local shockwaves = {}
 local lastDodge = 0
 -- Is a Shockwave ring going to reach you within `within` seconds? Then hold
 -- dives and spike jumps so you're on the ground and can jump it.
+-- Any live Shockwave ring whose centre is within `range` studs of you. A
+-- dive slides up to ~30 studs and a ring grows to 30 across its radius, so
+-- diving while one is nearby can slide you straight into it (seen live: a
+-- Shockwave death 0.3s after a dive, the ring's centre too far away to
+-- count as "incoming" from where you started).
+function STATE.ringNearby(range)
+	if STATE.dodgeShockwave ~= true or next(shockwaves) == nil then
+		return false
+	end
+	local _, root = character()
+	if not root then
+		return false
+	end
+	for part in pairs(shockwaves) do
+		if part.Parent and ((root.Position - part.Position) * Vector3.new(1, 0, 1)).Magnitude <= range then
+			return true
+		end
+	end
+	return false
+end
+
 function STATE.ringIncoming(within)
 	if STATE.dodgeShockwave ~= true or next(shockwaves) == nil then
 		return false
