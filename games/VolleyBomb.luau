@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.14.0"
+local VERSION = "1.15.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -121,7 +121,7 @@ local STATE = {
 	comboChance = "Often",
 	trickShots = true,
 	spinMoves = true,
-	noDiveCooldown = true,
+	readPlayers = true,
 	playerMove = true,
 	proPosition = true,
 	emotes = true,
@@ -262,7 +262,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "spinMoves", "noDiveCooldown", "playerMove", "proPosition", "emotes", "lobbyWander",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "combos", "comboChance", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
@@ -790,7 +790,7 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 					end
 				end
 				if not friendly then
-					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land, viaEmpty = viaEmpty, cantDive = stuck })
+					table.insert(candidates, { dir = dir, far = far or 10, flight = flight, who = who, banked = banked, land = land, viaEmpty = viaEmpty, cantDive = stuck, zone = zone })
 				end
 			end
 		end
@@ -823,6 +823,11 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 	else
 		for _, option in ipairs(candidates) do
 			option.score = mode == "Fastest" and -option.flight or (option.far - option.flight * 4)
+			-- Read Players: aim where this player has missed before, away from
+			-- where they always save it and from where they usually wait.
+			if mode ~= "Fastest" and option.who and brain.weakSpot then
+				option.score += brain.weakSpot(option.who, option.zone, option.land)
+			end
 			-- Punish the jump: the game's dive only works from the ground and
 			-- needs 0.7s before it can go again, so a player who is in the air
 			-- or mid-dive can only walk to this one.
@@ -1265,11 +1270,137 @@ function brain.learnedBase(zone)
 end
 STATE.landingMemory = landingMemory
 
+local landingSpot -- defined further down (needs the flight chain helpers)
+
+-- Learn the players (Read Players): per player, where their hits into your
+-- square come down (so you wait where THEY aim), where they stand when a
+-- ball comes at them, and which spots in their square they've saved or
+-- missed (so your shots go where they're weak). Everything is stored
+-- relative to the square, so it still works when squares change, and it is
+-- kept through hub reloads for this session.
+local playerModel = getgenv().ZinoosVolleyModel or {}
+getgenv().ZinoosVolleyModel = playerModel
+local function modelOf(player)
+	local key = player and player.UserId
+	if not key then
+		return nil
+	end
+	playerModel[key] = playerModel[key] or { aims = {}, saves = {}, misses = {}, homeSum = Vector3.zero, homeN = 0 }
+	return playerModel[key]
+end
+local function pushCapped(list, item, cap)
+	table.insert(list, item)
+	while #list > cap do
+		table.remove(list, 1)
+	end
+end
+local function flatRel(zone, pos)
+	local rel = zone.CFrame:PointToObjectSpace(pos)
+	return Vector3.new(rel.X, 0, rel.Z)
+end
+function brain.noteAim(hitter, zone, land)
+	local m = STATE.readPlayers == true and modelOf(hitter)
+	if m then
+		pushCapped(m.aims, flatRel(zone, land), 20)
+	end
+end
+-- Where this hitter usually puts it in your square (60% of the way from
+-- the middle toward their average), once they've done it 3+ times.
+function brain.hitterBase(hitter, zone)
+	local m = STATE.readPlayers == true and hitter and playerModel[hitter.UserId]
+	if not m or #m.aims < 3 then
+		return nil
+	end
+	local sum = Vector3.zero
+	for _, rel in ipairs(m.aims) do
+		sum += rel
+	end
+	local avg = sum / #m.aims * 0.6
+	local limitX, limitZ = zone.Size.X / 2 - 5, zone.Size.Z / 2 - 5
+	local clamped = Vector3.new(math.clamp(avg.X, -limitX, limitX), 0, math.clamp(avg.Z, -limitZ, limitZ))
+	return zone.CFrame:VectorToWorldSpace(clamped) * Vector3.new(1, 0, 1)
+end
+-- How weak this player is at this landing spot: past misses near it count
+-- up, past saves near it count down (a few points at most).
+function brain.weakSpot(player, zone, land)
+	local m = STATE.readPlayers == true and player and playerModel[player.UserId]
+	if not m or not zone then
+		return 0
+	end
+	local rel = flatRel(zone, land)
+	local score = 0
+	for _, spot in ipairs(m.misses) do
+		if (spot - rel).Magnitude < 6 then
+			score += 3
+		end
+	end
+	for _, spot in ipairs(m.saves) do
+		if (spot - rel).Magnitude < 4 then
+			score -= 1
+		end
+	end
+	if m.homeN >= 3 then
+		-- Far from where they usually wait is harder for them.
+		score += math.min(((m.homeSum / m.homeN) - rel).Magnitude, 20) * 0.15
+	end
+	return math.clamp(score, -6, 9)
+end
+-- Watch every ball that heads into someone else's square and how it ends.
+local defenseWatch = { key = nil, pending = nil }
+function brain.watchDefense(state, zones, now)
+	if STATE.readPlayers ~= true then
+		return
+	end
+	local key = tostring(state.HitAt) .. tostring(state.Dead) .. tostring(state.HitBy)
+	if key == defenseWatch.key then
+		return
+	end
+	defenseWatch.key = key
+	local pending = defenseWatch.pending
+	if pending then
+		defenseWatch.pending = nil
+		local m = modelOf(pending.defender)
+		if m then
+			if state.Dead and state.Origin and Ball.ZoneAt(zones, state.Origin) == pending.zone then
+				pushCapped(m.misses, pending.rel, 30)
+				stats.learnedMisses = (stats.learnedMisses or 0) + 1
+			elseif state.HitBy == pending.defender then
+				pushCapped(m.saves, pending.rel, 40)
+			end
+		end
+	end
+	if state.Dead or not state.HitBy then
+		return
+	end
+	local land = landingSpot(state, now)
+	local zone = land and Ball.ZoneAt(zones, land)
+	if not zone or not zone:GetAttribute("Occupied") then
+		return
+	end
+	-- The defender: whoever stands in that square, nearest the landing.
+	local defender, best, defPos
+	for _, entry in ipairs(occupantsOf(zone)) do
+		local d = ((entry.pos - land) * Vector3.new(1, 0, 1)).Magnitude
+		if entry.player ~= state.HitBy and (not best or d < best) then
+			defender, best, defPos = entry.player, d, entry.pos
+		end
+	end
+	if not defender then
+		return
+	end
+	local m = modelOf(defender)
+	if m then
+		m.homeSum += flatRel(zone, defPos)
+		m.homeN += 1
+	end
+	defenseWatch.pending = { defender = defender, zone = zone, rel = flatRel(zone, land) }
+end
+
 -- Read the hitter: the ball is about to come down in another player's square.
 -- Look at which way they're facing and work out (with the game's own ball
 -- maths) where a hit that way would land. If that's in your square, return
 -- the spot so you can start leaning there before they even touch it.
-local landingSpot -- defined further down (needs the flight chain helpers)
+-- (landingSpot is declared above, with the player model; defined further down)
 local readCache = { at = 0, key = nil, spot = nil }
 function brain.readHitter(state, zones, myZone, now)
 	if os.clock() - readCache.at < 0.2 and readCache.key == brain.stateKey then
@@ -1506,6 +1637,7 @@ local function stepBrain()
 	local state, zones = ball.State, ball.Zones
 	local now = workspace:GetServerTimeNow()
 	updateMarker(landingSpot(state, now))
+	pcall(brain.watchDefense, state, zones, now)
 	countSwingHits()
 	-- How did the last dive go? (caught and counted by the server / touched
 	-- on your screen only / missed)
@@ -1589,6 +1721,7 @@ local function stepBrain()
 		local land = landingSpot(state, now)
 		if land and Ball.ZoneAt(zones, land) == myZone then
 			brain.rememberLanding(myZone, land)
+			brain.noteAim(state.HitBy, myZone, land)
 		end
 	end
 	if STATE.autoHit ~= true then
@@ -2025,21 +2158,13 @@ local function stepBrain()
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
 		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.6 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
-			and landDist < 40 and os.clock() - brain.lastDive > 0.55
+			and landDist < 40 and os.clock() - brain.lastDive > 1
 			-- Only when the game will actually start the dive (on the ground, not
 			-- mid-swing, off cooldown): turning to dive while a swing is still
-			-- going would send that hit the wrong way.
+			-- going would send that hit the wrong way. The game's own dive
+			-- cooldown always applies.
 			and hum.FloorMaterial ~= Enum.Material.Air and not BallController:Busy()
 			and (function()
-				-- No Dive Cooldown: the dive's cooldown is kept on your side, so
-				-- once the last dive has finished you can go again straight away.
-				if STATE.noDiveCooldown == true and type(AbilityController._active) == "table" and not AbilityController._active.Dive
-					and type(AbilityController._lastUsed) == "table" and AbilityController._lastUsed.Dive then
-					local duration = AbilityModules.Dive and tonumber(AbilityModules.Dive.Duration) or 0.5
-					if os.clock() - AbilityController._lastUsed.Dive >= duration then
-						AbilityController._lastUsed.Dive = os.clock() - 60
-					end
-				end
 				local okLeft, leftDive = pcall(AbilityController.Remaining, AbilityController, "Dive")
 				return not okLeft or tonumber(leftDive) == 0
 			end)() then
@@ -2134,9 +2259,30 @@ local function stepBrain()
 					local angle = math.random() * math.pi * 2
 					brain.baseJitter = Vector3.new(math.cos(angle), 0, math.sin(angle)) * randomBetween(0, 1.5)
 				end
-				if not brain.idleSpot or os.clock() >= brain.idleAt or justHit then
+				-- Read Players: who hits next (the player in the square the ball
+				-- is coming down in)? Wait where THEY usually aim at you.
+				local nextHitter
+				do
+					local land = landingSpot(state, now)
+					local nextZone = land and Ball.ZoneAt(zones, land)
+					if nextZone and nextZone ~= myZone then
+						local best
+						for _, entry in ipairs(occupantsOf(nextZone)) do
+							local d = ((entry.pos - land) * Vector3.new(1, 0, 1)).Magnitude
+							if not best or d < best then
+								nextHitter, best = entry.player, d
+							end
+						end
+					end
+				end
+				local hitterBase = nextHitter and brain.hitterBase(nextHitter, myZone)
+				if not brain.idleSpot or os.clock() >= brain.idleAt or justHit or (hitterBase and brain.readFor ~= nextHitter) then
 					brain.idleAt = os.clock() + randomBetween(1.2, 3)
-					local learned = brain.learnedBase and brain.learnedBase(myZone) or Vector3.zero
+					brain.readFor = hitterBase and nextHitter or nil
+					if hitterBase then
+						stats.reads = (stats.reads or 0) + 1
+					end
+					local learned = hitterBase or (brain.learnedBase and brain.learnedBase(myZone)) or Vector3.zero
 					local spot = center + learned + (brain.baseJitter or Vector3.zero)
 					if justHit and brain.recoverKey ~= BallController._lastHit then
 						brain.recoverKey = BallController._lastHit
@@ -3483,7 +3629,6 @@ local function installHub()
 	toggle(playBox, "Auto Move", "autoMove", "Walks under the ball. Turn off to move yourself and only auto hit")
 	toggle(playBox, "Auto Spike", "autoSpike", "Jumps and spikes when the ball drops at the right height (much faster than a bump)")
 	toggle(playBox, "Auto Dive", "autoDive", "Dives for balls you can't walk to in time")
-	toggle(playBox, "No Dive Cooldown", "noDiveCooldown", "Skips the short wait after a dive, so you can dive again as soon as the last one ends (the dive's cooldown is kept on your side; your equipped ability's cooldown is the game server's and can't be changed)")
 	toggle(playBox, "Auto Serve", "autoServe", "Serves straight away when it's your turn")
 	local aimBox = section(playTab, "Aiming", "crosshair")
 	toggle(aimBox, "Smart Aim", "smartAim", "Works out where each hit lands and sends it into another player's square")
@@ -3498,6 +3643,7 @@ local function installHub()
 	local moveBox = section(playTab, "Move Like A Player", "footprints")
 	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
 	toggle(moveBox, "Spin Moves", "spinMoves", "Style like the pros: runs quick loops and spins around your spot, hops about (with the odd 360) while the ball is flying to someone else, and sometimes does a 360 on the way up before slapping a spike. Only when it's safe, and back on your spot the moment a ball can come your way")
+	toggle(moveBox, "Read Players", "readPlayers", "Learns every player as you play: where each one aims into your square (you wait there when they're about to hit), where they wait, and which spots in their square they've saved or missed (your shots go where they're weak)")
 	toggle(moveBox, "Pro Positioning", "proPosition", "Learns where balls land in your square this session and waits in the spot that covers them best, and gets back there right after each of your touches")
 	toggle(moveBox, "Emotes", "emotes", "Sometimes emotes after a kill or a win, and now and then in the lobby")
 	toggle(moveBox, "Walk Around Lobby", "lobbyWander", "Wanders near where you are between rounds (keeps away from the practice pad)")
@@ -3736,10 +3882,10 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d · superspike kill shots %d · quick attacks %d · team sets %d\nServes: jump %d · tip %d · float %d\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d · superspike kill shots %d · quick attacks %d · team sets %d\nRead players: %d reads · %d weak spots learned\nServes: jump %d · tip %d · float %d\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
 			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0,
-			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0, stats.superspikes or 0, stats.quickAttacks or 0, stats.mateSets or 0,
+			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0, stats.superspikes or 0, stats.quickAttacks or 0, stats.mateSets or 0, stats.reads or 0, stats.learnedMisses or 0,
 			stats.jumpServes or 0, stats.tipServes or 0, stats.floatServes or 0,
 			stats.lastHit
 		))
