@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.8.0"
+local VERSION = "1.8.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -551,7 +551,9 @@ local function teammateCloser(myZone, root, spot)
 	for _, entry in ipairs(occupantsOf(myZone)) do
 		if teamMode() or isTeammate(entry.player) then
 			local theirs = ((entry.pos - spot) * Vector3.new(1, 0, 1)).Magnitude
-			if theirs + 3 < mine then
+			-- Only leave it to them when they are basically on it and you are not
+			-- (live, deferring more loosely lost points when teammates missed).
+			if theirs < 5 and mine > 10 then
 				return entry
 			end
 		end
@@ -1337,7 +1339,9 @@ local function stepBrain()
 			target, targetTime = land, landTime
 		end
 	end
-	local mate = target and reacted and teammateCloser(myZone, root, target)
+	-- In the last moment go for it anyway: a teammate who has not touched it
+	-- yet might miss.
+	local mate = target and reacted and targetTime - now > 0.8 and teammateCloser(myZone, root, target)
 	if target and not reacted then
 		STATE.playStatus = "Reacting"
 	elseif mate then
