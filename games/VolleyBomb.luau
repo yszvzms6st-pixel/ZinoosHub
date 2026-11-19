@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.2"
+local VERSION = "1.9.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -739,13 +739,23 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 		end
 		face(root, dir)
 	end
-	if humanizing() then
+	-- In the air after a spike swing the game's Swing won't hit again until
+	-- you land, so an emergency bump in the air is a direct hit (live, a save
+	-- was lost this way when the server rejected a combo set mid-jump).
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local inAir = hum and hum.FloorMaterial == Enum.Material.Air
+	if humanizing() and not (inAir and kind == "Bump") then
 		-- Swing like a player: the game's own Swing plays the bump/spike
 		-- animation and makes the hit. Count it once the game logs the hit.
 		brain.pendingKind, brain.pendingPick, brain.pendingQuality = resolvedKind, pick, quality
 		local ok = pcall(BallController.Swing, BallController)
 		elevate()
 		return ok
+	end
+	if inAir and kind == "Bump" and type(BallController._tracks) == "table" and BallController._tracks.Bump then
+		pcall(function()
+			BallController._tracks.Bump:Play()
+		end)
 	end
 	local ok, hit = pcall(BallController.Hit, BallController, kind)
 	elevate()
@@ -1471,7 +1481,7 @@ local function stepBrain()
 	-- ball will be 0-2.5 studs above your head at the top of your jump (that's
 	-- a PERFECT spike in the game's maths, which also powers Superspike).
 	local waitForSecondSet = inCombo and brain.comboDouble and (brain.comboSets or 0) == 1 or softServe
-	if STATE.autoSpike == true and not airborne and reacted and (inCombo or not brain.skipSpike) and not waitForSecondSet then
+	if STATE.autoSpike == true and not airborne and reacted and (inCombo or not brain.skipSpike) and not waitForSecondSet and not state.Tornado then
 		local headTop = char.Head.Position.Y + 7.4
 		local chain = flightChain(state)
 		for t = now + 0.42, math.min(pathEnd(chain), now + 4), 0.03 do
@@ -1519,11 +1529,23 @@ local function stepBrain()
 	-- Walk to the first point where the ball is low enough to hit in your square.
 	local target, targetTime
 	local fullPath = flightChain(state)
-	for t = now, math.min(pathEnd(fullPath), now + 4), 0.03 do
-		local p = Ball.Contain((pathAt(fullPath, t)))
-		if Ball.ZoneAt(zones, p) == myZone and p.Y - Ball.Ground(p).Y <= 8 then
-			target, targetTime = p, t
-			break
+	if state.Tornado then
+		-- TornadoBall: it spirals for ~3s and finishes in a corner of the
+		-- target square. Its dips on the way are not where it ends up, so go
+		-- straight to where it finishes and wait for it there.
+		local finish = Ball.Contain(Ball.At(state, state.EndTime))
+		if Ball.ZoneAt(zones, finish) == myZone and state.EndTime > now then
+			target, targetTime = finish, state.EndTime
+			brain.tornadoTarget = true
+		end
+	else
+		brain.tornadoTarget = false
+		for t = now, math.min(pathEnd(fullPath), now + 4), 0.03 do
+			local p = Ball.Contain((pathAt(fullPath, t)))
+			if Ball.ZoneAt(zones, p) == myZone and p.Y - Ball.Ground(p).Y <= 8 then
+				target, targetTime = p, t
+				break
+			end
 		end
 	end
 	-- Never lose sight of a ball that is going to land in your square.
@@ -2337,16 +2359,24 @@ do
 				return
 			end
 			-- Where the ball was: a blast just over the line can still reach you.
+			-- (The game can clear your round tag the moment you die, so fall
+			-- back to the ball the game last showed you.)
 			local ball = arenaBall()
+			if not ball and type(BallController._balls) == "table" and type(BallController._state) == "table" then
+				ball = BallController._balls[BallController._state.Arena or "Main"]
+			end
 			local state = ball and ball.State
 			local blast
+			if type(state) == "table" and state.Tornado then
+				blast = "TornadoBall shot"
+			end
 			if root and type(state) == "table" then
 				local spot = state.Dead and state.Origin or Ball.At(state, workspace:GetServerTimeNow())
 				local away = ((root.Position - spot) * Vector3.new(1, 0, 1)).Magnitude
 				local zones = ball.Zones
 				local mine = type(zones) == "table" and Ball.ZoneAt(zones, root.Position)
 				local theirs = type(zones) == "table" and Ball.ZoneAt(zones, spot)
-				blast = string.format("ball %d studs away%s", math.floor(away + 0.5),
+				blast = (blast and (blast .. ", ") or "") .. string.format("ball %d studs away%s", math.floor(away + 0.5),
 					(mine and theirs and mine ~= theirs) and " in the next square (blast reaches 15)" or "")
 			end
 			recordLoss({
@@ -2355,6 +2385,9 @@ do
 				ball = blast,
 				hitBy = type(state) == "table" and state.HitBy and state.HitBy.Name or nil,
 				inAir = hum.FloorMaterial == Enum.Material.Air,
+				sinceDive = brain.lastDive and math.floor((os.clock() - brain.lastDive) * 10) / 10 or nil,
+				height = root and math.floor(root.Position.Y) or nil,
+				stateAtDeath = tostring(hum:GetState().Name),
 			})
 		end))
 	end
