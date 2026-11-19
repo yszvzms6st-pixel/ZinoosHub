@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.6"
+local VERSION = "1.9.7"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -3192,6 +3192,11 @@ local function installHub()
 	local function refresh()
 		local wins, elims = leaderstat("Wins"), leaderstat("Eliminations")
 		local cash = tonumber(dataGet("Money")) or 0
+		-- Wait for your saved stats to load (after a server change they read 0
+		-- for a moment, which made the session count show all-time totals).
+		if LocalPlayer:GetAttribute("DataLoaded") ~= true or not LocalPlayer:FindFirstChild("leaderstats") then
+			return
+		end
 		stats.wins0 = stats.wins0 or wins
 		stats.elims0 = stats.elims0 or elims
 		stats.money0 = stats.money0 or cash
@@ -3256,10 +3261,22 @@ local function installHub()
 	end)
 
 	if STATE.hideOnStart == true then
-		task.defer(function()
-			elevate()
-			pcall(Window.Close, Window)
-		end)
+		-- WindUI opens itself a moment after it's created (with an animation),
+		-- which undid an immediate close. Close it once it has finished
+		-- opening, and check again a bit later.
+		for _, delay in ipairs({ 0.8, 1.6, 3 }) do
+			task.delay(delay, function()
+				if windowGone or not running() then
+					return
+				end
+				elevate()
+				local frame = Window.UIElements and Window.UIElements.Main
+				local shown = not (typeof(frame) == "Instance" and frame:IsA("GuiObject")) or frame.Visible
+				if shown and not brain.menuOpenedByUser then
+					pcall(Window.Close, Window)
+				end
+			end)
+		end
 	end
 end
 
@@ -3349,7 +3366,7 @@ do
 			if show and not gui then
 				pcall(build)
 			end
-			if gui then
+			if gui and LocalPlayer:GetAttribute("DataLoaded") == true and LocalPlayer:FindFirstChild("leaderstats") then
 				local wins, elims = leaderstat("Wins"), leaderstat("Eliminations")
 				local cash = tonumber(dataGet("Money")) or 0
 				stats.wins0 = stats.wins0 or wins
