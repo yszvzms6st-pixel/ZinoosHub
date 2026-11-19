@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.15.2"
+local VERSION = "1.15.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -499,6 +499,7 @@ local brain = {
 	seenHit = 0,
 	pendingKind = nil,
 	pendingPick = nil,
+	deadSince = nil,
 }
 
 local REACTION_TIMES = { Fast = { 0.07, 0.16 }, Normal = { 0.14, 0.28 }, Relaxed = { 0.24, 0.42 } }
@@ -1486,6 +1487,19 @@ local function stepBrain()
 	if not char or state.Dead then
 		STATE.playStatus = state.Dead and "Waiting for the next serve" or "Waiting to respawn"
 		brain.serveAt = nil
+		-- The server resolves the landing/blast shortly after the client marks
+		-- the ball Dead. Do not immediately walk back toward the middle during
+		-- that gap: doing so can carry a survivor back into an adjacent blast.
+		if char and state.Dead and STATE.autoHit == true and STATE.autoMove == true then
+			brain.deadSince = brain.deadSince or os.clock()
+			if os.clock() - brain.deadSince < 0.8 then
+				hum:MoveTo(root.Position)
+				STATE.playStatus = "Waiting for the blast to clear"
+				return
+			end
+		else
+			brain.deadSince = nil
+		end
 		-- Get set for the next serve: strong players spike their serve
 		-- straight away (seen live: under 0.15s to react), so wait in your
 		-- ready spot instead of wherever the last point left you.
@@ -1507,6 +1521,7 @@ local function stepBrain()
 		end
 		return
 	end
+	brain.deadSince = nil
 	-- Every new flight of the ball: a fresh human reaction.
 	-- A new reaction only when a player actually hits it (not when it bounces
 	-- off a wall, which also starts a new flight).
@@ -1944,7 +1959,11 @@ local function stepBrain()
 			end
 		end
 		local catchDist = catchSpot and (catchSpot - root.Position).Magnitude or landDist
-		local early = 0.08
+		-- Start far enough ahead of the visible contact for the native Dive to
+		-- replicate before the server resolves the landing. The Dive module
+		-- remembers roughly 0.2s of its path, so this stays inside its own
+		-- legitimate catch window while avoiding last-frame misses.
+		local early = 0.18
 		local slide = brain.diveReach(math.max(catchTime - now - early, 0))
 		local walkTooSlow = landDist / math.max(hum.WalkSpeed, 1) > left
 		-- Can a dive still get there? The slide plus the dive's catch box
@@ -1954,7 +1973,7 @@ local function stepBrain()
 		-- Best case: walk now, then dive in the last half second.
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
-		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.6 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
+		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.72 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
 			and landDist < 40 and os.clock() - brain.lastDive > 1
 			-- Only when the game will actually start the dive (on the ground, not
 			-- mid-swing, off cooldown): turning to dive while a swing is still
@@ -1969,20 +1988,19 @@ local function stepBrain()
 			if startNativeDive(root, hum, diveDir, { expectSet = true }) then
 				STATE.playStatus = "Dived"
 			end
-		elseif hopeless and landFlat and STATE.avoidBlasts == true then
-			-- Can't be saved: get as far from where it blows up as you can
-			-- inside your square (the blast reaches 15 studs).
-			local away = (root.Position - landFlat) * Vector3.new(1, 0, 1)
-			local dirAway = away.Magnitude > 0.5 and away.Unit or (Vector3.new(myZone.Position.X, root.Position.Y, myZone.Position.Z) - landFlat).Unit
-			local spot = root.Position + dirAway * 25
-			local rel = myZone.CFrame:PointToObjectSpace(spot)
-			local limitX, limitZ = myZone.Size.X / 2 - 1.5, myZone.Size.Z / 2 - 1.5
-			spot = myZone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
-			hum:MoveTo(Vector3.new(spot.X, root.Position.Y, spot.Z))
-			STATE.playStatus = "Can't reach it, getting clear"
-			if brain.escapeKey ~= brain.stateKey then
-				brain.escapeKey = brain.stateKey
-				stats.escapes = (stats.escapes or 0) + 1
+		elseif hopeless and landFlat then
+			-- A ball landing in your own occupied square eliminates you even at
+			-- the far corner (live loss: 22 studs from the ball). Running away is
+			-- therefore guaranteed to lose. Keep chasing it and make one final
+			-- native Dive attempt; the game/server still decides whether it saves.
+			local diveDir = landFlat - root.Position
+			if STATE.autoDive == true and left <= 1.2
+				and not (STATE.ringIncoming and STATE.ringIncoming(1.1))
+				and not (STATE.ringNearby and STATE.ringNearby(62))
+				and startNativeDive(root, hum, diveDir, { expectSet = true }) then
+				STATE.playStatus = "Last-chance Dive"
+			else
+				STATE.playStatus = "Last chance, going for the ball"
 			end
 		end
 	elseif STATE.avoidBlasts == true and (function()
