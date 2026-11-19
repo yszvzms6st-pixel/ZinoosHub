@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.15.0"
+local VERSION = "1.15.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -999,20 +999,78 @@ local function countSwingHits()
 end
 
 -- Combo: set the ball up to yourself (a short pop inside your own square),
--- then the spike plan below jumps and spikes it.
+-- then the spike plan below jumps and spikes it. The game only exposes Set
+-- through its Dive ability; calling BallController:Hit("Set") directly makes
+-- the character play a bump while the ball sets, which is not a real move.
 local pathAt -- defined further down with the flight chain helpers
+local function diveReady(hum)
+	if STATE.autoDive ~= true or not hum or hum.FloorMaterial == Enum.Material.Air or BallController:Busy()
+		or os.clock() - brain.lastDive <= 1 then
+		return false
+	end
+	local okLeft, left = pcall(AbilityController.Remaining, AbilityController, "Dive")
+	elevate()
+	return not okLeft or tonumber(left) == 0
+end
+
+local function startNativeDive(root, hum, dir, plan)
+	if not diveReady(hum) or not dir or dir.Magnitude < 0.1 then
+		return false
+	end
+	dir = (dir * Vector3.new(1, 0, 1)).Unit
+	brain.lastDive = os.clock()
+	brain.diveCheck = {
+		at = os.clock(),
+		startedAt = workspace:GetServerTimeNow(),
+		hit = tonumber(BallController._lastHit) or 0,
+		key = brain.stateKey,
+		expectSet = plan and plan.expectSet == true,
+		combo = plan and plan.combo == true,
+		second = plan and plan.second == true,
+		mate = plan and plan.mate or nil,
+		banked = plan and plan.banked == true,
+	}
+	face(root, dir)
+	-- Dive reads Humanoid.MoveDirection first, so give it the same direction
+	-- the character is visibly facing instead of only rotating the root.
+	pcall(hum.Move, hum, dir, false)
+	if brain.diveCheck.expectSet then
+		brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Set", nil, 1
+	end
+	local ok, activated = pcall(AbilityController.Activate, AbilityController, "Dive")
+	elevate()
+	if not ok or activated == false
+		or (type(AbilityController._active) == "table" and not AbilityController._active.Dive) then
+		ok = false
+	end
+	if not ok then
+		brain.diveCheck = nil
+		if brain.pendingKind == "Set" then
+			brain.pendingKind = nil
+		end
+		return false
+	end
+	stats.dives += 1
+	return true
+end
+
 local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, second)
 	local maxHits = Ball.GetMaxHits()
 	local used = (state.HitZone == myZone and tonumber(state.Hits)) or 0
 	if used + 2 > maxHits then
 		return false
 	end
-	local center = Vector3.new(myZone.Position.X, ballPos.Y, myZone.Position.Z)
-	local toCenter = (center - ballPos) * Vector3.new(1, 0, 1)
-	-- Check the pop stays in your square and comes down at spike height.
-	-- Check the pop (and any bounce off a wall) stays in your square and
-	-- comes down at spike height. Returns whether it works and if it banked.
-	local function popWorks(dir)
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	-- A native dive can only catch a low ball with its sliding hitbox.
+	if not diveReady(hum) or ballPos.Y - Ball.Ground(ballPos).Y > 5 then
+		return false
+	end
+	local flatBall = Vector3.new(ballPos.X, root.Position.Y, ballPos.Z)
+	local toBall = flatBall - root.Position
+	local dir = toBall.Magnitude > 0.1 and toBall.Unit or (root.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
+	-- Predict the set made by the native dive. It must stay in our square and
+	-- come back down at a safe spike height.
+	local function popWorks()
 		local origin, unit = Ball.Inside(zones, ballPos, dir)
 		local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
 		if not ok or type(popped) ~= "table" then
@@ -1050,61 +1108,23 @@ local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, seco
 		end
 		return false
 	end
-	local look = (root.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
-	local dir, banked
-	-- Pro Plays: now and then pop it off your own wall and back to yourself.
-	if STATE.trickShots == true and math.random() < 0.3 then
-		local axes = { myZone.CFrame.RightVector, -myZone.CFrame.RightVector, myZone.CFrame.LookVector, -myZone.CFrame.LookVector }
-		for _, axis in ipairs(axes) do
-			local flat = (axis * Vector3.new(1, 0, 1))
-			if flat.Magnitude > 0.1 then
-				local works, viaWall = popWorks(flat.Unit)
-				if works and viaWall then
-					dir, banked = flat.Unit, true
-					break
-				end
-			end
-		end
+	local works, banked = popWorks()
+	if not works then
+		return false
 	end
-	-- Otherwise pop it the way you already face (no turn needed), then
-	-- toward the middle of your square.
-	if not dir then
-		if popWorks(look) then
-			dir = look
-		elseif toCenter.Magnitude > 3 and popWorks(toCenter.Unit) then
-			dir = toCenter.Unit
-		else
-			return false
-		end
-	end
-	if banked then
-		stats.wallSets = (stats.wallSets or 0) + 1
-	end
-	face(root, dir)
-	if humanizing() and type(BallController._tracks) == "table" and BallController._tracks.Bump then
-		pcall(function()
-			BallController._tracks.Bump:Play()
-		end)
-	end
-	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Set", nil, 1
-	local okHit, hit = pcall(BallController.Hit, BallController, "Set")
-	elevate()
-	if okHit and hit then
+	if startNativeDive(root, hum, dir, { expectSet = true, combo = true, second = second, banked = banked }) then
 		brain.comboUntil = os.clock() + 2.5
 		brain.skipSpike = false
 		brain.comboSets = (second and brain.comboSets or 0) + 1
-		-- A long combo (set, set, spike) when the touch limit allows it.
+		-- A long combo uses a second real dive only when the touch limit allows it.
 		brain.comboDouble = not second and STATE.trickShots == true and used + 3 <= maxHits and math.random() < 0.35
 		if second then
-			stats.longCombos = (stats.longCombos or 0) + 1
-			STATE.playStatus = "Combo: second set"
+			STATE.playStatus = "Combo: diving for the second set"
 		else
-			stats.combos = (stats.combos or 0) + 1
-			STATE.playStatus = "Combo: set up a spike"
+			STATE.playStatus = "Combo: diving to set"
 		end
 		return true
 	end
-	brain.pendingKind = nil
 	return false
 end
 
@@ -1114,6 +1134,10 @@ end
 function brain.trySetToMate(char, root, state, zones, myZone, ballPos, now)
 	local used = (state.HitZone == myZone and tonumber(state.Hits)) or 0
 	if used + 2 > Ball.GetMaxHits() then
+		return false
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not diveReady(hum) or ballPos.Y - Ball.Ground(ballPos).Y > 5 then
 		return false
 	end
 	local mate, mateDist
@@ -1126,55 +1150,38 @@ function brain.trySetToMate(char, root, state, zones, myZone, ballPos, now)
 	if not mate then
 		return false
 	end
-	local toMate = ((mate.pos - ballPos) * Vector3.new(1, 0, 1))
-	if toMate.Magnitude < 1 then
+	local flatBall = Vector3.new(ballPos.X, root.Position.Y, ballPos.Z)
+	local toBall = flatBall - root.Position
+	if toBall.Magnitude < 0.1 then
 		return false
 	end
-	local base = math.atan2(toMate.Z, toMate.X)
-	local bestDir, bestMiss
-	for _, offset in ipairs({ 0, 0.26, -0.26, 0.52, -0.52 }) do
-		local dir = Vector3.new(math.cos(base + offset), 0, math.sin(base + offset))
-		local origin, unit = Ball.Inside(zones, ballPos, dir)
-		local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
-		if ok and type(popped) == "table" then
-			for t = now + 0.5, math.min(popped.EndTime, now + 3), 0.05 do
-				local p, velocity = pathAt({ popped }, t)
-				local h = p.Y - Ball.Ground(p).Y
-				if velocity.Y < 0 and h <= 15.5 and h >= 8.5 then
-					local miss = ((p - mate.pos) * Vector3.new(1, 0, 1)).Magnitude
-					if Ball.ZoneAt(zones, p) == myZone and miss <= 5 and (not bestMiss or miss < bestMiss) then
-						bestDir, bestMiss = dir, miss
-					end
-					break
-				end
-			end
+	local dir = toBall.Unit
+	local origin, unit = Ball.Inside(zones, ballPos, dir)
+	local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
+	if not ok or type(popped) ~= "table" then
+		return false
+	end
+	local works = false
+	for t = now + 0.5, math.min(popped.EndTime, now + 3), 0.05 do
+		local p, velocity = pathAt({ popped }, t)
+		local h = p.Y - Ball.Ground(p).Y
+		if velocity.Y < 0 and h <= 15.5 and h >= 8.5 then
+			local miss = ((p - mate.pos) * Vector3.new(1, 0, 1)).Magnitude
+			works = Ball.ZoneAt(zones, p) == myZone and miss <= 5
+			break
 		end
 	end
-	if not bestDir then
-		return false
-	end
-	face(root, bestDir)
-	if humanizing() and type(BallController._tracks) == "table" and BallController._tracks.Bump then
-		pcall(function()
-			BallController._tracks.Bump:Play()
-		end)
-	end
-	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Set", nil, 1
-	local okHit, hit = pcall(BallController.Hit, BallController, "Set")
-	elevate()
-	if okHit and hit then
-		stats.mateSets = (stats.mateSets or 0) + 1
-		STATE.playStatus = "Set it up for " .. mate.player.DisplayName
+	if works and startNativeDive(root, hum, dir, { expectSet = true, mate = mate.player.DisplayName }) then
+		STATE.playStatus = "Diving to set for " .. mate.player.DisplayName
 		return true
 	end
-	brain.pendingKind = nil
 	return false
 end
 
--- Tip: a soft set over into the next square, landing far from that player,
--- instead of a hard hit (pros mix these in so they're hard to read).
+-- Float shot: a normal bump aimed deep into the next square. This keeps the
+-- visible move and the server hit type consistent.
 local function tryTip(char, root, state, zones, myZone, ballPos, now)
-	local dir, pick = chooseDirection("Set", state, zones, myZone, ballPos, now, 1)
+	local dir, pick = chooseDirection("Bump", state, zones, myZone, ballPos, now, 1)
 	if not dir or not pick or pick.far < 14 then
 		return false
 	end
@@ -1185,7 +1192,7 @@ local function tryTip(char, root, state, zones, myZone, ballPos, now)
 		end)
 	end
 	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Tip", pick, 1
-	local ok, hit = pcall(BallController.Hit, BallController, "Set")
+	local ok, hit = pcall(BallController.Hit, BallController, "Bump")
 	elevate()
 	if ok and hit then
 		STATE.playStatus = "Tipped it over"
@@ -1198,16 +1205,11 @@ end
 -- Fake spike: you jump and swing like a spike, but softly tip it over the
 -- line instead (into a square, landing far from that player).
 function brain.tryFake(char, root, state, zones, myZone, ballPos, now)
-	-- A soft tip over the line when you're close enough to one, otherwise a
-	-- slow high lob deep into their square (a bump from the air).
-	local kind = "Set"
-	local dir, pick = chooseDirection("Set", state, zones, myZone, ballPos, now, 1)
-	if not dir or not pick or pick.far < 10 then
-		kind = "Bump"
-		dir, pick = chooseDirection("Bump", state, zones, myZone, ballPos, now, 1)
-		if not dir or not pick then
-			return false
-		end
+	-- A low airborne swing naturally resolves as a bump; never manufacture a
+	-- Set here because real players only set by diving.
+	local dir, pick = chooseDirection("Bump", state, zones, myZone, ballPos, now, 1)
+	if not dir or not pick then
+		return false
 	end
 	face(root, dir)
 	if type(BallController._tracks) == "table" and BallController._tracks.Spike then
@@ -1216,7 +1218,7 @@ function brain.tryFake(char, root, state, zones, myZone, ballPos, now)
 		end)
 	end
 	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Fake", pick, 1
-	local ok, hit = pcall(BallController.Hit, BallController, kind)
+	local ok, hit = pcall(BallController.Hit, BallController, "Bump")
 	elevate()
 	if ok and hit then
 		stats.fakes = (stats.fakes or 0) + 1
@@ -1642,15 +1644,44 @@ local function stepBrain()
 	-- How did the last dive go? (caught and counted by the server / touched
 	-- on your screen only / missed)
 	local check = brain.diveCheck
+	if check and not check.setHit and state.HitBy == LocalPlayer and state.Kind == "Set"
+		and (tonumber(state.HitAt) or 0) >= (tonumber(check.startedAt) or now) - 0.1 then
+		check.setHit = true
+	end
 	if check and os.clock() - check.at > 0.7 then
 		brain.diveCheck = nil
 		local touched = (tonumber(BallController._lastHit) or 0) > check.hit
-		if touched and state.HitBy == LocalPlayer then
+		local nativeSet = check.setHit == true
+			or (touched and state.HitBy == LocalPlayer and state.Kind == "Set")
+		if nativeSet then
 			stats.diveSaves = (stats.diveSaves or 0) + 1
+			stats.nativeDiveSets = (stats.nativeDiveSets or 0) + 1
+			if check.combo then
+				if check.second then
+					stats.longCombos = (stats.longCombos or 0) + 1
+				else
+					stats.combos = (stats.combos or 0) + 1
+				end
+				if check.banked then
+					stats.wallSets = (stats.wallSets or 0) + 1
+				end
+			elseif check.mate then
+				stats.mateSets = (stats.mateSets or 0) + 1
+			end
 		elseif touched then
 			stats.diveNotCounted = (stats.diveNotCounted or 0) + 1
 		else
 			stats.diveMisses = (stats.diveMisses or 0) + 1
+		end
+		if check.expectSet and not nativeSet then
+			if brain.pendingKind == "Set" then
+				brain.pendingKind = nil
+			end
+			if check.combo then
+				brain.comboUntil = 0
+				brain.comboDouble = false
+				brain.comboSets = 0
+			end
 		end
 	end
 	local char, root, hum = character()
@@ -2168,18 +2199,8 @@ local function stepBrain()
 				local okLeft, leftDive = pcall(AbilityController.Remaining, AbilityController, "Dive")
 				return not okLeft or tonumber(leftDive) == 0
 			end)() then
-			brain.lastDive = os.clock()
-			brain.diveCheck = { at = os.clock(), hit = tonumber(BallController._lastHit) or 0, key = brain.stateKey }
-			face(root, ((catchSpot or landFlat or flat) - root.Position).Unit)
-			local ok = pcall(AbilityController.Activate, AbilityController, "Dive")
-			elevate()
-			-- Count only dives the game really started.
-			if ok and type(AbilityController._active) == "table" and not AbilityController._active.Dive then
-				ok = false
-				brain.diveCheck = nil
-			end
-			if ok then
-				stats.dives += 1
+			local diveDir = (catchSpot or landFlat or flat) - root.Position
+			if startNativeDive(root, hum, diveDir, { expectSet = true }) then
 				STATE.playStatus = "Dived"
 				-- Dive saves pop the ball up: follow it with a spike if you can.
 				if STATE.trickShots == true and STATE.autoSpike == true then
@@ -3628,7 +3649,7 @@ local function installHub()
 	toggle(playBox, "Auto Hit", "autoHit", "Bumps or spikes the ball when it comes into your square")
 	toggle(playBox, "Auto Move", "autoMove", "Walks under the ball. Turn off to move yourself and only auto hit")
 	toggle(playBox, "Auto Spike", "autoSpike", "Jumps and spikes when the ball drops at the right height (much faster than a bump)")
-	toggle(playBox, "Auto Dive", "autoDive", "Dives for balls you can't walk to in time")
+	toggle(playBox, "Auto Dive", "autoDive", "Uses the game's real dive to save low balls and set them")
 	toggle(playBox, "Auto Serve", "autoServe", "Serves straight away when it's your turn")
 	local aimBox = section(playTab, "Aiming", "crosshair")
 	toggle(aimBox, "Smart Aim", "smartAim", "Works out where each hit lands and sends it into another player's square")
@@ -3637,9 +3658,9 @@ local function installHub()
 	local humanBox = section(playTab, "Play Like A Human", "user-check")
 	toggle(humanBox, "Humanize", "humanize", "Human reaction time, the game's real bump/spike animations, turning before hits, not-quite-perfect positioning and aim, a short wait before serving, moving around while waiting")
 	choice(humanBox, "Reaction Speed", "Fast 0.07-0.16s · Normal 0.14-0.28s · Relaxed 0.24-0.42s", REACTION_OPTIONS, "reaction")
-	toggle(humanBox, "Combos", "combos", "Sets the ball up to yourself in your square, then jump-spikes it")
+	toggle(humanBox, "Combos", "combos", "Uses a real dive to set a low ball in your square, then jump-spikes it (requires Auto Dive)")
 	choice(humanBox, "Combo How Often", nil, COMBO_OPTIONS, "comboChance")
-	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, set-set-spike long combos, dive then spike, soft tips over the line, and bank shots off the walls")
+	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in pro moves: jump serves, real dive-set combos, dive then spike, float shots, and bank shots off the walls")
 	local moveBox = section(playTab, "Move Like A Player", "footprints")
 	toggle(moveBox, "Player Movement", "playerMove", "Keeps your eyes on the ball like shift lock, leans toward the play in a ready stance, and hops now and then")
 	toggle(moveBox, "Spin Moves", "spinMoves", "Style like the pros: runs quick loops and spins around your spot, hops about (with the odd 360) while the ball is flying to someone else, and sometimes does a 360 on the way up before slapping a spike. Only when it's safe, and back on your spot the moment a ball can come your way")
