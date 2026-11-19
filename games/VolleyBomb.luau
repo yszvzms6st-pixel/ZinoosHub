@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.8.1"
+local VERSION = "1.9.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -251,7 +251,9 @@ local ABILITY_MOMENT = {
 	Superspike = "spike", Curveball = "spike",
 	Moonball = "hit", Portal = "hit", TornadoBall = "hit",
 	Adrenaline = "incoming",
-	Frozen = "save", Magnet = "save", Forcefield = "save",
+	-- Magnet and Frozen catch the ball as it comes in so you can spike it
+	-- (ability combos); Forcefield still saves balls you can't reach.
+	Frozen = "incoming", Magnet = "incoming", Forcefield = "save",
 }
 
 -- Config ---------------------------------------------------------------------
@@ -441,6 +443,10 @@ local function useAbility(moment)
 	end
 	local name = equippedAbility()
 	local wanted = name and ABILITY_MOMENT[name]
+	-- Frozen only lasts 3s, so only fire it when the ball is close to arriving.
+	if name == "Frozen" and moment == "incoming" and (STATE.incomingEta or 99) > 2.2 then
+		return false
+	end
 	if not wanted or not (wanted == moment or (moment == "spike" and wanted == "hit")) then
 		return false
 	end
@@ -679,7 +685,10 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 		if brain.diveSpike then
 			stats.diveSpikes = (stats.diveSpikes or 0) + 1
 		end
-		brain.jumpServe, brain.diveSpike = false, false
+		if brain.heldCombo then
+			stats.abilityCombos = (stats.abilityCombos or 0) + 1
+		end
+		brain.jumpServe, brain.diveSpike, brain.heldCombo = false, false, false
 	end
 	if STATE.smartAim == true then
 		local dir
@@ -738,6 +747,8 @@ local function countSwingHits()
 			end
 		elseif kind == "Set" then
 			stats.sets = (stats.sets or 0) + 1
+		elseif kind == "Fake" then
+			kind = "Fake spike"
 		elseif kind == "Tip" then
 			stats.tips = (stats.tips or 0) + 1
 		else
@@ -756,6 +767,7 @@ end
 
 -- Combo: set the ball up to yourself (a short pop inside your own square),
 -- then the spike plan below jumps and spikes it.
+local pathAt -- defined further down with the flight chain helpers
 local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, second)
 	local maxHits = Ball.GetMaxHits()
 	local used = (state.HitZone == myZone and tonumber(state.Hits)) or 0
@@ -765,34 +777,68 @@ local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, seco
 	local center = Vector3.new(myZone.Position.X, ballPos.Y, myZone.Position.Z)
 	local toCenter = (center - ballPos) * Vector3.new(1, 0, 1)
 	-- Check the pop stays in your square and comes down at spike height.
+	-- Check the pop (and any bounce off a wall) stays in your square and
+	-- comes down at spike height. Returns whether it works and if it banked.
 	local function popWorks(dir)
 		local origin, unit = Ball.Inside(zones, ballPos, dir)
 		local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
 		if not ok or type(popped) ~= "table" then
 			return false
 		end
-		for t = now + 0.5, math.min(popped.EndTime, now + 3), 0.05 do
-			local p = Ball.At(popped, t)
+		local chain = { popped }
+		local current = popped
+		for _ = 1, 2 do
+			if not current.Reflect then
+				break
+			end
+			local okBounce, bounced = pcall(Ball.Bounce, current)
+			if not okBounce or type(bounced) ~= "table" then
+				break
+			end
+			table.insert(chain, bounced)
+			current = bounced
+		end
+		for t = now + 0.5, math.min(chain[#chain].EndTime, now + 3), 0.05 do
+			local p, velocity = pathAt(chain, t)
 			if Ball.ZoneAt(zones, p) ~= myZone then
 				return false
 			end
 			local h = p.Y - Ball.Ground(p).Y
-			if Ball.VelocityAt(popped, t).Y < 0 and h <= 15.5 and h >= 8.5 then
-				return true
+			if velocity.Y < 0 and h <= 15.5 and h >= 8.5 then
+				return true, #chain > 1
 			end
 		end
 		return false
 	end
-	-- Prefer popping it the way you already face (no turn needed), then
-	-- toward the middle of your square.
 	local look = (root.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
-	local dir
-	if popWorks(look) then
-		dir = look
-	elseif toCenter.Magnitude > 3 and popWorks(toCenter.Unit) then
-		dir = toCenter.Unit
-	else
-		return false
+	local dir, banked
+	-- Pro Plays: now and then pop it off your own wall and back to yourself.
+	if STATE.trickShots == true and math.random() < 0.3 then
+		local axes = { myZone.CFrame.RightVector, -myZone.CFrame.RightVector, myZone.CFrame.LookVector, -myZone.CFrame.LookVector }
+		for _, axis in ipairs(axes) do
+			local flat = (axis * Vector3.new(1, 0, 1))
+			if flat.Magnitude > 0.1 then
+				local works, viaWall = popWorks(flat.Unit)
+				if works and viaWall then
+					dir, banked = flat.Unit, true
+					break
+				end
+			end
+		end
+	end
+	-- Otherwise pop it the way you already face (no turn needed), then
+	-- toward the middle of your square.
+	if not dir then
+		if popWorks(look) then
+			dir = look
+		elseif toCenter.Magnitude > 3 and popWorks(toCenter.Unit) then
+			dir = toCenter.Unit
+		else
+			return false
+		end
+	end
+	if banked then
+		stats.wallSets = (stats.wallSets or 0) + 1
 	end
 	face(root, dir)
 	if humanizing() and type(BallController._tracks) == "table" and BallController._tracks.Bump then
@@ -840,6 +886,38 @@ local function tryTip(char, root, state, zones, myZone, ballPos, now)
 	elevate()
 	if ok and hit then
 		STATE.playStatus = "Tipped it over"
+		return true
+	end
+	brain.pendingKind = nil
+	return false
+end
+
+-- Fake spike: you jump and swing like a spike, but softly tip it over the
+-- line instead (into a square, landing far from that player).
+function brain.tryFake(char, root, state, zones, myZone, ballPos, now)
+	-- A soft tip over the line when you're close enough to one, otherwise a
+	-- slow high lob deep into their square (a bump from the air).
+	local kind = "Set"
+	local dir, pick = chooseDirection("Set", state, zones, myZone, ballPos, now, 1)
+	if not dir or not pick or pick.far < 10 then
+		kind = "Bump"
+		dir, pick = chooseDirection("Bump", state, zones, myZone, ballPos, now, 1)
+		if not dir or not pick then
+			return false
+		end
+	end
+	face(root, dir)
+	if type(BallController._tracks) == "table" and BallController._tracks.Spike then
+		pcall(function()
+			BallController._tracks.Spike:Play()
+		end)
+	end
+	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Fake", pick, 1
+	local ok, hit = pcall(BallController.Hit, BallController, kind)
+	elevate()
+	if ok and hit then
+		stats.fakes = (stats.fakes or 0) + 1
+		STATE.playStatus = "Fake spike: tipped it"
 		return true
 	end
 	brain.pendingKind = nil
@@ -1014,7 +1092,7 @@ local function flightChain(state)
 	return chain
 end
 
-local function pathAt(chain, t)
+function pathAt(chain, t)
 	for _, part in ipairs(chain) do
 		if t <= part.EndTime then
 			return Ball.At(part, t), Ball.VelocityAt(part, t)
@@ -1151,12 +1229,22 @@ local function stepBrain()
 			if served then
 				stats.serves += 1
 				STATE.playStatus = "Served"
-				-- Jump serve: toss it up, then spike it like a pro.
+				-- Mixed serves so nobody can read them: mostly jump serves
+				-- (toss then spike), sometimes a soft tip serve or a float
+				-- serve (toss then bump).
+				brain.serveStyle, brain.serveStyleUntil = nil, 0
 				if STATE.trickShots == true and STATE.autoSpike == true then
-					brain.comboUntil = os.clock() + 3
-					brain.comboDouble = false
-					brain.skipSpike = false
-					brain.jumpServe = true
+					local roll = math.random()
+					local style = roll < 0.5 and "jump" or (roll < 0.75 and "tip" or "float")
+					brain.serveStyle, brain.serveStyleUntil = style, os.clock() + 4
+					if style == "jump" then
+						brain.comboUntil = os.clock() + 3
+						brain.comboDouble = false
+						brain.skipSpike = false
+						brain.jumpServe = true
+					else
+						brain.comboUntil = 0
+					end
 				end
 			end
 		end
@@ -1221,6 +1309,44 @@ local function stepBrain()
 		brain.lastFaceAt = os.clock()
 	end
 
+	-- A soft serve style (tip / float) is live for this toss only.
+	local softServe = brain.serveStyle and brain.serveStyle ~= "jump" and os.clock() < (brain.serveStyleUntil or 0)
+		and (state.HitBy == nil or state.HitBy == LocalPlayer) and state.Toss
+	if not softServe and brain.serveStyle and brain.serveStyle ~= "jump" and (os.clock() >= (brain.serveStyleUntil or 0) or not state.Toss) then
+		brain.serveStyle = nil
+	end
+
+	-- Ability combos: a ball your Magnet is holding above your head, or one
+	-- your Frozen has stopped in the air in your square, gets jump-spiked.
+	local held = state.Magnet == LocalPlayer or (state.Frozen and ballHere)
+	if held and STATE.autoSpike == true and STATE.combos == true and not airborne and not softServe then
+		local headTop = char.Head.Position.Y + 7.4
+		local flat = Vector3.new(ballNow.X, root.Position.Y, ballNow.Z)
+		local away = (flat - root.Position).Magnitude
+		local above = ballNow.Y - headTop
+		if state.Magnet == LocalPlayer then
+			-- The magnet keeps the ball just above your head: just jump.
+			if os.clock() - brain.lastJump > 0.8 then
+				brain.lastJump = os.clock()
+				brain.heldCombo = true
+				hum:ChangeState(Enum.HumanoidStateType.Jumping)
+			end
+			STATE.playStatus = "Magnet combo: spiking it"
+			return
+		elseif above <= 3 and above >= -1 then
+			-- Frozen at a spikeable height: get under it and jump.
+			moveTo(hum, root, flat, true)
+			if away < 3 and os.clock() - brain.lastJump > 0.8 then
+				brain.lastJump = os.clock()
+				brain.heldCombo = true
+				hum:ChangeState(Enum.HumanoidStateType.Jumping)
+			end
+			STATE.playStatus = "Frozen combo: lining up the spike"
+			return
+		end
+		-- Frozen too low or too high to spike: play it normally below.
+	end
+
 	-- In the air: only hit once it really counts as a spike (high enough in the
 	-- jump, ball not below your head). Hitting earlier would turn it into a bump.
 	if airborne and ballHere and STATE.autoSpike == true then
@@ -1233,6 +1359,12 @@ local function stepBrain()
 			local late = os.clock() - brain.lastJump > 0.58
 			if kind == "Spike" and (quality >= 0.9 or late) and os.clock() - brain.lastTry > 0.05 then
 				brain.lastTry = os.clock()
+				-- Fake spike: same jump and swing, but a soft tip over instead.
+				if brain.fakeJump and brain.tryFake and brain.tryFake(char, root, state, zones, myZone, ballNow, now) then
+					brain.fakeJump = false
+					return
+				end
+				brain.fakeJump = false
 				tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
 				return
 			elseif not below and os.clock() - brain.lastJump < 0.9 then
@@ -1252,7 +1384,18 @@ local function stepBrain()
 	if ballHere and Ball.InRange("Bump", root.Position, ballNow) and reacted then
 		local low = ballNow.Y - Ball.Ground(ballNow).Y < 6
 		local secondSet = inCombo and brain.comboDouble and (brain.comboSets or 0) == 1 and not airborne
-		if secondSet and os.clock() - brain.lastTry > 0.1 then
+		if softServe and not airborne and os.clock() - brain.lastTry > 0.1 then
+			-- Tip serve or float serve on your own toss.
+			brain.lastTry = os.clock()
+			local style = brain.serveStyle
+			brain.serveStyle = nil
+			local done = style == "tip" and tryTip(char, root, state, zones, myZone, ballNow, now)
+			if not done then
+				tryHit("Bump", char, root, state, zones, myZone, ballNow, now)
+			end
+			stats[style == "tip" and "tipServes" or "floatServes"] = (stats[style == "tip" and "tipServes" or "floatServes"] or 0) + 1
+			STATE.playStatus = style == "tip" and "Tip serve" or "Float serve"
+		elseif secondSet and os.clock() - brain.lastTry > 0.1 then
 			brain.lastTry = os.clock()
 			brain.comboDouble = false
 			if not trySetToSelf(char, root, state, zones, myZone, ballNow, now, true) then
@@ -1281,7 +1424,7 @@ local function stepBrain()
 	-- Spike plan: a point on the way down that you can get under, where the
 	-- ball will be 0-2.5 studs above your head at the top of your jump (that's
 	-- a PERFECT spike in the game's maths, which also powers Superspike).
-	local waitForSecondSet = inCombo and brain.comboDouble and (brain.comboSets or 0) == 1
+	local waitForSecondSet = inCombo and brain.comboDouble and (brain.comboSets or 0) == 1 or softServe
 	if STATE.autoSpike == true and not airborne and reacted and (inCombo or not brain.skipSpike) and not waitForSecondSet then
 		local headTop = char.Head.Position.Y + 7.4
 		local chain = flightChain(state)
@@ -1311,7 +1454,12 @@ local function stepBrain()
 						end
 						if t - now <= 0.46 and os.clock() - brain.lastJump > 0.8 then
 							brain.lastJump = os.clock()
-							useAbility("spike")
+							-- Now and then this jump is a fake: tip instead of spike.
+							brain.fakeJump = STATE.trickShots == true and not brain.jumpServe
+								and (STATE.testFake == true or math.random() < 0.15)
+							if not brain.fakeJump then
+								useAbility("spike")
+							end
 							hum:ChangeState(Enum.HumanoidStateType.Jumping)
 						end
 						return
@@ -1368,6 +1516,7 @@ local function stepBrain()
 		if targetTime - now <= 0.8 then
 			preAim("Bump", target, targetTime, 1)
 		end
+		STATE.incomingEta = targetTime - now
 		useAbility("incoming")
 		local land, landTime = landingSpot(state, now)
 		local lands = land and Ball.ZoneAt(zones, land) == myZone
@@ -2898,10 +3047,11 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · jump serves %d · dive→spikes %d · tips %d · wall shots %d\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d\nServes: jump %d · tip %d · float %d\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
 			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0,
-			stats.combos or 0, stats.longCombos or 0, stats.jumpServes or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0,
+			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0,
+			stats.jumpServes or 0, stats.tipServes or 0, stats.floatServes or 0,
 			stats.lastHit
 		))
 		local lines = { "Play · " .. tostring(STATE.playStatus), "Rewards · " .. tostring(STATE.rewardStatus) }
