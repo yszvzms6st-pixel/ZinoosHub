@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.9.3"
+local VERSION = "1.9.4"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -590,11 +590,23 @@ end
 
 local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality)
 	local candidates = {}
+	-- Last resort: any direction whose ball ends up outside your own square
+	-- (never hit it into your own square just because nothing looked good).
+	local fallback, fallbackScore
 	for i = 0, 23 do
 		local angle = i / 24 * math.pi * 2
 		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
 		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality)
 		local viaEmpty = false
+		if land then
+			local endZone = Ball.ZoneAt(zones, land)
+			if endZone ~= myZone then
+				local away = ((land - myZone.Position) * Vector3.new(1, 0, 1)).Magnitude
+				if not fallbackScore or away > fallbackScore then
+					fallback, fallbackScore = { dir = dir, far = 0, flight = flight, land = land, banked = banked }, away
+				end
+			end
+		end
 		-- Wall shots that come back over your own square, or that land right
 		-- on a square's edge, are too easy to get wrong (one came back into
 		-- your own square live), so skip them.
@@ -660,6 +672,10 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 		end
 	end
 	if #candidates == 0 then
+		if fallback then
+			stats.fallbackAims = (stats.fallbackAims or 0) + 1
+			return fallback.dir, fallback
+		end
 		return nil
 	end
 	local mode = STATE.aimMode
@@ -1601,7 +1617,14 @@ local function stepBrain()
 		local landDist = landFlat and (landFlat - root.Position).Magnitude or dist
 		local slide = brain.diveReach(math.max(left - 0.04, 0))
 		local walkTooSlow = landDist / math.max(hum.WalkSpeed, 1) > left
-		if STATE.autoDive == true and lands and walkTooSlow and left <= 0.55 and slide <= landDist + 3 and not (STATE.ringIncoming and STATE.ringIncoming(1.1))
+		-- Can a dive still get there? The slide plus the dive's catch box
+		-- (about 4.5 studs) must reach the ball. A dive that falls short only
+		-- leaves you lying next to the explosion.
+		local diveCanReach = brain.diveReach(math.max(left, 0)) + 4.5 >= landDist
+		-- Best case: walk now, then dive in the last half second.
+		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
+		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
+		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.55 and slide <= landDist + 3 and not (STATE.ringIncoming and STATE.ringIncoming(1.1))
 			and landDist < 40 and os.clock() - brain.lastDive > 1 then
 			brain.lastDive = os.clock()
 			face(root, ((landFlat or flat) - root.Position).Unit)
@@ -1616,6 +1639,21 @@ local function stepBrain()
 					brain.comboDouble = false
 					brain.diveSpike = true
 				end
+			end
+		elseif hopeless and landFlat and STATE.avoidBlasts == true then
+			-- Can't be saved: get as far from where it blows up as you can
+			-- inside your square (the blast reaches 15 studs).
+			local away = (root.Position - landFlat) * Vector3.new(1, 0, 1)
+			local dirAway = away.Magnitude > 0.5 and away.Unit or (Vector3.new(myZone.Position.X, root.Position.Y, myZone.Position.Z) - landFlat).Unit
+			local spot = root.Position + dirAway * 25
+			local rel = myZone.CFrame:PointToObjectSpace(spot)
+			local limitX, limitZ = myZone.Size.X / 2 - 1.5, myZone.Size.Z / 2 - 1.5
+			spot = myZone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
+			hum:MoveTo(Vector3.new(spot.X, root.Position.Y, spot.Z))
+			STATE.playStatus = "Can't reach it, getting clear"
+			if brain.escapeKey ~= brain.stateKey then
+				brain.escapeKey = brain.stateKey
+				stats.escapes = (stats.escapes or 0) + 1
 			end
 		end
 	elseif STATE.avoidBlasts == true and (function()
