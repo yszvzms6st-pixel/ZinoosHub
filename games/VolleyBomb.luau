@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.13.0"
+local VERSION = "1.14.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -633,6 +633,44 @@ function brain.superMods(allowReady)
 	}
 end
 
+-- The hit modifiers your equipped ability adds to this hit (values from the
+-- game's ability modules), so the aim matches where the ball really goes.
+-- Abilities with a random part (Curveball's side, Moonball's distance) give
+-- several variants, and a shot only counts if every variant is good.
+function brain.hitMods(kind, allowReady)
+	local name = equippedAbility()
+	local m = name and AbilityModules[name]
+	if not m then
+		return nil
+	end
+	local active = type(AbilityController._active) == "table" and AbilityController._active[name]
+	local ready = false
+	if not active and allowReady and STATE.autoAbility == true then
+		local ok, left = pcall(AbilityController.Remaining, AbilityController, name)
+		ready = ok and tonumber(left) == 0
+	end
+	if name == "Superspike" and kind == "Spike" then
+		return brain.superMods(allowReady)
+	elseif name == "Adrenaline" and kind == "Spike" and active then
+		return { Boost = tonumber(m.SpikeBoost) or 1.3, MinSpeed = tonumber(m.MinSpikeSpeed) or 60.9 }
+	elseif name == "Curveball" and kind == "Spike" and (active or ready) then
+		local curve, minDistance = tonumber(m.Curve) or 100, tonumber(m.MinDistance) or 20
+		return { variants = {
+			{ Boost = 1, Curve = curve, MinDistance = minDistance, IgnoreWalls = m.IgnoreWalls },
+			{ Boost = 1, Curve = -curve, MinDistance = minDistance, IgnoreWalls = m.IgnoreWalls },
+		} }
+	elseif name == "Moonball" and kind == "Bump" and active then
+		local range = m.Distance
+		local low, high = range and range.Min or 30, range and range.Max or 80
+		local list = {}
+		for _, d in ipairs({ low, (low + high) / 2, high }) do
+			table.insert(list, { Height = m.Height or 100, Distance = d, TimeScale = m.TimeScale or 1.75, FallScale = m.FallScale or 0.5 })
+		end
+		return { variants = list }
+	end
+	return nil
+end
+
 -- Where a hit in direction dir would end up, following wall bounces.
 local function simulate(kind, state, zones, ballPos, dir, now, quality, mods)
 	local origin, unit = Ball.Inside(zones, ballPos, dir)
@@ -664,7 +702,20 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 	for i = 0, steps - 1 do
 		local angle = i / steps * math.pi * 2
 		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
-		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality, mods)
+		local variants = mods and mods.variants
+		local land, flight, banked, finalState = simulate(kind, state, zones, ballPos, dir, now, quality, variants and variants[1] or mods)
+		-- Random-part abilities: every variant has to stay out of your square
+		-- (and the slowest one counts).
+		if land and variants then
+			for v = 2, #variants do
+				local otherLand, otherFlight = simulate(kind, state, zones, ballPos, dir, now, quality, variants[v])
+				if not otherLand or Ball.ZoneAt(zones, otherLand) == myZone then
+					land = nil
+					break
+				end
+				flight = math.max(flight or 0, otherFlight or 0)
+			end
+		end
 		local viaEmpty = false
 		if land then
 			local endZone = Ball.ZoneAt(zones, land)
@@ -833,14 +884,14 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	if STATE.smartAim == true then
 		local dir
 		-- An armed Superspike powers this spike: aim with its extra speed.
-		local mods = resolvedKind == "Spike" and brain.superMods(false) or nil
+		local mods = brain.hitMods(resolvedKind, false)
 		if brain.aimDir and brain.aimKey == brain.stateKey and resolvedKind == brain.aimKind and (brain.aimSuper == true) == (mods ~= nil) then
 			dir, pick = brain.aimDir, brain.aimPick
 			-- The aim was picked a moment ago for where you planned to hit it.
 			-- Check it again from where the ball really is now (a wall bounce
 			-- or a late jump moves the contact point; seen live: a spike aimed
 			-- that way came down in your own square). Aim again if it would.
-			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality, mods)
+			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality, mods and mods.variants and mods.variants[1] or mods)
 			local landZone = land and Ball.ZoneAt(zones, land)
 			if landZone and not landZone:GetAttribute("Occupied") then
 				landZone = Ball.BounceTarget(zones, land) or landZone
@@ -1046,6 +1097,69 @@ local function trySetToSelf(char, root, state, zones, myZone, ballPos, now, seco
 			stats.combos = (stats.combos or 0) + 1
 			STATE.playStatus = "Combo: set up a spike"
 		end
+		return true
+	end
+	brain.pendingKind = nil
+	return false
+end
+
+-- Team combo (Duos/Trios): set the ball so it comes down at spike height
+-- right by your teammate in your square, for them to spike. A set travels
+-- about 10 studs, so it only works when they're 5-15 studs away.
+function brain.trySetToMate(char, root, state, zones, myZone, ballPos, now)
+	local used = (state.HitZone == myZone and tonumber(state.Hits)) or 0
+	if used + 2 > Ball.GetMaxHits() then
+		return false
+	end
+	local mate, mateDist
+	for _, entry in ipairs(occupantsOf(myZone)) do
+		local d = ((entry.pos - root.Position) * Vector3.new(1, 0, 1)).Magnitude
+		if d >= 5 and d <= 15 and (not mateDist or d < mateDist) then
+			mate, mateDist = entry, d
+		end
+	end
+	if not mate then
+		return false
+	end
+	local toMate = ((mate.pos - ballPos) * Vector3.new(1, 0, 1))
+	if toMate.Magnitude < 1 then
+		return false
+	end
+	local base = math.atan2(toMate.Z, toMate.X)
+	local bestDir, bestMiss
+	for _, offset in ipairs({ 0, 0.26, -0.26, 0.52, -0.52 }) do
+		local dir = Vector3.new(math.cos(base + offset), 0, math.sin(base + offset))
+		local origin, unit = Ball.Inside(zones, ballPos, dir)
+		local ok, popped = pcall(Ball.Hits.Set, state.Multipliers, origin, unit, now)
+		if ok and type(popped) == "table" then
+			for t = now + 0.5, math.min(popped.EndTime, now + 3), 0.05 do
+				local p, velocity = pathAt({ popped }, t)
+				local h = p.Y - Ball.Ground(p).Y
+				if velocity.Y < 0 and h <= 15.5 and h >= 8.5 then
+					local miss = ((p - mate.pos) * Vector3.new(1, 0, 1)).Magnitude
+					if Ball.ZoneAt(zones, p) == myZone and miss <= 5 and (not bestMiss or miss < bestMiss) then
+						bestDir, bestMiss = dir, miss
+					end
+					break
+				end
+			end
+		end
+	end
+	if not bestDir then
+		return false
+	end
+	face(root, bestDir)
+	if humanizing() and type(BallController._tracks) == "table" and BallController._tracks.Bump then
+		pcall(function()
+			BallController._tracks.Bump:Play()
+		end)
+	end
+	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Set", nil, 1
+	local okHit, hit = pcall(BallController.Hit, BallController, "Set")
+	elevate()
+	if okHit and hit then
+		stats.mateSets = (stats.mateSets or 0) + 1
+		STATE.playStatus = "Set it up for " .. mate.player.DisplayName
 		return true
 	end
 	brain.pendingKind = nil
@@ -1446,6 +1560,21 @@ local function stepBrain()
 		local radius = humanizing() and randomBetween(0.2, 1.3) or 0
 		brain.offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
 		brain.skipSpike = humanizing() and math.random() < 0.12
+		-- Quick attack: the player who just hit it is out of position (in the
+		-- air, mid-dive, or far from the middle of their square), so spike it
+		-- straight back on the first touch instead of setting up, before they
+		-- can reset.
+		brain.quickAttack = false
+		if state.HitBy and state.HitBy ~= LocalPlayer then
+			local read = brain.readPlayer(state.HitBy)
+			local theirRoot = state.HitBy.Character and state.HitBy.Character:FindFirstChild("HumanoidRootPart")
+			local theirZone = theirRoot and Ball.ZoneAt(zones, theirRoot.Position)
+			local off = theirZone and ((theirRoot.Position - theirZone.Position) * Vector3.new(1, 0, 1)).Magnitude or 0
+			brain.quickAttack = (read ~= nil and read.cantDive) or off > 8
+			if brain.quickAttack then
+				brain.skipSpike = false
+			end
+		end
 		brain.aimDir = nil
 		brain.preferBank = STATE.trickShots == true and math.random() < 0.3
 	end
@@ -1571,7 +1700,11 @@ local function stepBrain()
 				end
 			end
 			if not mods then
-				brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1)
+				-- Other abilities (Curveball, Adrenaline, Moonball): aim with
+				-- their real effect when it will be on this hit.
+				local other = equippedAbility() ~= "Superspike" and brain.hitMods(kind, true) or nil
+				brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1, other)
+				brain.aimSuper = other ~= nil
 			end
 		end
 		local dir = brain.aimDir
@@ -1716,10 +1849,16 @@ local function stepBrain()
 			brain.lastTry = os.clock()
 			local done = false
 			-- Pro plays: now and then tip it softly over instead.
-			if STATE.trickShots == true and not airborne and not inCombo and math.random() < 0.18 then
+			-- (A quick attack skips the slow stuff: hit it straight back.)
+			if STATE.trickShots == true and not airborne and not inCombo and not brain.quickAttack and math.random() < 0.18 then
 				done = tryTip(char, root, state, zones, myZone, ballNow, now)
 			end
-			if not done and STATE.combos == true and STATE.autoSpike == true and not airborne and not inCombo
+			-- Team combo: in Duos/Trios, set it up for your teammate to spike.
+			if not done and STATE.combos == true and not airborne and not inCombo and not brain.quickAttack and teamMode()
+				and math.random() < 0.5 then
+				done = brain.trySetToMate(char, root, state, zones, myZone, ballNow, now)
+			end
+			if not done and STATE.combos == true and STATE.autoSpike == true and not airborne and not inCombo and not brain.quickAttack
 				and math.random() < (COMBO_CHANCE[STATE.comboChance] or 70) / 100 then
 				done = trySetToSelf(char, root, state, zones, myZone, ballNow, now)
 			end
@@ -1742,7 +1881,7 @@ local function stepBrain()
 			local p = Ball.Contain(raw)
 			if Ball.ZoneAt(zones, p) == myZone and velocity.Y < 0 then
 				local above = p.Y - headTop
-				if above <= 2.5 and above >= -0.3 then
+				if above <= (brain.quickAttack and 3.2 or 2.5) and above >= -0.3 then
 					local flat = Vector3.new(p.X, root.Position.Y, p.Z)
 					local dist = (flat - root.Position).Magnitude
 					if STATE.autoMove ~= true and dist > 4 then
@@ -1750,7 +1889,11 @@ local function stepBrain()
 					end
 					-- Once you've committed to a spike on this ball, stick with
 					-- it (no flip-flopping between plans every frame).
-					local slack = brain.spikeKey == brain.stateKey and 6 or 3
+					local slack = brain.spikeKey == brain.stateKey and 6 or (brain.quickAttack and 5 or 3)
+					if brain.quickAttack and brain.quickKey ~= brain.stateKey then
+						brain.quickKey = brain.stateKey
+						stats.quickAttacks = (stats.quickAttacks or 0) + 1
+					end
 					if brain.spikeKey ~= brain.stateKey and teammateCloser(myZone, root, p) then
 						break -- teammate's spike
 					end
@@ -3593,10 +3736,10 @@ local function installHub()
 			arena and ("In a round (" .. arena .. ")") or "In the lobby"
 		))
 		setInfo(sessionInfo, string.format(
-			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d · superspike kill shots %d\nServes: jump %d · tip %d · float %d\nLast: %s",
+			"%s session · %d wins · %d eliminations · coins +%s\n%d hits (%d spikes, %d perfect, %d bumps) · %d dives · %d serves · %d abilities\nCombos %d · long combos %d · wall sets %d · fake spikes %d · ability combos %d · dive→spikes %d · tips %d · wall shots %d · punish shots %d · 360s %d · superspike kill shots %d · quick attacks %d · team sets %d\nServes: jump %d · tip %d · float %d\nLast: %s",
 			clock, wins - stats.wins0, elims - stats.elims0, shortNumber(math.max(0, cash - stats.money0)),
 			stats.hits, stats.spikes, stats.perfect, stats.bumps, stats.dives, stats.serves, stats.abilities or 0,
-			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0, stats.superspikes or 0,
+			stats.combos or 0, stats.longCombos or 0, stats.wallSets or 0, stats.fakes or 0, stats.abilityCombos or 0, stats.diveSpikes or 0, stats.tips or 0, stats.banks or 0, stats.punishes or 0, stats.spins or 0, stats.superspikes or 0, stats.quickAttacks or 0, stats.mateSets or 0,
 			stats.jumpServes or 0, stats.tipServes or 0, stats.floatServes or 0,
 			stats.lastHit
 		))
