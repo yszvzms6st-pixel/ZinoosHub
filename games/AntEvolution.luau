@@ -1133,6 +1133,55 @@ local function putBack(root)
 	STATE.detail = "The last step had no ground"
 end
 
+local function sugarCube()
+	local gameFolder = Workspace:FindFirstChild("Game")
+	local model = gameFolder and gameFolder:FindFirstChild("SugarCube")
+	local cube = model and model:FindFirstChild("Cube")
+	if cube and cube:IsA("BasePart") and cube.Parent then
+		return cube
+	end
+	return nil
+end
+
+local function stepOnto(character, root, aim, lookAt)
+	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
+	if flat.Magnitude < 1.5 then
+		return true
+	end
+	local point = root.Position + flat.Unit * math.min(flat.Magnitude, 14)
+	local ground = groundAt(point, character, root.Position.Y)
+	if not ground or math.abs(ground.Y - root.Position.Y) > 18 then
+		return false
+	end
+	local goal = standOn(ground, character, root)
+	local look = Vector3.new(lookAt.X, goal.Y, lookAt.Z)
+	root.AssemblyLinearVelocity = Vector3.zero
+	if (look - goal).Magnitude < 1 then
+		root.CFrame = CFrame.new(goal)
+	else
+		root.CFrame = CFrame.lookAt(goal, look)
+	end
+	return true
+end
+
+local function stepSugar(character, root, cube)
+	local center = cube.Position
+	local flat = Vector3.new(root.Position.X - center.X, 0, root.Position.Z - center.Z)
+	if flat.Magnitude <= 12 and math.abs(root.Position.Y - center.Y) < 16 then
+		STATE.status = "In the sugar ring"
+		STATE.detail = "Scoring for Sugar Rush"
+		return
+	end
+	local stand = center + (flat.Magnitude > 1 and flat.Unit or Vector3.new(1, 0, 0)) * 8
+	if not stepOnto(character, root, stand, center) then
+		STATE.status = "Path to the sugar cube is blocked"
+		STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
+		return
+	end
+	STATE.status = "Going to the sugar ring"
+	STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
+end
+
 local function stepFarm()
 	if STATE.autoOrb ~= true then
 		STATE.detail = "Farm off"
@@ -1150,6 +1199,11 @@ local function stepFarm()
 	local under = groundAt(root.Position, character, root.Position.Y)
 	if under and math.abs(root.Position.Y - under.Y) < 12 then
 		lastSafe = root.Position
+	end
+	local cube = sugarCube()
+	if cube then
+		stepSugar(character, root, cube)
+		return
 	end
 	if not farm.ready then
 		STATE.status = "Looking for food"
@@ -2182,7 +2236,7 @@ local function installHub()
 	local farmInfo
 	do
 		local farmBox = section(farmTab, "Food", "apple")
-		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. The game collects it")
+		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. During Sugar Rush it stays in the ring")
 		toggle(farmBox, "Auto Bite", "autoBite", "Bites a bug when it is already in reach")
 		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your mutation ability on a nearby bug")
 		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))

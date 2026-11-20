@@ -90,7 +90,7 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 
 **Farm**
 
-- **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map.
+- **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map. While Sugar Rush is up it goes to the sugar ring and stays there, because the top 3 prizes are worth more than the food.
 - **Auto Bite** bites a bug that is already in reach. **Auto Ability** uses your equipped mutation ability on a nearby bug. Dash and Fly are left alone.
 - **Critter ESP** shows bug names and health. **Player ESP** shows other players.
 
