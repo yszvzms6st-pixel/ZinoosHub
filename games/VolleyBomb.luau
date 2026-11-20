@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.20.0"
+local VERSION = "1.21.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1663,9 +1663,8 @@ local function moveTo(hum, root, spot, urgent)
 	if STATE.autoMove ~= true then
 		return
 	end
-	if humanizing() then
-		spot += brain.offset
-	end
+	-- The wide aim is applied by the caller when there is time. An urgent run
+	-- goes to the spot it was given, so a late shuffle is not pulled off the ball.
 	local goal = Vector3.new(spot.X, root.Position.Y, spot.Z)
 	local delta = goal - root.Position
 	if delta.Magnitude > 2 then
@@ -1690,6 +1689,33 @@ local function moveTo(hum, root, spot, urgent)
 	hum:MoveTo(root.Position + Vector3.new(step.X, 0, step.Z))
 end
 
+-- With time, start wide of the ball and close in, so the run bends onto it
+-- instead of drawing a straight line to the stud. The last moment is exact.
+function brain.approachSpot(zone, root, spot, secondsLeft, settle)
+	settle = settle or 0.4
+	if not humanizing() or typeof(spot) ~= "Vector3" or secondsLeft <= settle then
+		return spot
+	end
+	local bias = brain.offset
+	if typeof(bias) ~= "Vector3" or bias.Magnitude < 0.4 then
+		return spot
+	end
+	local fade = math.clamp((secondsLeft - settle) / 0.8, 0, 1)
+	local wide = bias.Unit * math.clamp(bias.Magnitude * 1.6, 1.5, 3.2)
+	local goal = spot + wide * fade
+	if not zone or not root then
+		return goal
+	end
+	local rel = zone.CFrame:PointToObjectSpace(goal)
+	local limitX, limitZ = zone.Size.X / 2 - 2, zone.Size.Z / 2 - 2
+	local clamped = zone.CFrame:PointToWorldSpace(Vector3.new(
+		math.clamp(rel.X, -limitX, limitX),
+		rel.Y,
+		math.clamp(rel.Z, -limitZ, limitZ)
+	))
+	return Vector3.new(clamped.X, root.Position.Y, clamped.Z)
+end
+
 -- Always moving (Spin Moves). The character turns itself in loops (no forced
 -- turning, which would stall the run).
 -- Loops: quick tight circles around a spot, facing the way you run, so every
@@ -1707,24 +1733,32 @@ function brain.runLoop(hum, root, center)
 				else
 					local angle = math.random() * math.pi * 2
 					local radius = randomBetween(1.6, 5.2)
+					local bend = randomBetween(1.3, 2.8) * (math.random() < 0.5 and -1 or 1)
 					brain.jog = {
 						goal = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius),
 						leaveAt = os.clock() + 4,
+						bend = Vector3.new(-math.sin(angle) * bend, 0, math.cos(angle) * bend),
 					}
 				end
 				jog = brain.jog
 			end
 			if jog.goal then
-				local away = (Vector3.new(jog.goal.X, root.Position.Y, jog.goal.Z) - root.Position).Magnitude
+				local goal = Vector3.new(jog.goal.X, root.Position.Y, jog.goal.Z)
+				local away = (goal - root.Position).Magnitude
 				if away < 1.15 then
 					jog.leaveAt = os.clock() + randomBetween(0.18, 0.55)
 					jog.goal = nil
 					hum:MoveTo(root.Position)
 					return
 				end
+				local steer = goal
+				if jog.bend and away > 2.4 then
+					local along = math.clamp(1 - away / 8, 0.25, 0.85)
+					steer = root.Position:Lerp(goal, along) + jog.bend * (1 - along)
+				end
 				hum.AutoRotate = true
 				brain.walkingUntil = os.clock() + 0.12
-				hum:MoveTo(Vector3.new(jog.goal.X, root.Position.Y, jog.goal.Z))
+				hum:MoveTo(Vector3.new(steer.X, root.Position.Y, steer.Z))
 				return
 			end
 			if not jog.arcUntil then
@@ -2318,7 +2352,12 @@ local function stepBrain()
 					end
 					if dist <= hum.WalkSpeed * (t - now - 0.42) + slack then
 						brain.spikeKey = brain.stateKey
-						moveTo(hum, root, flat, dist > hum.WalkSpeed * (t - now - 0.42) * 0.8)
+						local eta = t - now
+						local behind = dist > hum.WalkSpeed * (eta - 0.42) * 0.8
+						-- Wide on the way in. On the stud before the jump, so the
+						-- spike still goes where you aimed.
+						local aim = (humanizing() and not behind and eta > 0.7) and brain.approachSpot(myZone, root, flat, eta, 0.7) or flat
+						moveTo(hum, root, aim, behind or eta <= 0.7)
 						STATE.playStatus = inCombo and "Native follow-up: going up for the spike" or "Lining up a spike"
 						if t - now <= 0.8 then
 							preAim("Spike", p, t, 1)
@@ -2396,19 +2435,18 @@ local function stepBrain()
 	elseif target then
 		local flat = Vector3.new(target.X, root.Position.Y, target.Z)
 		local dist = (flat - root.Position).Magnitude
-		-- Straight line only when it's tight; otherwise keyboard-style moves.
-		local tight = dist / math.max(hum.WalkSpeed, 1) > (targetTime - now) * 0.75
-		moveTo(hum, root, flat, tight)
+		local eta = targetTime - now
+		-- Straight when the ball is already yours and close. With time, start
+		-- wide and step onto it at the end.
+		local tight = dist / math.max(hum.WalkSpeed, 1) > eta * 0.75
+		local aim = (humanizing() and not tight and eta > 0.55) and brain.approachSpot(myZone, root, flat, eta, 0.4) or flat
+		moveTo(hum, root, aim, tight or eta <= 0.45)
 		STATE.playStatus = "Going for the ball"
 		STATE.incomingEta = targetTime - now
 		useAbility("incoming")
 		local land, landTime = landingSpot(state, now)
 		local lands = land and Ball.ZoneAt(zones, land) == myZone
 		local left = (lands and landTime or targetTime) - now
-		local need = dist / math.max(hum.WalkSpeed, 1)
-		if lands and need > left and left < 1 then
-			useAbility("save")
-		end
 		-- Dive timed to the distance: the game's dive is a fast slide (about
 		-- 35 studs in half a second), so start it when the slide will arrive
 		-- with the ball, not a fixed half second early (that overshoots close
@@ -2437,7 +2475,13 @@ local function stepBrain()
 		-- legitimate catch window while avoiding last-frame misses.
 		local early = 0.18
 		local slide = brain.diveReach(math.max(catchTime - now - early, 0))
-		local walkTooSlow = landDist / math.max(hum.WalkSpeed, 1) > left
+		-- You have to be there before the catch, not as the ball hits the
+		-- ground. Walking that would arrive on the landing is already late.
+		local walkBudget = catchTime - now - 0.1
+		local walkTooSlow = catchDist > 1.2 and catchDist / math.max(hum.WalkSpeed, 1) > walkBudget
+		if lands and catchDist / math.max(hum.WalkSpeed, 1) > walkBudget and catchTime - now < 1 then
+			useAbility("save")
+		end
 		-- Can a dive still get there? The slide plus the dive's catch box
 		-- (about 4.5 studs) must reach the ball. A dive that falls short only
 		-- leaves you lying next to the explosion.
@@ -2464,8 +2508,8 @@ local function stepBrain()
 			local okCd, cd = pcall(AbilityController.Remaining, AbilityController, "Dive")
 			local busy = BallController:Busy()
 			elevate()
-			table.insert(brain.trace, string.format("%.2f lands=%s land=%.0f catch=%.0f(%.2f) slide=%.0f walkSlow=%s reach=%s hopeless=%s air=%s busy=%s cd=%s ring=%s%s",
-				left, lands and "y" or "n", landDist, catchDist, catchTime - now, slide, walkTooSlow and "y" or "n", diveCanReach and "y" or "n",
+			table.insert(brain.trace, string.format("%.2f lands=%s land=%.0f catch=%.0f(%.2f) slide=%.0f walkSlow=%s bud=%.2f reach=%s hopeless=%s air=%s busy=%s cd=%s ring=%s%s",
+				left, lands and "y" or "n", landDist, catchDist, catchTime - now, slide, walkTooSlow and "y" or "n", walkBudget, diveCanReach and "y" or "n",
 				hopeless and "y" or "n", hum.FloorMaterial == Enum.Material.Air and "y" or "n", busy and "y" or "n",
 				okCd and tostring(math.floor((tonumber(cd) or 0) * 10) / 10) or "?",
 				(STATE.ringIncoming and STATE.ringIncoming(1.1)) and "I" or "", (STATE.ringNearby and STATE.ringNearby(62)) and "N" or "-"))
@@ -2633,7 +2677,7 @@ local function stepBrain()
 			end
 			if not runAbout and STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
 				and ((brain.idleSpot - root.Position) * Vector3.new(1, 0, 1)).Magnitude > 1.5 then
-				moveTo(hum, root, brain.idleSpot - (humanizing() and brain.offset or Vector3.zero))
+				moveTo(hum, root, brain.idleSpot)
 			end
 			if os.clock() >= (brain.hopAt or 0) then
 				local lively = STATE.spinMoves == true
@@ -3972,7 +4016,7 @@ local function installHub()
 	toggle(aimBox, "Show Landing Spot", "showLanding", "Purple circle where the ball will land")
 	toggle(aimBox, "Show Button Presses", "showPresses", "The Bump/Spike, Dive and ability buttons at the bottom press in when auto play uses them (only on your screen)")
 	local humanBox = section(playTab, "Play Like A Human", "user-check")
-	toggle(humanBox, "Humanize", "humanize", "Mixes your timing and aim, hits some spikes early instead of perfect every time, and jogs around your spot instead of running circles")
+	toggle(humanBox, "Humanize", "humanize", "Jogs on a curve while you wait, steps onto the ball from the side, and still goes straight when the ball is already yours")
 	choice(humanBox, "Reaction Speed", "Fast 0.07-0.16s · Normal 0.14-0.28s · Relaxed 0.24-0.42s", REACTION_OPTIONS, "reaction")
 	toggle(humanBox, "Native Follow-ups", "nativeFollowups", "After the game confirms a real Dive Set or ability hold, uses the remaining legal touch for a spike")
 	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in legal moves through normal Swing: jump serves, float shots, and bank shots off the walls")
