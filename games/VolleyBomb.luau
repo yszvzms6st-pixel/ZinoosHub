@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.23.0"
+local VERSION = "1.24.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -2009,6 +2009,27 @@ function brain.enemyMagnet(state, zones, myZone, root, hum, ballNow, airborne)
 	return true
 end
 
+-- True for a short moment after the landing spot jumps (a curve, a wall,
+-- a late read). A spike jump leaves you in the air, and a dive only works
+-- on the ground, so a landing that is still moving is a save, not a spike.
+function brain.landingSlid(key, spot)
+	if typeof(spot) ~= "Vector3" then
+		return false
+	end
+	local flat = Vector3.new(spot.X, 0, spot.Z)
+	if brain.landWatchKey ~= key or typeof(brain.landWatch) ~= "Vector3" then
+		brain.landWatchKey = key
+		brain.landWatch = flat
+		brain.landWatchAt = nil
+		return false
+	end
+	if (flat - brain.landWatch).Magnitude > 5 then
+		brain.landWatch = flat
+		brain.landWatchAt = os.clock()
+	end
+	return brain.landWatchAt ~= nil and os.clock() - brain.landWatchAt < 0.25
+end
+
 local function stepBrain()
 	local ball = arenaBall()
 	if not ball or type(ball.State) ~= "table" or type(ball.Zones) ~= "table" then
@@ -2416,6 +2437,9 @@ local function stepBrain()
 	if STATE.autoSpike == true and not airborne and reacted and (inCombo or not brain.skipSpike) and not softServe and not state.Tornado then
 		local headTop = char.Head.Position.Y + 7.4
 		local chain = flightChain(state)
+		local landNote, landNoteTime = landingSpot(state, now)
+		local landNoteHere = landNote and Ball.ZoneAt(zones, landNote) == myZone
+		local landingSlid = landNoteHere and brain.landingSlid(brain.stateKey, landNote) or false
 		for t = now + 0.42, math.min(pathEnd(chain), now + 4), 0.03 do
 			local raw, velocity = pathAt(chain, t)
 			local p = Ball.Contain(raw)
@@ -2441,6 +2465,17 @@ local function stepBrain()
 						brain.spikeKey = brain.stateKey
 						local eta = t - now
 						local behind = dist > hum.WalkSpeed * (eta - 0.42) * 0.8
+						local landFlat = landNoteHere and Vector3.new(landNote.X, 0, landNote.Z) or nil
+						local apart = landFlat and (Vector3.new(flat.X, 0, flat.Z) - landFlat).Magnitude or 0
+						local under = dist <= 4.5
+						local sameSpot = not landNoteHere or (apart <= 8 and not landingSlid)
+						local soon = landNoteHere and landNoteTime - now < 1.2
+						-- A dive only works on the ground. If the ball is about
+						-- to land in the square and this jump is not stood under
+						-- it, stay down and save it.
+						if soon and (not under or not sameSpot) and eta <= (brain.jumpLead or 0.46) + 0.08 then
+							break
+						end
 						-- Wide on the way in. On the stud before the jump, so the
 						-- spike still goes where you aimed.
 						local aim = (humanizing() and not behind and eta > 0.7) and brain.approachSpot(myZone, root, flat, eta, 0.7) or flat
@@ -2449,7 +2484,7 @@ local function stepBrain()
 						if t - now <= 0.8 then
 							preAim("Spike", p, t, 1)
 						end
-						if t - now <= (brain.jumpLead or 0.46) and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
+						if under and sameSpot and t - now <= (brain.jumpLead or 0.46) and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
 							brain.lastJump = os.clock()
 							useAbility("spike")
 							-- A 360 now and then, not on a timer. The spin ends
