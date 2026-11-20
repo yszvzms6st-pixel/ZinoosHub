@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.26.0"
+local VERSION = "1.26.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -3678,22 +3678,73 @@ local function pulseAntiAfk()
 end
 trackConnection(LocalPlayer.Idled:Connect(pulseAntiAfk))
 
--- The game has its own AFK switch that keeps you out of rounds.
+-- The game has its own AFK button. Follow that click. Do not flip it back on.
+function STATE.bindGameAfkButton()
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local hud = playerGui and playerGui:FindFirstChild("HUD")
+	local inner = hud and hud:FindFirstChild("HUD")
+	local left = inner and inner:FindFirstChild("Left")
+	local buttons = left and left:FindFirstChild("Buttons")
+	local button = buttons and buttons:FindFirstChild("AFK")
+	if typeof(button) ~= "Instance" or button == STATE.afkButton then
+		return
+	end
+	STATE.afkButton = button
+	local function pressed()
+		STATE.afkButtonAt = os.clock()
+		STATE.afkToggleAt = os.clock()
+	end
+	trackConnection(button.Activated:Connect(pressed))
+	trackConnection(button.MouseButton1Click:Connect(pressed))
+end
+
+function STATE.watchGameAfk()
+	if STATE.afkWatching == true then
+		return
+	end
+	STATE.afkWatching = true
+	trackConnection(LocalPlayer:GetAttributeChangedSignal("AFK"):Connect(function()
+		if STATE.afkPushed == true then
+			STATE.afkPushed = false
+			return
+		end
+		if os.clock() - (STATE.afkButtonAt or 0) > 1.5 then
+			return
+		end
+		local gameAfk = LocalPlayer:GetAttribute("AFK") == true
+		STATE.afk = gameAfk
+		STATE.afkPush = false
+		STATE.afkToggleAt = os.clock()
+		if type(STATE.syncToggle) == "function" then
+			pcall(STATE.syncToggle, "afk")
+		end
+		if type(STATE.saveConfig) == "function" then
+			STATE.saveConfig()
+		end
+	end))
+end
+
 local function stepStayActive()
 	local event = remote("ToggleAFK")
 	local gameAfk = LocalPlayer:GetAttribute("AFK") == true
-	-- Hub AFK pauses play and turns the game's own AFK on, so you are not
-	-- dropped into a round while you are away. Turning it off lets play resume.
-	if STATE.afk == true then
-		if not gameAfk and event and os.clock() - (STATE.afkToggleAt or 0) > 3 then
+	if STATE.afkPush == true then
+		STATE.afkPush = false
+		if (STATE.afk == true) ~= gameAfk and event then
 			STATE.afkToggleAt = os.clock()
+			STATE.afkPushed = true
 			event:FireServer()
-			noteActivity("AFK on")
+			noteActivity(STATE.afk == true and "AFK on" or "AFK off")
 		end
+		return
+	end
+	-- Stay Active only clears AFK while the hub is meant to be playing.
+	-- It never turns the game's AFK button back on.
+	if STATE.afk == true then
 		return
 	end
 	if STATE.stayActive == true and gameAfk and event and os.clock() - (STATE.afkToggleAt or 0) > 3 then
 		STATE.afkToggleAt = os.clock()
+		STATE.afkPushed = true
 		event:FireServer()
 		noteActivity("Turned the game's AFK mode off")
 	end
@@ -4037,6 +4088,7 @@ local function installHub()
 		elseif key == "stayActive" and on then
 			task.defer(stepStayActive)
 		elseif key == "afk" then
+			STATE.afkPush = true
 			task.defer(stepStayActive)
 		elseif key == "fpsBoost" and type(STATE.applyFpsBoost) == "function" then
 			task.defer(STATE.applyFpsBoost)
@@ -4570,8 +4622,15 @@ end
 
 -- Rewards and staying active.
 task.spawn(function()
+	pcall(STATE.watchGameAfk)
+	pcall(STATE.bindGameAfkButton)
+	if STATE.afk == true then
+		STATE.afkPush = true
+		pcall(stepStayActive)
+	end
 	task.wait(3)
 	while running() do
+		pcall(STATE.bindGameAfkButton)
 		pcall(stepStayActive)
 		elevate()
 		pcall(stepRewards)
