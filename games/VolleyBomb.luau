@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.22.0"
+local VERSION = "1.23.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1388,6 +1388,28 @@ function brain.diveReach(t)
 	return distance
 end
 
+-- How long the dive takes to cover a distance. Used so a save starts when
+-- the slide will meet the ball, not after the ball has already landed.
+function brain.diveTime(distance)
+	if distance <= 0 then
+		return 0
+	end
+	local module = AbilityModules.Dive
+	local boost = module and tonumber(module.Boost) or 1
+	local duration = module and tonumber(module.Duration) or 0.5
+	local covered, step, s = 0, 1 / 120, 0
+	while s < duration and covered < distance do
+		local x = math.min(s / duration, 1)
+		local ease = 1 - (1 - x) ^ 2
+		covered += (120 + (30 - 120) * ease) * boost * step
+		s += step
+	end
+	if covered < distance then
+		return nil
+	end
+	return s
+end
+
 -- Learned base: remember where balls hit into your square came down (relative
 -- to the square) and wait at a spot that covers them, nudged 60% of the way
 -- from the middle toward their average. Needs a few balls before it moves.
@@ -2482,6 +2504,16 @@ local function stepBrain()
 			target, targetTime = land, landTime
 		end
 	end
+	if not target and ballHere then
+		-- The final landing can be wrong after a Curveball, a Magnet drop, or
+		-- a wall. If the ball is already in your square and coming down, go
+		-- to it anyway.
+		local velOk, vel = pcall(Ball.VelocityAt, state, now)
+		local height = ballNow.Y - Ball.Ground(ballNow).Y
+		if height <= 16 and (not velOk or typeof(vel) ~= "Vector3" or vel.Y < 4) then
+			target, targetTime = ballNow, now + math.clamp(height / 30, 0.18, 0.9)
+		end
+	end
 	-- In the last moment go for it anyway: a teammate who has not touched it
 	-- yet might miss.
 	local mate = target and reacted and targetTime - now > 0.8 and teammateCloser(myZone, root, target)
@@ -2501,11 +2533,11 @@ local function stepBrain()
 		local flat = Vector3.new(target.X, root.Position.Y, target.Z)
 		local dist = (flat - root.Position).Magnitude
 		local eta = targetTime - now
-		-- Straight when the ball is already yours and close. With time, start
-		-- wide and step onto it at the end.
+		-- Straight once the ball is yours inside a second. The wide step is only
+		-- while there is time to spare.
 		local tight = dist / math.max(hum.WalkSpeed, 1) > eta * 0.75
-		local aim = (humanizing() and not tight and eta > 0.55) and brain.approachSpot(myZone, root, flat, eta, 0.4) or flat
-		moveTo(hum, root, aim, tight or eta <= 0.45)
+		local aim = (humanizing() and not tight and eta > 0.9) and brain.approachSpot(myZone, root, flat, eta, 0.4) or flat
+		moveTo(hum, root, aim, tight or eta <= 0.9)
 		STATE.playStatus = "Going for the ball"
 		STATE.incomingEta = targetTime - now
 		useAbility("incoming")
@@ -2554,6 +2586,15 @@ local function stepBrain()
 		-- Best case: walk now, then dive in the last half second.
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
+		-- A walk that will not arrive still has to dive. Start when the slide
+		-- meets the ball (the dive remembers about a fifth of a second), not
+		-- only when the full slide happens to match the distance. That second
+		-- check never opened on a ball 13 studs away with half a second left.
+		local travel = brain.diveTime(math.max(catchDist - 3, 0))
+		local catchEta = catchTime - now
+		local earlyBy = travel and (catchEta - travel) or 99
+		local meet = travel ~= nil and earlyBy <= 0.2 and earlyBy >= -0.08
+		local oldWindow = left <= 0.72 and slide <= catchDist + 2
 		-- Turn on the way in. A dive faces the catch; a bump or spike faces the
 		-- shot. Either way the hit itself only has to correct what's left.
 		if lands and walkTooSlow and catchSpot then
@@ -2582,7 +2623,7 @@ local function stepBrain()
 				table.remove(brain.trace, 1)
 			end
 		end
-		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.72 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
+		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and (oldWindow or meet) and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
 			and landDist < 40 and os.clock() - brain.lastDive > 1
 			-- Only when the game will actually start the dive (on the ground, not
 			-- mid-swing, off cooldown): turning to dive while a swing is still
