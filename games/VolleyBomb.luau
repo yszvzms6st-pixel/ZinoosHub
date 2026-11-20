@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.17.0"
+local VERSION = "1.17.2"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -2083,6 +2083,25 @@ local function stepBrain()
 		-- Best case: walk now, then dive in the last half second.
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
+		-- Chase trace for the loss recorder: what the dive check saw, so a
+		-- "ran for it but never dived" death can be explained. Reading only.
+		if brain.traceKey ~= brain.stateKey then
+			brain.traceKey, brain.trace = brain.stateKey, {}
+		end
+		if os.clock() - (brain.traceAt or 0) >= 0.05 then
+			brain.traceAt, brain.traceClock = os.clock(), os.clock()
+			local okCd, cd = pcall(AbilityController.Remaining, AbilityController, "Dive")
+			local busy = BallController:Busy()
+			elevate()
+			table.insert(brain.trace, string.format("%.2f lands=%s land=%.0f catch=%.0f(%.2f) slide=%.0f walkSlow=%s reach=%s hopeless=%s air=%s busy=%s cd=%s ring=%s%s",
+				left, lands and "y" or "n", landDist, catchDist, catchTime - now, slide, walkTooSlow and "y" or "n", diveCanReach and "y" or "n",
+				hopeless and "y" or "n", hum.FloorMaterial == Enum.Material.Air and "y" or "n", busy and "y" or "n",
+				okCd and tostring(math.floor((tonumber(cd) or 0) * 10) / 10) or "?",
+				(STATE.ringIncoming and STATE.ringIncoming(1.1)) and "I" or "", (STATE.ringNearby and STATE.ringNearby(62)) and "N" or "-"))
+			while #brain.trace > 16 do
+				table.remove(brain.trace, 1)
+			end
+		end
 		if STATE.autoDive == true and lands and walkTooSlow and diveCanReach and left <= 0.72 and slide <= catchDist + 2 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) and not (STATE.ringNearby and STATE.ringNearby(62))
 			and landDist < 40 and os.clock() - brain.lastDive > 1
 			-- Only when the game will actually start the dive (on the ground, not
@@ -2250,9 +2269,14 @@ local function stepBrain()
 				-- Hop only when nobody can hit it at you for a second (the ball is
 				-- still flying to another square): the game's dive only works
 				-- from the ground, so never be in the air when it matters.
+				-- (Seen live: a hop right as an enemy Portal teleported the ball
+				-- into your square with 0.4s left; every dive check passed except
+				-- "on the ground". So no hops while a Portal is live, and a wider
+				-- safety window.)
 				local land, landTime = landingSpot(state, now)
-				local safe = land and landTime - now > 1.1 and Ball.ZoneAt(zones, land) ~= myZone
-				if math.random() < (lively and 0.55 or 0.35) and not airborne and not read and (safe or not lively) then
+				local portalLive = STATE.portalAt and os.clock() - STATE.portalAt < 15
+				local safe = land and landTime - now > 1.4 and Ball.ZoneAt(zones, land) ~= myZone and not portalLive
+				if math.random() < (lively and 0.55 or 0.35) and not airborne and not read and safe then
 					brain.lastJump = os.clock()
 					if lively and math.random() < 0.35 then
 						brain.spinLeft = math.pi * 2
@@ -2872,6 +2896,9 @@ local function recordLoss(entry)
 	entry.clock = os.clock()
 	entry.trail = table.concat(statusTrail, " > ")
 	entry.lastEnemyAbility = STATE.lastEnemyAbility
+	if brain.trace and #brain.trace > 0 and os.clock() - (brain.traceClock or 0) < 1.5 then
+		entry.chase = table.concat(brain.trace, " | ")
+	end
 	table.insert(STATE.losses, 1, entry)
 	while #STATE.losses > 5 do
 		table.remove(STATE.losses)
@@ -2993,6 +3020,11 @@ do
 				stats.enemyAbilities = stats.enemyAbilities or {}
 				stats.enemyAbilities[ability] = (stats.enemyAbilities[ability] or 0) + 1
 				STATE.lastEnemyAbility = who .. " used " .. ability
+				-- Portal: that player's next 3 hits teleport the ball to a random
+				-- square, so where it lands can't be predicted for a while.
+				if ability == "Portal" then
+					STATE.portalAt = os.clock()
+				end
 			end
 		end))
 	end
