@@ -52,6 +52,7 @@ local STATE = {
 	speed = 32,
 	antiAfk = true,
 	infiniteJump = false,
+	infiniteStamina = false,
 	noclip = false,
 	instantPrompts = false,
 	fly = false,
@@ -137,6 +138,7 @@ local FLAG_KEYS = {
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	InfiniteJump = "infiniteJump",
+	InfiniteStamina = "infiniteStamina",
 	Noclip = "noclip",
 	InstantPrompts = "instantPrompts",
 	Fly = "fly",
@@ -874,6 +876,48 @@ local function stepSpeed()
 	local hum = humanoid()
 	if hum and STATE.walkSpeed == true and not seated() then
 		hum.WalkSpeed = STATE.speed
+	end
+end
+
+local staminaBags
+local function staminaBag(fn)
+	if typeof(fn) ~= "function" then
+		return nil
+	end
+	for index = 1, 12 do
+		local ok, value = pcall(debug.getupvalue, fn, index)
+		if not ok then
+			break
+		end
+		if type(value) == "table" and type(value.stamina) == "number" then
+			return value
+		end
+	end
+	return nil
+end
+
+local function fillStamina()
+	if STATE.infiniteStamina ~= true then
+		return
+	end
+	if staminaBags == nil then
+		staminaBags = {}
+		local ok, sprint, flight = pcall(function()
+			return require(ReplicatedStorage.Ant.Client.Sprint), require(ReplicatedStorage.Ant.Client.Flight)
+		end)
+		if ok then
+			staminaBags.sprint = staminaBag(sprint.Start)
+			staminaBags.flight = staminaBag(flight.Start)
+		end
+	end
+	local sprintBag = staminaBags.sprint
+	if sprintBag then
+		sprintBag.stamina = 1
+		sprintBag.winded = false
+	end
+	local flightBag = staminaBags.flight
+	if flightBag then
+		flightBag.stamina = 1000
 	end
 end
 
@@ -2432,6 +2476,7 @@ local function installHub()
 			STATE.speed = tonumber(option) or STATE.speed
 		end)
 		toggle(moveBox, "Infinite Jump", "infiniteJump")
+		toggle(moveBox, "Infinite Stamina", "infiniteStamina", "Sprint and wing fly do not run out")
 		toggle(moveBox, "Noclip", "noclip")
 		toggle(moveBox, "Instant Interactions", "instantPrompts", "No hold time on prompts")
 		toggle(moveBox, "Fly", "fly", "PC: WASD, Space up, Left Ctrl down")
@@ -2601,7 +2646,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.3"
+STATE.version = "1.0.4"
 
 if running() then
 	elevate()
@@ -2642,6 +2687,7 @@ end)
 task.spawn(function()
 	while running() do
 		pcall(stepSpeed)
+		pcall(fillStamina)
 		pcall(hidePausePopup)
 		task.wait(0.25)
 	end
