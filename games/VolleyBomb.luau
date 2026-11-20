@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.18.0"
+local VERSION = "1.19.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -912,11 +912,11 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 			return a.score > b.score
 		end)
 		pick = candidates[1]
-		-- A person doesn't find the exact best angle every time: pick one of
-		-- the top few, usually the best.
+		-- A person doesn't find the exact best angle every time. Usually a
+		-- good one, not always the hardest.
 		if humanizing() and #candidates > 1 then
 			local roll = math.random()
-			local index = roll < 0.55 and 1 or (roll < 0.85 and 2 or 3)
+			local index = roll < 0.38 and 1 or (roll < 0.72 and 2 or 3)
 			pick = candidates[math.min(index, #candidates)]
 		end
 	end
@@ -1376,13 +1376,16 @@ brain.turnToward = turnToward
 -- Face a direction in good time for a hit. While a walk is in progress, turn
 -- on some frames only, and never more than 18 degrees on one of them, so the
 -- run does not stall and the swing is not a snap.
-function brain.easeFace(root, hum, dir)
+function brain.easeFace(root, hum, dir, loose)
 	local flat = typeof(dir) == "Vector3" and dir * Vector3.new(1, 0, 1)
 	if not root or not hum or not flat or flat.Magnitude < 0.01 then
 		return
 	end
 	local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
-	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > 0.985 then
+	-- Watching the ball can sit a little off. Lining up a hit stays tighter,
+	-- or the swing still has a snap left to do.
+	local slop = loose and (humanizing() and 0.94 or 0.97) or 0.985
+	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > slop then
 		return
 	end
 	hum.AutoRotate = false
@@ -1390,17 +1393,18 @@ function brain.easeFace(root, hum, dir)
 	brain.facing = true
 	brain.lastFaceAt = os.clock()
 	local walking = brain.walkingUntil and os.clock() < brain.walkingUntil
-	local rate = 11
+	local rate = loose and 6 or 11
 	if walking then
 		local nowClock = os.clock()
 		if nowClock < (brain.preTurnAt or 0) then
 			return
 		end
 		local gap = math.clamp(nowClock - (brain.preTurnClock or nowClock), 1 / 60, 0.1)
-		brain.preTurnAt = nowClock + 0.08
+		brain.preTurnAt = nowClock + (loose and randomBetween(0.1, 0.2) or 0.08)
 		brain.preTurnClock = nowClock
 		local frame = math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20)
-		rate = math.min(rate * gap, math.rad(18)) / frame
+		local cap = loose and math.rad(12) or math.rad(18)
+		rate = math.min(rate * gap, cap) / frame
 	else
 		brain.preTurnClock = os.clock()
 	end
@@ -1446,9 +1450,48 @@ end
 -- turning, which would stall the run).
 -- Loops: quick tight circles around a spot, facing the way you run, so every
 -- loop is a spin. Direction and size change every second or two.
+-- With Humanize on, jog between spots around your square. A perfect circle
+-- is the thing people notice. Now and then a short curve, not an orbit.
 function brain.runLoop(hum, root, center)
+	if humanizing() then
+		local jog = brain.jog
+		if not (jog and jog.arcUntil and os.clock() < jog.arcUntil) then
+			if not jog or os.clock() >= (jog.leaveAt or 0) then
+				if math.random() < 0.16 then
+					brain.loop = nil
+					brain.jog = { arcUntil = os.clock() + randomBetween(0.45, 0.85) }
+				else
+					local angle = math.random() * math.pi * 2
+					local radius = randomBetween(1.6, 5.2)
+					brain.jog = {
+						goal = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius),
+						leaveAt = os.clock() + 4,
+					}
+				end
+				jog = brain.jog
+			end
+			if jog.goal then
+				local away = (Vector3.new(jog.goal.X, root.Position.Y, jog.goal.Z) - root.Position).Magnitude
+				if away < 1.15 then
+					jog.leaveAt = os.clock() + randomBetween(0.18, 0.55)
+					jog.goal = nil
+					hum:MoveTo(root.Position)
+					return
+				end
+				hum.AutoRotate = true
+				brain.walkingUntil = os.clock() + 0.12
+				hum:MoveTo(Vector3.new(jog.goal.X, root.Position.Y, jog.goal.Z))
+				return
+			end
+			if not jog.arcUntil then
+				hum:MoveTo(root.Position)
+				return
+			end
+		end
+	end
 	if not brain.loop or os.clock() > brain.loop.untilT then
-		brain.loop = { untilT = os.clock() + randomBetween(0.8, 2.2), dir = math.random() < 0.5 and -1 or 1, r = randomBetween(2.5, 4.5), a = math.random() * math.pi * 2 }
+		local radius = humanizing() and randomBetween(4, 7) or randomBetween(2.5, 4.5)
+		brain.loop = { untilT = os.clock() + randomBetween(0.8, 2.2), dir = math.random() < 0.5 and -1 or 1, r = radius, a = math.random() * math.pi * 2 }
 		stats.loops = (stats.loops or 0) + 1
 	end
 	local loop = brain.loop
@@ -1480,20 +1523,37 @@ function brain.sideStep(hum, root, center, ballPos, zone)
 		return zone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
 	end
 	local function beginTrip(prev)
-		local pos = (prev or 0) >= 0 and randomBetween(-6.5, -4) or randomBetween(4, 6.5)
-		brain.step = { pos = pos, untilT = os.clock() + 0.45 }
+		local pos
+		if humanizing() then
+			local sign = (prev or 0) >= 0 and -1 or 1
+			if math.random() < 0.3 then
+				sign = -sign
+			end
+			pos = sign * randomBetween(2.2, 6.2)
+		else
+			pos = (prev or 0) >= 0 and randomBetween(-6.5, -4) or randomBetween(4, 6.5)
+		end
+		brain.step = {
+			pos = pos,
+			untilT = os.clock() + 0.4,
+			hang = humanizing() and math.random() < 0.5 and randomBetween(0.16, 0.4) or 0,
+		}
 		return brain.step
 	end
 	local step = brain.step or beginTrip(0)
 	local goal = clampSpot(center + side * step.pos)
 	local away = ((goal - root.Position) * Vector3.new(1, 0, 1)).Magnitude
-	if away < 1 and os.clock() >= step.untilT then
+	if away < 1 and not step.arrivedAt then
+		step.arrivedAt = os.clock()
+		step.leaveAt = os.clock() + (step.hang or 0)
+	end
+	if away < 1 and step.leaveAt and os.clock() >= step.leaveAt and os.clock() >= step.untilT then
 		step = beginTrip(step.pos)
 		goal = clampSpot(center + side * step.pos)
 		away = ((goal - root.Position) * Vector3.new(1, 0, 1)).Magnitude
 	end
 	hum.AutoRotate = false
-	brain.easeFace(root, hum, ballPos - root.Position)
+	brain.easeFace(root, hum, ballPos - root.Position, true)
 	if away > 0.8 then
 		brain.walkingUntil = os.clock() + 0.12
 		hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
@@ -1683,11 +1743,28 @@ local function stepBrain()
 		local range = REACTION_TIMES[STATE.reaction] or REACTION_TIMES.Normal
 		-- Your own touch (set, serve toss): you already know where it's going.
 		local mine = state.HitBy == LocalPlayer or now - (tonumber(BallController._lastHit) or 0) < 1.5
-		brain.reactAt = os.clock() + ((humanizing() and not mine) and randomBetween(range[1], range[2]) or 0)
+		local delay = (humanizing() and not mine) and randomBetween(range[1], range[2]) or 0
+		if delay > 0 then
+			local land, landTime = landingSpot(state, now)
+			local zone = Ball.ZoneAt(zones, root.Position)
+			local urgent = zone and land and Ball.ZoneAt(zones, land) == zone and landTime - now < 1.15
+			-- A bit late when you've got time. A ball already on you stays sharp.
+			if not urgent and math.random() < 0.4 then
+				delay += randomBetween(0.1, 0.26)
+			end
+		end
+		brain.reactAt = os.clock() + delay
 		local angle = math.random() * math.pi * 2
-		local radius = humanizing() and randomBetween(0.2, 1.3) or 0
+		local radius = humanizing() and randomBetween(0.6, 2.4) or 0
 		brain.offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
 		brain.skipSpike = humanizing() and math.random() < 0.12
+		brain.jumpLead = humanizing() and randomBetween(0.38, 0.5) or 0.46
+		-- Most spikes are a bit early or late. A perfect one now and then.
+		if humanizing() then
+			brain.spikeWant = math.random() < 0.28 and randomBetween(0.88, 0.95) or randomBetween(0.55, 0.78)
+		else
+			brain.spikeWant = 0.9
+		end
 		-- Quick attack: the player who just hit it is out of position (in the
 		-- air, mid-dive, or far from the middle of their square), so spike it
 		-- straight back on the first touch instead of setting up, before they
@@ -1913,10 +1990,12 @@ local function stepBrain()
 		if Ball.InRange("Spike", reach, ballNow) then
 			local kind, quality = Ball.Resolve("Spike", char.Head.Position, ballNow, Ball.Jump(char, root.Position))
 			local below = ballNow.Y < char.Head.Position.Y - 0.5
-			-- Wait for a perfect contact (ball close above the head) unless the
-			-- jump is running out.
+			-- Swing once this jump's contact is "good enough". Humanize picks that
+			-- bar per rally, so it isn't a perfect spike every time. The jump
+			-- running out still forces the hit.
 			local late = os.clock() - brain.lastJump > 0.58
-			if kind == "Spike" and (quality >= 0.9 or late) and os.clock() - brain.lastTry > 0.05 then
+			local want = brain.spikeWant or 0.9
+			if kind == "Spike" and (quality >= want or late) and os.clock() - brain.lastTry > 0.05 then
 				brain.lastTry = os.clock()
 				tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
 				return
@@ -1999,14 +2078,12 @@ local function stepBrain()
 						if t - now <= 0.8 then
 							preAim("Spike", p, t, 1)
 						end
-						if t - now <= 0.46 and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
+						if t - now <= (brain.jumpLead or 0.46) and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
 							brain.lastJump = os.clock()
 							useAbility("spike")
-							-- Now and then a 360 on the way up before slapping it. The
-							-- spin goes the short way round to the shot and ends facing
-							-- it, so there's no snap turn at the hit (seen live: up to
-							-- 135 degrees in one frame after a plain 360).
-							brain.spinLeft = (STATE.spinMoves == true and humanizing() and math.random() < 0.4) and math.pi * 2 or 0
+							-- A 360 now and then, not on a timer. The spin ends
+							-- facing the shot, so the hit still goes where you aimed.
+							brain.spinLeft = (STATE.spinMoves == true and humanizing() and math.random() < 0.12) and math.pi * 2 or 0
 							brain.spinDir = math.random() < 0.5 and -1 or 1
 							if brain.spinLeft > 0 and brain.aimDir and brain.aimKey == brain.stateKey then
 								local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
@@ -2232,7 +2309,8 @@ local function stepBrain()
 				if brain.readKey ~= brain.stateKey then
 					brain.readKey = brain.stateKey
 					local angle = math.random() * math.pi * 2
-					brain.baseJitter = Vector3.new(math.cos(angle), 0, math.sin(angle)) * randomBetween(0, 1.5)
+					local spread = humanizing() and randomBetween(0.8, 3.2) or randomBetween(0, 1.5)
+					brain.baseJitter = Vector3.new(math.cos(angle), 0, math.sin(angle)) * spread
 				end
 				-- Read Players: who hits next (the player in the square the ball
 				-- is coming down in)? Wait where THEY usually aim at you.
@@ -2339,9 +2417,9 @@ local function stepBrain()
 						end
 					end
 				end
-				if math.random() < (lively and 0.55 or 0.35) and not airborne and not read and safe then
+				if math.random() < (lively and (humanizing() and 0.22 or 0.55) or 0.35) and not airborne and not read and safe then
 					brain.lastJump = os.clock()
-					if lively and math.random() < 0.35 then
+					if lively and math.random() < (humanizing() and 0.12 or 0.35) then
 						brain.spinLeft = math.pi * 2
 						brain.spinDir = math.random() < 0.5 and -1 or 1
 					end
@@ -2411,10 +2489,11 @@ function brain.faceBall(root, hum, ballPos)
 	-- Calm tracking: small differences are left alone (no robotic
 	-- locked-on look), bigger ones turn at a human pace.
 	local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
-	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > 0.985 then
+	local slop = humanizing() and 0.96 or 0.985
+	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > slop then
 		return
 	end
-	turnToward(root, flat.Unit, 5.5)
+	turnToward(root, flat.Unit, humanizing() and 4.2 or 5.5)
 end
 
 local function playEmote()
@@ -3646,7 +3725,7 @@ local function installHub()
 	toggle(aimBox, "Show Landing Spot", "showLanding", "Purple circle where the ball will land")
 	toggle(aimBox, "Show Button Presses", "showPresses", "The Bump/Spike, Dive and ability buttons at the bottom press in when auto play uses them (only on your screen)")
 	local humanBox = section(playTab, "Play Like A Human", "user-check")
-	toggle(humanBox, "Humanize", "humanize", "Human reaction time, the game's real bump/spike animations, turning before hits, not-quite-perfect positioning and aim, a short wait before serving, moving around while waiting")
+	toggle(humanBox, "Humanize", "humanize", "Mixes your timing and aim, hits some spikes early instead of perfect every time, and jogs around your spot instead of running circles")
 	choice(humanBox, "Reaction Speed", "Fast 0.07-0.16s · Normal 0.14-0.28s · Relaxed 0.24-0.42s", REACTION_OPTIONS, "reaction")
 	toggle(humanBox, "Native Follow-ups", "nativeFollowups", "After the game confirms a real Dive Set or ability hold, uses the remaining legal touch for a spike")
 	toggle(humanBox, "Pro Plays", "trickShots", "Mixes in legal moves through normal Swing: jump serves, float shots, and bank shots off the walls")
