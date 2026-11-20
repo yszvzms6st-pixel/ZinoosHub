@@ -9,6 +9,7 @@ Client automation for Roblox. One loadstring works in every supported game:
 | **Solve The Cube** (Game ID `10769259605`) | `games/SolveTheCube.luau` |
 | **Climb For Animals Eggs** (Game ID `10765490774`) | `games/ClimbAnimals.luau` |
 | **Throw Food For Animals** (Game ID `10766972131`) | `games/ThrowFoodAnimals.luau` |
+| **Ant Evolution** (Game ID `10773487349`) | `games/AntEvolution.luau` |
 
 ## Load it
 
@@ -82,6 +83,25 @@ Uses the same window as the Lift Rock hub. Pages: Home, Main and Player.
 **Player** has WalkSpeed with **Speed**, Infinite Jump, Noclip, Instant ProximityPrompt, **Fly** with **Fly Speed**, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
 
 Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Your Toggle Key opens and closes the menu; Left Control hides or restores the whole hub.
+
+## Ant Evolution
+
+Uses the same window as the Lift Rock hub. Pages: Home, Main and Player. The farm walks you onto nearby food and the game collects it.
+
+**Main**
+
+- **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map.
+- **Auto Bite** bites a bug that is already in reach. **Auto Ability** uses your equipped mutation ability on a nearby bug. Dash and Fly are left alone.
+- **Critter ESP** shows bug names and health. **Player ESP** shows other players.
+- **Auto Evolve** evolves when you have the power. **Auto Rebirth** rebirths only at the top stage.
+- **Auto Hatch** hatches the egg you pick once you can pay. Royal is the default. Colony is the other choice.
+- **Auto Equip Best Pet** equips your best pets. **Auto Claim Rewards** claims daily, playtime, quests and records. **Redeem Codes** redeems the known codes once.
+
+**Home** shows power, stage, rebirths and what the hub is doing, plus **Claim Now** and **Equip Best Now**.
+
+**Player** has WalkSpeed, Infinite Jump, Noclip, Instant ProximityPrompt, Fly, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
+
+Settings save per account to `Rayfield/Configurations/ZinoosHub/AntEvolution_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Your Toggle Key opens and closes the menu; Left Control hides or restores the whole hub.
 
 ## Climb For Animals Eggs
 
