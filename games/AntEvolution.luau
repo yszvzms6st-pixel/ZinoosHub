@@ -1091,15 +1091,65 @@ local function pickOrb(origin)
 	return nil
 end
 
+local VOID_Y = -40
+local lastSafe = nil
+
+local function rayFilter(character)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	return params
+end
+
+local function groundAt(xz, character, fromY)
+	local hit = Workspace:Raycast(Vector3.new(xz.X, fromY + 6, xz.Z), Vector3.new(0, -28, 0), rayFilter(character))
+	if hit and hit.Position.Y > VOID_Y then
+		return hit.Position
+	end
+	return nil
+end
+
+local function spawnStand()
+	local gameFolder = Workspace:FindFirstChild("Game")
+	local spawns = gameFolder and gameFolder:FindFirstChild("Spawns")
+	local pad = spawns and spawns:FindFirstChildWhichIsA("BasePart")
+	if pad then
+		return pad.Position + Vector3.new(0, 5, 0)
+	end
+	return Vector3.new(0, 16, 0)
+end
+
+local function standOn(ground, character, root)
+	local hum = character:FindFirstChildOfClass("Humanoid")
+	local lift = root.Size.Y * 0.5 + (hum and hum.HipHeight or 0) + 0.25
+	return Vector3.new(ground.X, ground.Y + lift, ground.Z)
+end
+
+local function putBack(root)
+	local spot = lastSafe or spawnStand()
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.CFrame = CFrame.new(spot)
+	STATE.status = "Back on the map"
+	STATE.detail = "The last step had no ground"
+end
+
 local function stepFarm()
 	if STATE.autoOrb ~= true then
 		STATE.detail = "Farm off"
 		return
 	end
-	local _, root = living()
-	if not root then
+	local character, root = living()
+	if not character then
 		STATE.status = "Waiting to move"
 		return
+	end
+	if root.Position.Y < VOID_Y then
+		putBack(root)
+		return
+	end
+	local under = groundAt(root.Position, character, root.Position.Y)
+	if under and math.abs(root.Position.Y - under.Y) < 12 then
+		lastSafe = root.Position
 	end
 	if not farm.ready then
 		STATE.status = "Looking for food"
@@ -1115,7 +1165,7 @@ local function stepFarm()
 	local _, foodName = orbValue(orb.tier)
 	local offset = Vector3.new(orb.pos.X - root.Position.X, 0, orb.pos.Z - root.Position.Z)
 	local distance = offset.Magnitude
-	if distance <= magnetRadius() * 0.8 then
+	if distance <= magnetRadius() * 0.8 and math.abs(orb.pos.Y - root.Position.Y) < 12 and under then
 		STATE.status = "Eating " .. foodName
 		farm.chase = nil
 		return
@@ -1128,17 +1178,29 @@ local function stepFarm()
 		STATE.status = "Skipped stuck food"
 		return
 	end
-	local goal = orb.pos
-	if distance > 6 then
-		goal = orb.pos - offset.Unit * 5
+	local aim = orb.pos
+	if distance > 6 and offset.Magnitude > 0 then
+		aim = orb.pos - offset.Unit * 5
 	end
-	goal = Vector3.new(goal.X, root.Position.Y, goal.Z)
-	local flat = Vector3.new(goal.X - root.Position.X, 0, goal.Z - root.Position.Z)
-	if flat.Magnitude > 32 then
-		goal = root.Position + flat.Unit * 32
+	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
+	if flat.Magnitude > 14 then
+		aim = root.Position + flat.Unit * 14
 	end
+	local ground = groundAt(aim, character, root.Position.Y)
+	if not ground or math.abs(ground.Y - root.Position.Y) > 10 then
+		farm.skip[id] = os.clock() + 8
+		farm.chase = nil
+		STATE.status = "Skipped food off the ground"
+		return
+	end
+	local goal = standOn(ground, character, root)
+	local look = Vector3.new(orb.pos.X, goal.Y, orb.pos.Z)
 	root.AssemblyLinearVelocity = Vector3.zero
-	root.CFrame = CFrame.lookAt(goal, Vector3.new(orb.pos.X, goal.Y, orb.pos.Z))
+	if (look - goal).Magnitude < 1 then
+		root.CFrame = CFrame.new(goal)
+	else
+		root.CFrame = CFrame.lookAt(goal, look)
+	end
 	STATE.status = string.format("Walking to %s", foodName)
 	STATE.detail = string.format("%s  %d away", foodName, math.floor(distance))
 end
