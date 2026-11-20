@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.21.0"
+local VERSION = "1.22.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1867,6 +1867,15 @@ end
 function pathAt(chain, t)
 	for _, part in ipairs(chain) do
 		if t <= part.EndTime then
+			-- Magnet stores the pull on the live ball. Looking ahead rewrites
+			-- it, so the ball jumps and the real landing is no longer the one
+			-- we walk to. Only the current moment is safe.
+			if part.Magnet then
+				local at = part.Last or part.Time
+				if type(at) == "number" and t > at + (1 / 30) then
+					return Ball.At(part, at), Ball.VelocityAt(part, at)
+				end
+			end
 			return Ball.At(part, t), Ball.VelocityAt(part, t)
 		end
 	end
@@ -1927,6 +1936,56 @@ hubCleanup(function()
 		hum.AutoRotate = true
 	end
 end)
+
+-- An enemy Magnet has no landing: it pulls the ball, then drops it. Stay under
+-- it while it is in your square, and dive if it is low and still going to be
+-- there. Looking ahead at the pull is handled in pathAt, so the live ball is
+-- not rewritten. A normal ball does not come through here.
+function brain.enemyMagnet(state, zones, myZone, root, hum, ballNow, airborne)
+	local who = state.Magnet
+	if not who or who == LocalPlayer or not root or not hum or not myZone then
+		return false
+	end
+	local ahead = ballNow
+	local head = who.Character and who.Character:FindFirstChild("Head")
+	if head and type(Ball.SweetSpot) == "function" and state.Damping and state.PullSpeed then
+		local ok, pull = pcall(Ball.SweetSpot, head.Position)
+		if ok and typeof(pull) == "Vector3" then
+			local gap = pull - ballNow
+			local dt = 0.35
+			if gap.Magnitude > 0.1 then
+				local cover = math.min(1 - math.exp(-state.Damping * dt), state.PullSpeed * dt / gap.Magnitude)
+				ahead = Ball.Contain(ballNow + gap * cover)
+			end
+		end
+	end
+	local here = Ball.ZoneAt(zones, ballNow) == myZone
+	local aheadHere = Ball.ZoneAt(zones, ahead) == myZone
+	if here or aheadHere then
+		local spot = aheadHere and ahead or ballNow
+		local flat = Vector3.new(spot.X, root.Position.Y, spot.Z)
+		moveTo(hum, root, flat, true)
+		local height = spot.Y - Ball.Ground(spot).Y
+		local dist = ((flat - root.Position) * Vector3.new(1, 0, 1)).Magnitude
+		STATE.playStatus = "Magnet ball, staying under it"
+		if height <= 8 and dist > 3.5 and aheadHere and STATE.autoDive == true and not airborne
+			and os.clock() - brain.lastDive > 1 and not BallController:Busy()
+			and dist <= brain.diveReach(0.4) + 4.5
+			and not (STATE.ringIncoming and STATE.ringIncoming(1.1))
+			and not (STATE.ringNearby and STATE.ringNearby(62)) then
+			local okLeft, leftDive = pcall(AbilityController.Remaining, AbilityController, "Dive")
+			elevate()
+			if not okLeft or tonumber(leftDive) == 0 then
+				if startNativeDive(root, hum, flat - root.Position, { expectSet = true }) then
+					STATE.playStatus = "Dived for the magnet"
+				end
+			end
+		end
+	else
+		STATE.playStatus = "Magnet ball, letting it go"
+	end
+	return true
+end
 
 local function stepBrain()
 	local ball = arenaBall()
@@ -2320,6 +2379,12 @@ local function stepBrain()
 				tryHit("Bump", char, root, state, zones, myZone, ballNow, now)
 			end
 		end
+		return
+	end
+
+	-- Spike plan is below. An enemy Magnet must be handled first: sampling
+	-- its path rewrites the live ball.
+	if brain.enemyMagnet(state, zones, myZone, root, hum, ballNow, airborne) then
 		return
 	end
 
