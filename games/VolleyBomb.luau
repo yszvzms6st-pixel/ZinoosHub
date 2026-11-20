@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.25.0"
+local VERSION = "1.26.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -145,6 +145,7 @@ local STATE = {
 	autoSpin = true,
 	-- Player
 	antiAfk = true,
+	afk = false,
 	stayActive = true,
 	autoReload = true,
 	-- Alerts
@@ -264,7 +265,7 @@ local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "showPresses", "humanize", "reaction", "nativeFollowups", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications", "fpsBoost", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
+	"antiAfk", "afk", "stayActive", "autoReload", "notifications", "fpsBoost", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -2031,6 +2032,14 @@ function brain.landingSlid(key, spot)
 end
 
 local function stepBrain()
+	if STATE.afk == true then
+		local _, root, hum = character()
+		if hum and root then
+			pcall(hum.MoveTo, hum, root.Position)
+		end
+		STATE.playStatus = "AFK"
+		return
+	end
 	local ball = arenaBall()
 	if not ball or type(ball.State) ~= "table" or type(ball.Zones) ~= "table" then
 		updateMarker(nil)
@@ -3671,17 +3680,64 @@ trackConnection(LocalPlayer.Idled:Connect(pulseAntiAfk))
 
 -- The game has its own AFK switch that keeps you out of rounds.
 local function stepStayActive()
-	if STATE.stayActive == true and LocalPlayer:GetAttribute("AFK") == true then
-		local event = remote("ToggleAFK")
-		if event then
+	local event = remote("ToggleAFK")
+	local gameAfk = LocalPlayer:GetAttribute("AFK") == true
+	-- Hub AFK pauses play and turns the game's own AFK on, so you are not
+	-- dropped into a round while you are away. Turning it off lets play resume.
+	if STATE.afk == true then
+		if not gameAfk and event and os.clock() - (STATE.afkToggleAt or 0) > 3 then
+			STATE.afkToggleAt = os.clock()
 			event:FireServer()
-			noteActivity("Turned the game's AFK mode off")
+			noteActivity("AFK on")
 		end
+		return
+	end
+	if STATE.stayActive == true and gameAfk and event and os.clock() - (STATE.afkToggleAt or 0) > 3 then
+		STATE.afkToggleAt = os.clock()
+		event:FireServer()
+		noteActivity("Turned the game's AFK mode off")
 	end
 end
 
 function STATE.rejoin()
 	game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+end
+
+function STATE.hopPro()
+	local ok, body = pcall(function()
+		return game:HttpGet("https://games.roblox.com/v1/games/" .. PRO_PLACE .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true")
+	end)
+	if not ok then
+		STATE.proStatus = "Couldn't find another Pro server"
+		notify("Pro Server", "Couldn't get the server list")
+		return false
+	end
+	local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, body)
+	if not okDecode or type(decoded) ~= "table" then
+		STATE.proStatus = "Couldn't find another Pro server"
+		notify("Pro Server", "Couldn't read the server list")
+		return false
+	end
+	local options = {}
+	for _, server in ipairs(decoded.data or {}) do
+		local playing = tonumber(server.playing) or 0
+		local max = tonumber(server.maxPlayers) or 0
+		if server.id ~= game.JobId and playing > 0 and playing < max then
+			table.insert(options, server.id)
+		end
+	end
+	if #options == 0 then
+		STATE.proStatus = "No other Pro server with room"
+		notify("Pro Server", "No other Pro server with room")
+		return false
+	end
+	local id = options[math.random(1, math.min(#options, 8))]
+	STATE.proStatus = "Hopping to another Pro server"
+	notify("Pro Server", "Hopping to another Pro server")
+	pcall(function()
+		game:GetService("TeleportService"):TeleportToPlaceInstance(PRO_PLACE, id, LocalPlayer)
+	end)
+	return true
 end
 
 function STATE.hop()
@@ -3736,7 +3792,7 @@ do
 	task.spawn(function()
 		while running() do
 			task.wait(15)
-			if STATE.autoHopEmpty == true and not arenaName() then
+			if STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() then
 				local count = #Players:GetPlayers()
 				if count < 4 then
 					emptySince = emptySince or os.clock()
@@ -3980,6 +4036,8 @@ local function installHub()
 			task.defer(pulseAntiAfk)
 		elseif key == "stayActive" and on then
 			task.defer(stepStayActive)
+		elseif key == "afk" then
+			task.defer(stepStayActive)
 		elseif key == "fpsBoost" and type(STATE.applyFpsBoost) == "function" then
 			task.defer(STATE.applyFpsBoost)
 		end
@@ -4221,6 +4279,7 @@ local function installHub()
 	local proBox = section(playTab, "Pro Servers", "crown")
 	local proInfo = info(proBox, "Status", "Checking...")
 	toggle(proBox, "Auto Join Pro Servers", "autoProServer", "1.5x coins. Goes to the lobby pad and joins once you have the wins (between rounds)")
+	button(proBox, "Hop Pro Server", "Moves you to a different Pro server", "shuffle", STATE.hopPro)
 
 	-- Shop
 	local shopBox = section(shopTab, "Abilities", "zap")
@@ -4299,8 +4358,9 @@ local function installHub()
 	toggle(cameraBox, "Potato Mode", "fpsBoost", "Flattens shadows, effects, and textures so the game is lighter. Switch it off and the normal look comes back")
 	local potatoInfo = info(cameraBox, "Graphics", STATE.potatoStatus or "Off. Normal look")
 	local afkBox = section(playerTab, "AFK", "moon")
+	toggle(afkBox, "AFK", "afk", "On: you stand there and the hub does not play. Off: auto play carries on")
 	toggle(afkBox, "Anti AFK", "antiAfk", "Stops the 20 minute idle kick")
-	toggle(afkBox, "Stay Active", "stayActive", "Turns the game's AFK button off so you keep getting put in rounds")
+	toggle(afkBox, "Stay Active", "stayActive", "Turns the game's AFK button off so you keep getting put in rounds. Does nothing while AFK above is on")
 	toggle(afkBox, "Reload Hub After Server Change", "autoReload")
 	local serverBox = section(playerTab, "Server", "server")
 	toggle(serverBox, "Leave Empty Servers", "autoHopEmpty", "If your server stays under 4 players between rounds for 2 minutes, moves you to the busiest server (at most every 10 minutes). Good for leaving it on overnight")
@@ -4345,7 +4405,7 @@ local function installHub()
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
-				antiAfk = true, stayActive = true, autoReload = true, notifications = true, fpsBoost = false, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true, avoidBlasts = true,
+				antiAfk = true, afk = false, stayActive = true, autoReload = true, notifications = true, fpsBoost = false, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true, avoidBlasts = true,
 			}
 			for key, value in pairs(defaults) do
 				STATE[key] = value
