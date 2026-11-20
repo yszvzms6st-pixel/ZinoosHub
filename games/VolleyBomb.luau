@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.19.0"
+local VERSION = "1.20.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -149,6 +149,7 @@ local STATE = {
 	autoReload = true,
 	-- Alerts
 	notifications = true,
+	fpsBoost = false,
 	showTracker = true,
 	customFov = false,
 	fov = 90,
@@ -263,7 +264,7 @@ local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "showPresses", "humanize", "reaction", "nativeFollowups", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
-	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
+	"antiAfk", "stayActive", "autoReload", "notifications", "fpsBoost", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
 
@@ -358,6 +359,249 @@ local function notify(title, message)
 		game:GetService("StarterGui"):SetCore("SendNotification", { Title = title, Text = message, Duration = 5 })
 	end)
 end
+
+-- Potato Mode. Local graphics only: shadows, effects, and textures. Nothing
+-- about movement, hits, or speed changes. Turning it off puts the look back.
+;(function()
+	local Lighting = game:GetService("Lighting")
+	local Workspace = game:GetService("Workspace")
+	local potatoVisuals = {}
+	local potatoChanged = 0
+	local potatoEpoch = 0
+	local graphicsBefore = nil
+
+	local function owned(object)
+		local current = object
+		while typeof(current) == "Instance" do
+			if current:GetAttribute("ZinoosOwned") == true then
+				return true
+			end
+			current = current.Parent
+		end
+		return false
+	end
+
+	local function potatoSet(object, property, value)
+		local saved = potatoVisuals[object]
+		if not saved then
+			saved = {}
+			potatoVisuals[object] = saved
+		end
+		local firstChange = saved[property] == nil
+		if saved[property] == nil then
+			local ok, current = pcall(function()
+				return object[property]
+			end)
+			if not ok then
+				return false
+			end
+			saved[property] = { value = current }
+		end
+		local written = pcall(function()
+			object[property] = value
+		end)
+		if written and firstChange then
+			potatoChanged += 1
+		end
+		return written
+	end
+
+	local function simplifyVisual(object)
+		if STATE.fpsBoost ~= true or owned(object) or object:IsA("Terrain") then
+			return
+		end
+		if object:IsA("MeshPart") then
+			potatoSet(object, "TextureID", "")
+			potatoSet(object, "Material", Enum.Material.SmoothPlastic)
+			potatoSet(object, "MaterialVariant", "")
+			potatoSet(object, "Reflectance", 0)
+			potatoSet(object, "CastShadow", false)
+			potatoSet(object, "RenderFidelity", Enum.RenderFidelity.Performance)
+		elseif object:IsA("BasePart") then
+			potatoSet(object, "Material", Enum.Material.SmoothPlastic)
+			potatoSet(object, "MaterialVariant", "")
+			potatoSet(object, "Reflectance", 0)
+			potatoSet(object, "CastShadow", false)
+		elseif object:IsA("Decal") or object:IsA("Texture") then
+			potatoSet(object, "Transparency", 1)
+		elseif object:IsA("SpecialMesh") then
+			potatoSet(object, "TextureId", "")
+		elseif object:IsA("SurfaceAppearance") then
+			for _, property in ipairs({ "ColorMap", "MetalnessMap", "NormalMap", "RoughnessMap" }) do
+				potatoSet(object, property, "")
+			end
+		elseif object:IsA("ParticleEmitter")
+			or object:IsA("Trail")
+			or object:IsA("Beam")
+			or object:IsA("Smoke")
+			or object:IsA("Fire")
+			or object:IsA("Sparkles")
+			or object:IsA("PointLight")
+			or object:IsA("SpotLight")
+			or object:IsA("SurfaceLight")
+			or object:IsA("PostEffect") then
+			potatoSet(object, "Enabled", false)
+		elseif object:IsA("Atmosphere") then
+			potatoSet(object, "Density", 0)
+			potatoSet(object, "Haze", 0)
+			potatoSet(object, "Glare", 0)
+		elseif object:IsA("Clouds") then
+			potatoSet(object, "Cover", 0)
+			potatoSet(object, "Density", 0)
+		end
+	end
+
+	local function restorePotatoVisuals()
+		for object, properties in pairs(potatoVisuals) do
+			if object.Parent then
+				for property, saved in pairs(properties) do
+					pcall(function()
+						object[property] = saved.value
+					end)
+				end
+			end
+		end
+		table.clear(potatoVisuals)
+		potatoChanged = 0
+	end
+
+	local function applyTerrainPotato()
+		local terrain = Workspace:FindFirstChildOfClass("Terrain")
+		if not terrain or not graphicsBefore then
+			return
+		end
+		graphicsBefore.terrain = graphicsBefore.terrain or {}
+		for property, value in pairs({
+			WaterWaveSize = 0,
+			WaterWaveSpeed = 0,
+			WaterReflectance = 0,
+			WaterTransparency = 1,
+		}) do
+			if graphicsBefore.terrain[property] == nil then
+				local ok, current = pcall(function()
+					return terrain[property]
+				end)
+				if ok then
+					graphicsBefore.terrain[property] = current
+					pcall(function()
+						terrain[property] = value
+					end)
+				end
+			else
+				pcall(function()
+					terrain[property] = value
+				end)
+			end
+		end
+		if graphicsBefore.decoration == nil and typeof(gethiddenproperty) == "function" then
+			local ok, value = pcall(gethiddenproperty, terrain, "Decoration")
+			if ok then
+				graphicsBefore.decoration = value == true
+			end
+		end
+		if typeof(sethiddenproperty) == "function" then
+			pcall(sethiddenproperty, terrain, "Decoration", false)
+		end
+	end
+
+	local function restoreTerrainPotato(saved)
+		local terrain = Workspace:FindFirstChildOfClass("Terrain")
+		if not terrain or type(saved) ~= "table" then
+			return
+		end
+		for property, value in pairs(saved.terrain or {}) do
+			pcall(function()
+				terrain[property] = value
+			end)
+		end
+		if saved.decoration ~= nil and typeof(sethiddenproperty) == "function" then
+			pcall(sethiddenproperty, terrain, "Decoration", saved.decoration)
+		end
+	end
+
+	function STATE.applyFpsBoost(silent)
+		potatoEpoch += 1
+		local epoch = potatoEpoch
+		if STATE.fpsBoost == true then
+			if not graphicsBefore then
+				graphicsBefore = {
+					shadows = Lighting.GlobalShadows,
+					environmentDiffuse = Lighting.EnvironmentDiffuseScale,
+					environmentSpecular = Lighting.EnvironmentSpecularScale,
+				}
+				pcall(function()
+					graphicsBefore.quality = settings().Rendering.QualityLevel
+					settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+				end)
+			end
+			Lighting.GlobalShadows = false
+			Lighting.EnvironmentDiffuseScale = 0
+			Lighting.EnvironmentSpecularScale = 0
+			applyTerrainPotato()
+			STATE.potatoStatus = "On. Flattening the court"
+			if silent ~= true then
+				notify("Potato Mode", "On. Shadows and effects are off")
+			end
+			task.spawn(function()
+				local objects = Workspace:GetDescendants()
+				for _, object in ipairs(Lighting:GetDescendants()) do
+					table.insert(objects, object)
+				end
+				for index, object in ipairs(objects) do
+					if not running() or STATE.fpsBoost ~= true or epoch ~= potatoEpoch then
+						return
+					end
+					simplifyVisual(object)
+					if index % 400 == 0 then
+						STATE.potatoChangedCount = potatoChanged
+						task.wait()
+					end
+				end
+				if running() and STATE.fpsBoost == true and epoch == potatoEpoch then
+					STATE.potatoChangedCount = potatoChanged
+					STATE.potatoStatus = "On. The court is flat and light"
+				end
+			end)
+		elseif graphicsBefore then
+			local saved = graphicsBefore
+			graphicsBefore = nil
+			Lighting.GlobalShadows = saved.shadows
+			Lighting.EnvironmentDiffuseScale = saved.environmentDiffuse
+			Lighting.EnvironmentSpecularScale = saved.environmentSpecular
+			pcall(function()
+				if saved.quality then
+					settings().Rendering.QualityLevel = saved.quality
+				end
+			end)
+			restoreTerrainPotato(saved)
+			restorePotatoVisuals()
+			STATE.potatoChangedCount = 0
+			STATE.potatoStatus = "Off. Normal look"
+			if silent ~= true then
+				notify("Potato Mode", "Off. The normal look is back")
+			end
+		else
+			STATE.potatoStatus = "Off. Normal look"
+		end
+	end
+
+	trackConnection(Workspace.DescendantAdded:Connect(function(object)
+		if STATE.fpsBoost == true then
+			task.defer(simplifyVisual, object)
+		end
+	end))
+	trackConnection(Lighting.DescendantAdded:Connect(function(object)
+		if STATE.fpsBoost == true then
+			task.defer(simplifyVisual, object)
+		end
+	end))
+	hubCleanup(function()
+		if graphicsBefore then
+			STATE.fpsBoost = false
+			STATE.applyFpsBoost(true)
+		end
+	end)
+end)()
 
 local function playerData()
 	local ok, data = pcall(function()
@@ -1629,6 +1873,7 @@ local function updateMarker(spot)
 		part.CanTouch = false
 		part.CastShadow = false
 		part.Material = Enum.Material.Neon
+		part:SetAttribute("ZinoosOwned", true)
 		part.Color = Color3.fromHex("8268FF")
 		part.Size = Vector3.new(0.2, 5, 5)
 		part.Parent = workspace
@@ -3531,6 +3776,8 @@ local function installHub()
 			task.defer(pulseAntiAfk)
 		elseif key == "stayActive" and on then
 			task.defer(stepStayActive)
+		elseif key == "fpsBoost" and type(STATE.applyFpsBoost) == "function" then
+			task.defer(STATE.applyFpsBoost)
 		end
 		elevate()
 		saveConfig()
@@ -3845,6 +4092,8 @@ local function installHub()
 			saveConfig()
 		end,
 	})
+	toggle(cameraBox, "Potato Mode", "fpsBoost", "Flattens shadows, effects, and textures so the game is lighter. Switch it off and the normal look comes back")
+	local potatoInfo = info(cameraBox, "Graphics", STATE.potatoStatus or "Off. Normal look")
 	local afkBox = section(playerTab, "AFK", "moon")
 	toggle(afkBox, "Anti AFK", "antiAfk", "Stops the 20 minute idle kick")
 	toggle(afkBox, "Stay Active", "stayActive", "Turns the game's AFK button off so you keep getting put in rounds")
@@ -3892,7 +4141,7 @@ local function installHub()
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
-				antiAfk = true, stayActive = true, autoReload = true, notifications = true, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true, avoidBlasts = true,
+				antiAfk = true, stayActive = true, autoReload = true, notifications = true, fpsBoost = false, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true, avoidBlasts = true,
 			}
 			for key, value in pairs(defaults) do
 				STATE[key] = value
@@ -3902,6 +4151,9 @@ local function installHub()
 				pcall(entry.element.Select, entry.element, entry.get())
 			end
 			saveConfig()
+			if type(STATE.applyFpsBoost) == "function" then
+				STATE.applyFpsBoost()
+			end
 			notify("Defaults restored", "Everything is back to normal")
 		end)
 	end)
@@ -3991,6 +4243,7 @@ local function installHub()
 		setInfo(rewardInfo, tostring(STATE.rewardStatus))
 		setInfo(shopInfo, tostring(STATE.shopStatus))
 		setInfo(proInfo, tostring(STATE.proStatus))
+		setInfo(potatoInfo, tostring(STATE.potatoStatus or "Off. Normal look"))
 		local packLines = {}
 		for _, packName in ipairs({ "Basic Ball Pack", "Basic Explosions Pack" }) do
 			local pack = PackInfo[packName]
@@ -4046,6 +4299,9 @@ if running() then
 	if not ok then
 		warn("[Zinoos hub] " .. tostring(err))
 	end
+end
+if STATE.fpsBoost == true and type(STATE.applyFpsBoost) == "function" then
+	task.defer(STATE.applyFpsBoost)
 end
 
 -- Rewards and staying active.
