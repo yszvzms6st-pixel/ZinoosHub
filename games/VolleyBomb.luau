@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.28.1"
+local VERSION = "1.28.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1000,22 +1000,79 @@ function brain.hitMods(kind, allowReady)
 	return nil
 end
 
--- Curveball reads your strafe at the spike. Side 1 is a step to your right,
--- which is the +Curve the ball module applies. Call this on the way up and
--- again on the swing, so the bend is the one that was aimed.
-function brain.curveStrafe(root, hum, side, aimDir)
+-- Curveball reads your strafe at the spike. Side 1 is a step to the aim's
+-- right, which is the +Curve the ball module applies. A Move() from the
+-- play loop gets wiped by the walk-to and the game's own controls before
+-- the server looks, so the step is held on the last render of every frame.
+function brain.curveStrafe(root, hum, side, aimDir, ballPos)
 	side = tonumber(side)
 	if not root or not hum or (side ~= 1 and side ~= -1) then
 		return
 	end
 	local flatAim = typeof(aimDir) == "Vector3" and aimDir * Vector3.new(1, 0, 1)
-	local right = (flatAim and flatAim.Magnitude > 0.05) and Vector3.new(0, 1, 0):Cross(flatAim.Unit)
+	-- aim × up is the character's right once they are facing the shot.
+	-- The old up × aim stepped the other way, so the bend came out backwards.
+	local right = (flatAim and flatAim.Magnitude > 0.05) and flatAim.Unit:Cross(Vector3.yAxis)
 		or (root.CFrame.RightVector * Vector3.new(1, 0, 1))
 	if not right or right.Magnitude < 0.05 then
 		return
 	end
-	hum:Move(right.Unit * side, false)
+	right = right.Unit
+	local move = right * side
+	if typeof(ballPos) == "Vector3" then
+		local toBall = (ballPos - root.Position) * Vector3.new(1, 0, 1)
+		if toBall.Magnitude > 1.2 then
+			-- Mostly the step, with a bit of walk toward the ball so the
+			-- jump still meets it. The right-component stays past the
+			-- game's 0.5 line, or the step is thrown away.
+			local mixed = right * side * 2 + toBall.Unit
+			if mixed.Magnitude > 0.05 and math.abs(right:Dot(mixed.Unit)) >= 0.65 then
+				move = mixed.Unit
+			end
+		end
+	end
+	hum:Move(move, false)
 end
+
+function brain.bindCurveStrafe()
+	if brain.curveBound then
+		return
+	end
+	brain.curveBound = true
+	RunService:BindToRenderStep("ZinoosCurveStep", Enum.RenderPriority.Last.Value, function()
+		if not running() or (brain.curveSide ~= 1 and brain.curveSide ~= -1) then
+			return
+		end
+		local sinceJump = os.clock() - (brain.lastJump or 0)
+		if sinceJump > 0.95 then
+			return
+		end
+		local _, root, hum = character()
+		if not root or not hum then
+			return
+		end
+		if hum.FloorMaterial ~= Enum.Material.Air and sinceJump > 0.2 then
+			return
+		end
+		local ballPos
+		local arena = arenaName()
+		local ball = arena and BallController._balls and BallController._balls[arena]
+		local state = ball and ball.State
+		if type(state) == "table" then
+			local ok, at = pcall(Ball.At, state, workspace:GetServerTimeNow())
+			if ok and typeof(at) == "Vector3" then
+				ballPos = Ball.Contain(at)
+			end
+		end
+		brain.curveStrafe(root, hum, brain.curveSide, brain.curveAim or brain.aimDir, ballPos)
+	end)
+	hubCleanup(function()
+		pcall(function()
+			RunService:UnbindFromRenderStep("ZinoosCurveStep")
+		end)
+	end)
+end
+brain.bindCurveStrafe()
 
 -- Where a hit in direction dir would end up, following wall bounces.
 local function simulate(kind, state, zones, ballPos, dir, now, quality, mods)
@@ -1317,7 +1374,8 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	end
 	if resolvedKind == "Spike" and pick and pick.curveSide then
 		brain.curveSide = pick.curveSide
-		brain.curveStrafe(root, hum, pick.curveSide, pick.dir or brain.aimDir)
+		brain.curveAim = pick.dir or brain.aimDir
+		brain.curveStrafe(root, hum, pick.curveSide, brain.curveAim)
 		brain.pendingCurve = true
 	else
 		brain.pendingCurve = nil
@@ -2249,7 +2307,12 @@ local function stepBrain()
 			end
 		end
 		brain.aimDir = nil
-		brain.curveSide = nil
+		-- Keep a curve step through your own touch (the set, then the spike).
+		-- An opponent hitting it ends the combo.
+		if state.HitBy and state.HitBy ~= LocalPlayer then
+			brain.curveSide = nil
+			brain.curveAim = nil
+		end
 		brain.preferBank = STATE.trickShots == true and math.random() < 0.3
 	end
 	local myZone = Ball.ZoneAt(zones, root.Position)
@@ -2378,6 +2441,7 @@ local function stepBrain()
 			brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1, other)
 			brain.aimSuper = other ~= nil
 			brain.curveSide = brain.aimPick and brain.aimPick.curveSide or nil
+			brain.curveAim = brain.curveSide and brain.aimDir or brain.curveAim
 		end
 		end
 		if brain.aimDir then
@@ -2471,10 +2535,10 @@ local function stepBrain()
 				tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
 				return
 			elseif not below and os.clock() - brain.lastJump < 0.9 then
-				if brain.curveSide and brain.aimKey == brain.stateKey then
+				if brain.curveSide == 1 or brain.curveSide == -1 then
 					brain.spinLeft = 0
-					brain.curveStrafe(root, hum, brain.curveSide, brain.aimDir)
-					STATE.playStatus = "Curveball combo"
+					brain.curveStrafe(root, hum, brain.curveSide, brain.curveAim or brain.aimDir, ballNow)
+					STATE.playStatus = inCombo and "Curveball follow-up" or "Curveball combo"
 				else
 					STATE.playStatus = "Waiting for the spike"
 				end
@@ -3451,7 +3515,27 @@ STATE.proPad = proPad
 -- Normal servers are place 98979169190595; Pro Servers are place 97790681249268
 -- (it has the same pad, so never try to join from there).
 local MAIN_PLACE, PRO_PLACE = 98979169190595, 97790681249268
+
+-- New lobbies have the Server Selector. Nothing automatic may teleport
+-- off one of those. The old pad press and the empty-server hop were
+-- dropping people straight back into old servers.
+function STATE.onNewServer()
+	local sharedFolder = ReplicatedStorage:FindFirstChild("Shared")
+	local controllers = sharedFolder and sharedFolder:FindFirstChild("Controllers")
+	if controllers and controllers:FindFirstChild("MatchmakingController") then
+		return true
+	end
+	local gui = LocalPlayer:FindFirstChild("PlayerGui")
+	local main = gui and gui:FindFirstChild("MainUI")
+	local frames = main and main:FindFirstChild("Frames")
+	return frames ~= nil and frames:FindFirstChild("ServerSelector") ~= nil
+end
+
 local function stepProServer()
+	if STATE.onNewServer() then
+		STATE.proStatus = "New server. Staying put."
+		return
+	end
 	if game.PlaceId == PRO_PLACE then
 		STATE.proStatus = STATE.tryhardStatus or "You're in a Pro Server (1.5x coins)"
 		return
@@ -3933,7 +4017,7 @@ function STATE.watchTryhard()
 			if not running() then
 				return
 			end
-			local looking = STATE.tryhard == true and STATE.afk ~= true and game.PlaceId == PRO_PLACE and STATE.tryhardLeaving ~= true
+			local looking = STATE.tryhard == true and STATE.afk ~= true and game.PlaceId == PRO_PLACE and STATE.tryhardLeaving ~= true and not STATE.onNewServer()
 			if not looking then
 				if STATE.tryhard ~= true then
 					STATE.tryhardStatus = nil
@@ -4057,7 +4141,7 @@ do
 	task.spawn(function()
 		while running() do
 			task.wait(15)
-			if STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() then
+			if STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() and not STATE.onNewServer() then
 				local count = #Players:GetPlayers()
 				if count < 4 then
 					emptySince = emptySince or os.clock()
@@ -4544,7 +4628,7 @@ local function installHub()
 	toggle(lobbyBox, "On-screen Tracker", "showTracker", "Small box with wins, eliminations and coins made this session")
 	local proBox = section(playTab, "Pro Servers", "crown")
 	local proInfo = info(proBox, "Status", "Checking...")
-	toggle(proBox, "Auto Join Pro Servers", "autoProServer", "1.5x coins. Goes to the lobby pad and joins once you have the wins (between rounds)")
+	toggle(proBox, "Auto Join Pro Servers", "autoProServer", "1.5x coins. Joins from an old lobby only. It will not move you once you are in a new server.")
 	toggle(proBox, "Tryhard Lobbies", "tryhard", "Plays the round, then leaves a Pro server if nobody else has 300 wins and fewer than 2 people have 200")
 	button(proBox, "Hop Pro Server", "Moves you to a different Pro server", "shuffle", STATE.hopPro)
 
