@@ -1103,8 +1103,8 @@ local function rayFilter(character)
 end
 
 local function groundAt(xz, character, fromY)
-	local hit = Workspace:Raycast(Vector3.new(xz.X, fromY + 6, xz.Z), Vector3.new(0, -28, 0), rayFilter(character))
-	if hit and hit.Position.Y > VOID_Y then
+	local hit = Workspace:Raycast(Vector3.new(xz.X, fromY + 12, xz.Z), Vector3.new(0, -50, 0), rayFilter(character))
+	if hit and hit.Position.Y > VOID_Y and hit.Normal.Y > 0.45 then
 		return hit.Position
 	end
 	return nil
@@ -1291,7 +1291,11 @@ local function stepFarm()
 		aim = root.Position + flat.Unit * 14
 	end
 	local ground = groundAt(aim, character, root.Position.Y)
-	if not ground or math.abs(ground.Y - root.Position.Y) > 10 then
+	if (not ground or math.abs(ground.Y - root.Position.Y) > 22) and flat.Magnitude > 4 then
+		local shorter = root.Position + flat.Unit * 4
+		ground = groundAt(shorter, character, root.Position.Y)
+	end
+	if not ground or ground.Y <= VOID_Y or math.abs(ground.Y - root.Position.Y) > 22 then
 		farm.skip[id] = os.clock() + 8
 		farm.chase = nil
 		STATE.status = "Skipped food off the ground"
@@ -2597,7 +2601,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.2"
+STATE.version = "1.0.3"
 
 if running() then
 	elevate()
