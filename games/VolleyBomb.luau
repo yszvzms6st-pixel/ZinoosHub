@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.27.1"
+local VERSION = "1.28.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -975,10 +975,19 @@ function brain.hitMods(kind, allowReady)
 		return { Boost = tonumber(m.SpikeBoost) or 1.3, MinSpeed = tonumber(m.MinSpikeSpeed) or 60.9 }
 	elseif name == "Curveball" and kind == "Spike" and (active or ready) then
 		local curve, minDistance = tonumber(m.Curve) or 100, tonumber(m.MinDistance) or 20
-		return { variants = {
-			{ Boost = 1, Curve = curve, MinDistance = minDistance, IgnoreWalls = m.IgnoreWalls },
-			{ Boost = 1, Curve = -curve, MinDistance = minDistance, IgnoreWalls = m.IgnoreWalls },
-		} }
+		-- The game bends the spike to the side you strafe. Each side is aimed
+		-- on its own, then the strafe picks that side. A shot is not thrown
+		-- away just because the other side would have been a bad one.
+		local function sideMod(side)
+			return {
+				Boost = 1,
+				Curve = curve * side,
+				MinDistance = minDistance,
+				IgnoreWalls = m.IgnoreWalls ~= false,
+				curveSide = side,
+			}
+		end
+		return { chooseSide = true, variants = { sideMod(1), sideMod(-1) } }
 	elseif name == "Moonball" and kind == "Bump" and active then
 		local range = m.Distance
 		local low, high = range and range.Min or 30, range and range.Max or 80
@@ -989,6 +998,23 @@ function brain.hitMods(kind, allowReady)
 		return { variants = list }
 	end
 	return nil
+end
+
+-- Curveball reads your strafe at the spike. Side 1 is a step to your right,
+-- which is the +Curve the ball module applies. Call this on the way up and
+-- again on the swing, so the bend is the one that was aimed.
+function brain.curveStrafe(root, hum, side, aimDir)
+	side = tonumber(side)
+	if not root or not hum or (side ~= 1 and side ~= -1) then
+		return
+	end
+	local flatAim = typeof(aimDir) == "Vector3" and aimDir * Vector3.new(1, 0, 1)
+	local right = (flatAim and flatAim.Magnitude > 0.05) and Vector3.new(0, 1, 0):Cross(flatAim.Unit)
+		or (root.CFrame.RightVector * Vector3.new(1, 0, 1))
+	if not right or right.Magnitude < 0.05 then
+		return
+	end
+	hum:Move(right.Unit * side, false)
 end
 
 -- Where a hit in direction dir would end up, following wall bounces.
@@ -1013,6 +1039,28 @@ local function simulate(kind, state, zones, ballPos, dir, now, quality, mods)
 end
 
 local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality, mods)
+	-- Curveball: aim the left bend and the right bend separately, then keep
+	-- the one that is harder to save. The strafe later makes the game use it.
+	if mods and mods.chooseSide == true and type(mods.variants) == "table" then
+		local bestDir, bestPick, bestScore, altDir, altPick, altScore
+		for _, variant in ipairs(mods.variants) do
+			local dir, pick = chooseDirection(kind, state, zones, myZone, ballPos, now, quality, variant)
+			if dir and pick then
+				pick.curveSide = variant.curveSide
+				local score = type(pick.score) == "number" and pick.score or ((pick.far or 0) - (pick.flight or 0) * 4)
+				if not bestScore or score > bestScore then
+					altDir, altPick, altScore = bestDir, bestPick, bestScore
+					bestDir, bestPick, bestScore = dir, pick, score
+				elseif not altScore or score > altScore then
+					altDir, altPick, altScore = dir, pick, score
+				end
+			end
+		end
+		if bestPick and altPick and humanizing() and bestScore - altScore < 6 and math.random() < 0.3 then
+			return altDir, altPick
+		end
+		return bestDir, bestPick
+	end
 	local candidates = {}
 	-- Last resort: any direction whose ball ends up outside your own square
 	-- (never hit it into your own square just because nothing looked good).
@@ -1228,7 +1276,18 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 			-- Check it again from where the ball really is now (a wall bounce
 			-- or a late jump moves the contact point; seen live: a spike aimed
 			-- that way came down in your own square). Aim again if it would.
-			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality, mods and mods.variants and mods.variants[1] or mods)
+			local checkMod = mods
+			if mods and mods.variants and pick and pick.curveSide then
+				for _, variant in ipairs(mods.variants) do
+					if variant.curveSide == pick.curveSide then
+						checkMod = variant
+						break
+					end
+				end
+			elseif mods and mods.variants then
+				checkMod = mods.variants[1]
+			end
+			local land = simulate(resolvedKind, state, zones, ballPos, dir, now, quality, checkMod)
 			local landZone = land and Ball.ZoneAt(zones, land)
 			if landZone and not landZone:GetAttribute("Occupied") then
 				landZone = Ball.BounceTarget(zones, land) or landZone
@@ -1256,11 +1315,19 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	if kind == "Bump" and inAir then
 		return false
 	end
+	if resolvedKind == "Spike" and pick and pick.curveSide then
+		brain.curveSide = pick.curveSide
+		brain.curveStrafe(root, hum, pick.curveSide, pick.dir or brain.aimDir)
+		brain.pendingCurve = true
+	else
+		brain.pendingCurve = nil
+	end
 	brain.pendingKind, brain.pendingPick, brain.pendingQuality = resolvedKind, pick, quality
 	local ok = pcall(BallController.Swing, BallController)
 	elevate()
 	if not ok then
 		brain.pendingKind = nil
+		brain.pendingCurve = nil
 	else
 		STATE.pressButton("BumpSpikeButton")
 	end
@@ -1276,13 +1343,18 @@ local function countSwingHits()
 		if not kind then
 			return
 		end
+		local curved = brain.pendingCurve == true
 		brain.pendingKind = nil
+		brain.pendingCurve = nil
 		local pick, quality = brain.pendingPick, brain.pendingQuality or 1
 		stats.hits += 1
 		if kind == "Spike" then
 			stats.spikes += 1
 			if quality >= 0.9 then
 				stats.perfect += 1
+			end
+			if curved then
+				stats.curveCombos = (stats.curveCombos or 0) + 1
 			end
 		elseif kind == "Set" then
 			stats.sets = (stats.sets or 0) + 1
@@ -2177,6 +2249,7 @@ local function stepBrain()
 			end
 		end
 		brain.aimDir = nil
+		brain.curveSide = nil
 		brain.preferBank = STATE.trickShots == true and math.random() < 0.3
 	end
 	local myZone = Ball.ZoneAt(zones, root.Position)
@@ -2290,20 +2363,22 @@ local function stepBrain()
 				local armed = type(AbilityController._active) == "table" and AbilityController._active.Superspike
 				local dir, pick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1, mods)
 				local held = STATE.superReadySince and os.clock() - STATE.superReadySince >= 12
-				if dir and pick and (armed or held or pick.cantDive or (pick.far or 0) >= 12) then
-					STATE.superOkUntil = os.clock() + 1.5
-					brain.aimDir, brain.aimPick, brain.aimSuper = dir, pick, true
-				else
-					mods = nil
-				end
+			if dir and pick and (armed or held or pick.cantDive or (pick.far or 0) >= 12) then
+				STATE.superOkUntil = os.clock() + 1.5
+				brain.aimDir, brain.aimPick, brain.aimSuper = dir, pick, true
+				brain.curveSide = nil
+			else
+				mods = nil
 			end
-			if not mods then
-				-- Other abilities (Curveball, Adrenaline, Moonball): aim with
-				-- their real effect when it will be on this hit.
-				local other = equippedAbility() ~= "Superspike" and brain.hitMods(kind, true) or nil
-				brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1, other)
-				brain.aimSuper = other ~= nil
-			end
+		end
+		if not mods then
+			-- Other abilities (Curveball, Adrenaline, Moonball): aim with
+			-- their real effect when it will be on this hit.
+			local other = equippedAbility() ~= "Superspike" and brain.hitMods(kind, true) or nil
+			brain.aimDir, brain.aimPick = chooseDirection(kind, state, zones, myZone, at, t, quality or 1, other)
+			brain.aimSuper = other ~= nil
+			brain.curveSide = brain.aimPick and brain.aimPick.curveSide or nil
+		end
 		end
 		if brain.aimDir then
 			brain.easeFace(root, hum, brain.aimDir)
@@ -2396,7 +2471,13 @@ local function stepBrain()
 				tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
 				return
 			elseif not below and os.clock() - brain.lastJump < 0.9 then
-				STATE.playStatus = "Waiting for the spike"
+				if brain.curveSide and brain.aimKey == brain.stateKey and os.clock() - brain.lastJump > 0.22 then
+					brain.spinLeft = 0
+					brain.curveStrafe(root, hum, brain.curveSide, brain.aimDir)
+					STATE.playStatus = "Curveball combo"
+				else
+					STATE.playStatus = "Waiting for the spike"
+				end
 				-- Keep turning toward the shot while in the air (after any spin).
 				if STATE.playerMove == true and brain.aimDir and brain.aimKey == brain.stateKey and not (brain.spinLeft and brain.spinLeft > 0) then
 					hum.AutoRotate = false
@@ -2499,20 +2580,27 @@ local function stepBrain()
 						if t - now <= 0.8 then
 							preAim("Spike", p, t, 1)
 						end
+						if brain.curveSide then
+							STATE.playStatus = inCombo and "Curveball follow-up" or "Curveball combo"
+						end
 						if under and sameSpot and t - now <= (brain.jumpLead or 0.46) and os.clock() - brain.lastJump > 0.8 and not (STATE.ringIncoming and STATE.ringIncoming(1.1)) then
 							brain.lastJump = os.clock()
 							useAbility("spike")
-							-- A 360 now and then, not on a timer. The spin ends
-							-- facing the shot, so the hit still goes where you aimed.
-							brain.spinLeft = (STATE.spinMoves == true and humanizing() and math.random() < 0.12) and math.pi * 2 or 0
-							brain.spinDir = math.random() < 0.5 and -1 or 1
-							if brain.spinLeft > 0 and brain.aimDir and brain.aimKey == brain.stateKey then
-								local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
-								local aimFlat = brain.aimDir * Vector3.new(1, 0, 1)
-								if look.Magnitude > 0.01 and aimFlat.Magnitude > 0.01 then
-									local diff = (yawOf(aimFlat.Unit) - yawOf(look.Unit) + math.pi) % (2 * math.pi) - math.pi
-									brain.spinDir = diff >= 0 and 1 or -1
-									brain.spinLeft = math.pi * 2 + math.abs(diff)
+							-- A 360 now and then, not on a curve. The strafe is
+							-- what picks the bend, and a spin would wipe it.
+							if brain.curveSide then
+								brain.spinLeft = 0
+							else
+								brain.spinLeft = (STATE.spinMoves == true and humanizing() and math.random() < 0.12) and math.pi * 2 or 0
+								brain.spinDir = math.random() < 0.5 and -1 or 1
+								if brain.spinLeft > 0 and brain.aimDir and brain.aimKey == brain.stateKey then
+									local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+									local aimFlat = brain.aimDir * Vector3.new(1, 0, 1)
+									if look.Magnitude > 0.01 and aimFlat.Magnitude > 0.01 then
+										local diff = (yawOf(aimFlat.Unit) - yawOf(look.Unit) + math.pi) % (2 * math.pi) - math.pi
+										brain.spinDir = diff >= 0 and 1 or -1
+										brain.spinLeft = math.pi * 2 + math.abs(diff)
+									end
 								end
 							end
 							hum:ChangeState(Enum.HumanoidStateType.Jumping)
