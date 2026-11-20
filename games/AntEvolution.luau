@@ -929,11 +929,12 @@ local farm = {
 	esp = {},
 	codesDone = false,
 	communityDone = false,
-	recordIndex = 1,
 	nextEvolve = 0,
 	nextHatch = 0,
 	nextEquip = 0,
 	nextClaim = 0,
+	claiming = false,
+	nextCommunity = 0,
 	nextBite = 0,
 	nextAbility = 0,
 	nextEsp = 0,
@@ -1488,81 +1489,179 @@ local function stepEquip()
 end
 
 local CODES = { "ANTS", "EVOLVE", "QUEEN", "RELEASE" }
-local RECORD_KEYS = {
-	"ants", "boss", "bugs", "eggs", "evolve", "feast", "food",
-	"grow", "mutate", "pets", "play", "rebirth", "roll", "sugar",
-}
 
-local function claimedSet(value)
-	local decoded = readJson(value)
+local RewardTheme
+local function rewardNow()
+	if RewardTheme == nil then
+		local ok, theme = pcall(function()
+			return require(ReplicatedStorage.Ant.UI.Theme)
+		end)
+		RewardTheme = ok and theme or false
+	end
+	if RewardTheme and RewardTheme.Now then
+		return RewardTheme.Now()
+	end
+	return Workspace:GetServerTimeNow()
+end
+
+local function callClaim(name, ...)
+	local args = table.pack(...)
+	local function once()
+		local ok, result = pcall(function()
+			return Net.Get(name):InvokeServer(table.unpack(args, 1, args.n))
+		end)
+		if not ok or type(result) ~= "table" then
+			return { ok = false, msg = ok and "" or tostring(result) }
+		end
+		return result
+	end
+	local result = once()
+	if result.msg == "Slow down!" and running() then
+		task.wait(1.2)
+		result = once()
+	end
+	return result
+end
+
+local function claimedPlay()
 	local claimed = {}
-	if type(decoded) ~= "table" then
+	local list = stateJson("PlaytimeClaimed")
+	if type(list) ~= "table" then
 		return claimed
 	end
-	for _, entry in pairs(decoded) do
-		claimed[tonumber(entry) or entry] = true
+	for _, entry in pairs(list) do
+		local index = tonumber(entry)
+		if index then
+			claimed[index] = true
+		end
 	end
 	return claimed
 end
 
-function STATE.claimNow()
-	if STATE.autoCodes == true and not farm.codesDone then
-		farm.codesDone = true
-		for _, code in ipairs(CODES) do
-			invoke("Redeem", code)
+local function takeRewards()
+	local count = 0
+	local gap = 0.9
+	local function took(result, text)
+		task.wait(gap)
+		if result.ok then
+			count += 1
+			noteActivity(text)
 		end
 	end
-	if STATE.autoClaim ~= true then
-		return false
-	end
-	invoke("ClaimDaily")
-	local played = 0
-	local started = tonumber(LocalPlayer:GetAttribute("PlayStart"))
-	if started then
-		played = (os.time() - started) / 60
-	end
-	local already = claimedSet(LocalPlayer:GetAttribute("PlaytimeClaimed"))
-	for index, reward in ipairs(Config.Playtime) do
-		if type(reward) == "table" and played >= (tonumber(reward.minutes) or 9999) and not already[index] then
-			invoke("ClaimPlaytime", index)
-			break
+	if STATE.autoClaim == true then
+		local okDaily, dailyNext = pcall(function()
+			return GameState.Get("DailyNext")
+		end)
+		dailyNext = okDaily and tonumber(dailyNext) or nil
+		if dailyNext and dailyNext <= rewardNow() then
+			took(callClaim("ClaimDaily"), "Claimed the daily")
 		end
-	end
-	local quests = stateJson("Quests")
-	if type(quests) == "table" and type(quests.q) == "table" then
-		local finished = 0
-		for index, row in ipairs(quests.q) do
-			if type(row) == "table" then
-				if row[5] == 1 then
-					finished += 1
-				elseif (tonumber(row[4]) or 0) >= (tonumber(row[3]) or 1) then
-					invoke("ClaimQuest", index)
+		local started = stateNumber("PlayStart")
+		local played = started > 0 and math.max(0, rewardNow() - started) or 0
+		local claimed = claimedPlay()
+		for index, reward in ipairs(Config.Playtime) do
+			if not running() then
+				return count
+			end
+			if type(reward) == "table" and not claimed[index] then
+				local need = (tonumber(reward.minutes) or 9999) * 60
+				if played < need then
+					break
+				end
+				local result = callClaim("ClaimPlaytime", index)
+				if result.ok then
+					claimed[index] = true
+				end
+				took(result, "Claimed a playtime gift")
+			end
+		end
+		local quests = stateJson("Quests")
+		if type(quests) == "table" and type(quests.q) == "table" then
+			local finished = 0
+			for index, row in ipairs(quests.q) do
+				if not running() then
+					return count
+				end
+				if type(row) == "table" then
+					if row[5] == 1 then
+						finished += 1
+					elseif (tonumber(row[4]) or 0) >= (tonumber(row[3]) or 1) then
+						local result = callClaim("ClaimQuest", index)
+						took(result, "Claimed a quest")
+						if result.ok then
+							finished += 1
+						end
+					end
+				end
+			end
+			if finished >= #quests.q and quests.b ~= 1 then
+				took(callClaim("ClaimQuest", "bonus"), "Claimed the quest bonus")
+			end
+		end
+		local records = stateJson("Records")
+		local list = type(Config.Records) == "table" and Config.Records.List or nil
+		if type(records) == "table" and type(list) == "table" then
+			for index, spec in ipairs(list) do
+				if not running() then
+					return count
+				end
+				local row = records[index]
+				if type(spec) == "table" and type(spec.goals) == "table" and type(spec.key) == "string" and type(row) == "table" then
+					local tier = math.floor(tonumber(row[1]) or 0)
+					local goal = spec.goals[tier + 1]
+					if goal and (tonumber(row[2]) or 0) >= goal then
+						took(callClaim("ClaimRecord", spec.key), "Claimed a record")
+					end
 				end
 			end
 		end
-		if finished >= #quests.q and quests.b ~= 1 then
-			invoke("ClaimQuest", "bonus")
+		if GameState.Get("CommunityClaimed") ~= true and os.clock() >= farm.nextCommunity then
+			farm.nextCommunity = os.clock() + 120
+			took(callClaim("CommunityClaim"), "Claimed the group reward")
 		end
 	end
-	if LocalPlayer:GetAttribute("CommunityClaimed") ~= true and not farm.communityDone then
-		farm.communityDone = true
-		invoke("CommunityClaim")
+	if STATE.autoCodes == true and not farm.codesDone then
+		farm.codesDone = true
+		for _, code in ipairs(CODES) do
+			if not running() then
+				return count
+			end
+			callClaim("Redeem", code)
+			task.wait(gap)
+		end
 	end
-	local key = RECORD_KEYS[farm.recordIndex]
-	farm.recordIndex = farm.recordIndex % #RECORD_KEYS + 1
-	if key then
-		invoke("ClaimRecord", key)
+	if count > 0 then
+		STATE.detail = "Claimed " .. count
 	end
-	noteActivity("Claimed what was ready")
-	return true
+	return count
+end
+
+function STATE.claimNow()
+	if farm.claiming then
+		return 0
+	end
+	farm.claiming = true
+	local count = 0
+	local ok, err = xpcall(function()
+		count = takeRewards()
+	end, debug.traceback)
+	farm.claiming = false
+	if not ok then
+		warn("[Zinoos hub] " .. tostring(err))
+		return 0
+	end
+	return count
 end
 
 local function stepClaims()
-	if os.clock() < farm.nextClaim then
+	if farm.claiming or os.clock() < farm.nextClaim then
 		return
 	end
-	farm.nextClaim = os.clock() + 25
-	STATE.claimNow()
+	if STATE.autoClaim ~= true and not (STATE.autoCodes == true and not farm.codesDone) then
+		return
+	end
+	farm.nextClaim = os.clock() + 20
+	task.spawn(STATE.claimNow)
 end
 
 local function espBoard(model, text, color)
@@ -2273,8 +2372,14 @@ local function installHub()
 		notify("system", on and "Farm started" or "Farm stopped", on and "Walking to nearby food" or "Auto Orb Farm is off")
 	end)
 	button(homeTab, "Claim Now", "Claims daily, playtime, quests and records", "gift", function()
-		STATE.claimNow()
-		notify("system", "Claimed what was ready", "")
+		task.spawn(function()
+			local count = STATE.claimNow()
+			if count > 0 then
+				notify("system", "Claimed " .. count, "")
+			else
+				notify("system", "Nothing ready", "")
+			end
+		end)
 	end)
 	button(homeTab, "Equip Best Now", "Equips your best pets", "paw-print", function()
 		STATE.equipBestNow()
@@ -2492,7 +2597,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.1"
+STATE.version = "1.0.2"
 
 if running() then
 	elevate()
