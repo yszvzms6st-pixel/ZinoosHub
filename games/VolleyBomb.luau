@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.17.3"
+local VERSION = "1.18.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -928,9 +928,21 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 end
 
 local function face(root, dir)
-	if dir then
-		root.CFrame = CFrame.lookAt(root.Position, root.Position + dir)
+	if not dir then
+		return
 	end
+	local flat = dir * Vector3.new(1, 0, 1)
+	if flat.Magnitude < 0.01 then
+		return
+	end
+	-- The hit reads your facing on this exact frame, so this has to land on
+	-- the aim. The approach already turned most of the way; a few degrees
+	-- left is not worth a visible snap.
+	local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > 0.996 then
+		return
+	end
+	root.CFrame = CFrame.lookAt(root.Position, root.Position + flat.Unit)
 end
 
 local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
@@ -1337,17 +1349,17 @@ end
 local function yawOf(vector)
 	return math.atan2(-vector.X, -vector.Z)
 end
-local function turnToward(root, dir, rate)
+local function turnToward(root, dir, rate, force)
 	local flat = dir * Vector3.new(1, 0, 1)
 	if flat.Magnitude < 0.01 then
 		return true
 	end
-	-- Never turn while running somewhere: setting the character's rotation
-	-- stops the game's walking for that frame (measured live: running for
-	-- the ball while turning, you moved only 24% of the time instead of 98%).
-	-- You keep facing the same way while you run (like shift lock), and turn
-	-- once you've stopped or at the moment you hit.
-	if brain.walkingUntil and os.clock() < brain.walkingUntil then
+	-- Setting the character's rotation stops the game's walking for that
+	-- frame (measured live: turning on every frame of a run, you moved 24%
+	-- of the time instead of 98%). A normal turn waits until the run has
+	-- paused. A forced turn is the approach into a hit: the caller spaces
+	-- those out so the run keeps its speed.
+	if not force and brain.walkingUntil and os.clock() < brain.walkingUntil then
 		return false
 	end
 	local current = yawOf(root.CFrame.LookVector)
@@ -1360,6 +1372,40 @@ local function turnToward(root, dir, rate)
 	return done
 end
 brain.turnToward = turnToward
+
+-- Face a direction in good time for a hit. While a walk is in progress, turn
+-- on some frames only, and never more than 18 degrees on one of them, so the
+-- run does not stall and the swing is not a snap.
+function brain.easeFace(root, hum, dir)
+	local flat = typeof(dir) == "Vector3" and dir * Vector3.new(1, 0, 1)
+	if not root or not hum or not flat or flat.Magnitude < 0.01 then
+		return
+	end
+	local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+	if look.Magnitude > 0.01 and look.Unit:Dot(flat.Unit) > 0.985 then
+		return
+	end
+	hum.AutoRotate = false
+	brain.turning = os.clock()
+	brain.facing = true
+	brain.lastFaceAt = os.clock()
+	local walking = brain.walkingUntil and os.clock() < brain.walkingUntil
+	local rate = 11
+	if walking then
+		local nowClock = os.clock()
+		if nowClock < (brain.preTurnAt or 0) then
+			return
+		end
+		local gap = math.clamp(nowClock - (brain.preTurnClock or nowClock), 1 / 60, 0.1)
+		brain.preTurnAt = nowClock + 0.08
+		brain.preTurnClock = nowClock
+		local frame = math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20)
+		rate = math.min(rate * gap, math.rad(18)) / frame
+	else
+		brain.preTurnClock = os.clock()
+	end
+	turnToward(root, flat.Unit, rate, true)
+end
 
 -- Walk like someone on a keyboard: with the camera behind you (shift lock),
 -- WASD only gives 8 directions relative to where you face, so the path is
@@ -1412,38 +1458,47 @@ function brain.runLoop(hum, root, center)
 	brain.walkingUntil = os.clock() + 0.12
 	hum:MoveTo(Vector3.new(center.X + math.cos(ahead) * loop.r, root.Position.Y, center.Z + math.sin(ahead) * loop.r))
 end
--- Side steps: shuffle across your spot like a player in a ready stance. Each
--- step goes to a new point on the line (not always a full flip to the other
--- side), then you settle there facing the play until the next one. The old
--- version flipped every quarter second, which measured live as ~41 stop-starts
--- a minute and kept whatever facing the last loop left you with.
-function brain.sideStep(hum, root, center, ballPos)
+-- Side steps: a ready shuffle while a ball could come your way. Each trip
+-- crosses the spot (several studs, so it is not a quarter-second flip) and
+-- the return starts when you arrive, instead of planting to stare at the
+-- ball. You keep facing the play while you go.
+function brain.sideStep(hum, root, center, ballPos, zone)
 	local toBall = (ballPos - center) * Vector3.new(1, 0, 1)
 	local side = toBall.Magnitude > 0.5 and Vector3.new(-toBall.Z, 0, toBall.X).Unit or Vector3.new(1, 0, 0)
-	local step = brain.step
-	if not step or os.clock() > step.untilT then
-		local prev = step and step.pos or 0
-		local pos = randomBetween(-3.5, 3.5)
-		if math.abs(pos - prev) < 1.5 then
-			pos = prev + (pos >= prev and 1.5 or -1.5)
-			pos = math.clamp(pos, -3.5, 3.5)
+	if brain.stepSide and os.clock() < (brain.stepSideUntil or 0) then
+		side = brain.stepSide
+	else
+		brain.stepSide = side
+		brain.stepSideUntil = os.clock() + 0.7
+	end
+	local function clampSpot(goal)
+		if not zone then
+			return goal
 		end
-		brain.step = { untilT = os.clock() + randomBetween(0.35, 0.65), pos = pos }
-		step = brain.step
+		local rel = zone.CFrame:PointToObjectSpace(goal)
+		local limitX, limitZ = zone.Size.X / 2 - 2, zone.Size.Z / 2 - 2
+		return zone.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -limitX, limitX), rel.Y, math.clamp(rel.Z, -limitZ, limitZ)))
+	end
+	local function beginTrip(prev)
+		local pos = (prev or 0) >= 0 and randomBetween(-6.5, -4) or randomBetween(4, 6.5)
+		brain.step = { pos = pos, untilT = os.clock() + 0.45 }
+		return brain.step
+	end
+	local step = brain.step or beginTrip(0)
+	local goal = clampSpot(center + side * step.pos)
+	local away = ((goal - root.Position) * Vector3.new(1, 0, 1)).Magnitude
+	if away < 1 and os.clock() >= step.untilT then
+		step = beginTrip(step.pos)
+		goal = clampSpot(center + side * step.pos)
+		away = ((goal - root.Position) * Vector3.new(1, 0, 1)).Magnitude
 	end
 	hum.AutoRotate = false
-	local goal = center + side * step.pos
-	local away = ((goal - root.Position) * Vector3.new(1, 0, 1)).Magnitude
-	if away > 0.6 then
+	brain.easeFace(root, hum, ballPos - root.Position)
+	if away > 0.8 then
 		brain.walkingUntil = os.clock() + 0.12
 		hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
 	else
-		-- Settled: stand and square up to the play (turning only while still,
-		-- because turning stalls a walk).
 		hum:MoveTo(root.Position)
-		if brain.faceBall then
-			brain.faceBall(root, hum, ballPos)
-		end
 	end
 end
 
@@ -1777,16 +1832,8 @@ local function stepBrain()
 				brain.aimSuper = other ~= nil
 			end
 		end
-		local dir = brain.aimDir
-		if dir then
-			hum.AutoRotate = false
-			brain.turning = os.clock()
-			if STATE.playerMove == true then
-				turnToward(root, dir, 11)
-			elseif not (brain.walkingUntil and os.clock() < brain.walkingUntil) then
-				local goal = CFrame.lookAt(root.Position, root.Position + dir)
-				root.CFrame = root.CFrame:Lerp(goal, 0.22)
-			end
+		if brain.aimDir then
+			brain.easeFace(root, hum, brain.aimDir)
 		end
 	end
 	if brain.turning and os.clock() - brain.turning > 0.6 then
@@ -1842,8 +1889,8 @@ local function stepBrain()
 	end
 
 	-- Style: a 360 spin on the way up (spike jumps and some hops). Only in the
-	-- air (turning on the ground stops your run) and never mid-swing; the hit
-	-- itself always snaps to the aim, so the spin can't change where it goes.
+	-- air (turning on the ground stops your run) and never mid-swing. The hit
+	-- still finishes on the aim, so the spin can't send the ball off line.
 	if brain.spinLeft and brain.spinLeft > 0 then
 		if airborne and not BallController:Busy() then
 			local step = math.min(brain.spinLeft, 27 * math.clamp(brain.dt or (1 / 60), 1 / 240, 1 / 20))
@@ -1879,7 +1926,7 @@ local function stepBrain()
 				if STATE.playerMove == true and brain.aimDir and brain.aimKey == brain.stateKey and not (brain.spinLeft and brain.spinLeft > 0) then
 					hum.AutoRotate = false
 					brain.turning = os.clock()
-					turnToward(root, brain.aimDir, 11)
+					turnToward(root, brain.aimDir, 11, true)
 				end
 				return
 			end
@@ -2031,13 +2078,6 @@ local function stepBrain()
 		local tight = dist / math.max(hum.WalkSpeed, 1) > (targetTime - now) * 0.75
 		moveTo(hum, root, flat, tight)
 		STATE.playStatus = "Going for the ball"
-		if STATE.playerMove == true then
-			-- Keep eyes on the ball while you move (shift-lock style).
-			if brain.faceBall then brain.faceBall(root, hum, ballNow) end
-		end
-		if targetTime - now <= 0.8 then
-			preAim("Bump", target, targetTime, 1)
-		end
 		STATE.incomingEta = targetTime - now
 		useAbility("incoming")
 		local land, landTime = landingSpot(state, now)
@@ -2083,6 +2123,15 @@ local function stepBrain()
 		-- Best case: walk now, then dive in the last half second.
 		local bestReach = hum.WalkSpeed * math.max(left - 0.5, 0) + brain.diveReach(math.min(math.max(left, 0), 0.5)) + 4.5
 		local hopeless = lands and walkTooSlow and bestReach < landDist and left < 1.2
+		-- Turn on the way in. A dive faces the catch; a bump or spike faces the
+		-- shot. Either way the hit itself only has to correct what's left.
+		if lands and walkTooSlow and catchSpot then
+			brain.easeFace(root, hum, catchSpot - root.Position)
+		elseif targetTime - now <= 0.8 then
+			preAim("Bump", target, targetTime, 1)
+		elseif STATE.playerMove == true and brain.faceBall then
+			brain.faceBall(root, hum, ballNow)
+		end
 		-- Chase trace for the loss recorder: what the dive check saw, so a
 		-- "ran for it but never dived" death can be explained. Reading only.
 		if brain.traceKey ~= brain.stateKey then
@@ -2256,7 +2305,7 @@ local function stepBrain()
 					-- A ball could come your way: keep your feet moving with
 					-- quick side steps across your spot (still facing the play)
 					-- instead of standing still.
-					brain.sideStep(hum, root, brain.idleSpot, ballNow)
+					brain.sideStep(hum, root, brain.idleSpot, ballNow, myZone)
 				end
 			end
 			if not runAbout and STATE.autoMove == true and (brain.idleSpot - root.Position) * Vector3.new(1, 0, 1) ~= Vector3.zero
