@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.17.2"
+local VERSION = "1.17.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -2276,6 +2276,20 @@ local function stepBrain()
 				local land, landTime = landingSpot(state, now)
 				local portalLive = STATE.portalAt and os.clock() - STATE.portalAt < 15
 				local safe = land and landTime - now > 1.4 and Ball.ZoneAt(zones, land) ~= myZone and not portalLive
+				-- Players hit the ball before it lands, so also wait until nobody
+				-- can reach it for a second: it has to stay above spike height
+				-- (~13 studs) for longer than a hop lasts. (Seen live: a hop, then
+				-- a fast hit from the next square came in 0.6s, landing 2 studs
+				-- away while you were still in the air.)
+				if safe then
+					for t = now, math.min(pathEnd(fullPath), now + 1.1), 0.05 do
+						local p = Ball.Contain((pathAt(fullPath, t)))
+						if p.Y - Ball.Ground(p).Y <= 13 then
+							safe = false
+							break
+						end
+					end
+				end
 				if math.random() < (lively and 0.55 or 0.35) and not airborne and not read and safe then
 					brain.lastJump = os.clock()
 					if lively and math.random() < 0.35 then
