@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.28.0"
+local VERSION = "1.28.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -2471,7 +2471,7 @@ local function stepBrain()
 				tryHit("Spike", char, root, state, zones, myZone, ballNow, now)
 				return
 			elseif not below and os.clock() - brain.lastJump < 0.9 then
-				if brain.curveSide and brain.aimKey == brain.stateKey and os.clock() - brain.lastJump > 0.22 then
+				if brain.curveSide and brain.aimKey == brain.stateKey then
 					brain.spinLeft = 0
 					brain.curveStrafe(root, hum, brain.curveSide, brain.aimDir)
 					STATE.playStatus = "Curveball combo"
@@ -2604,6 +2604,9 @@ local function stepBrain()
 								end
 							end
 							hum:ChangeState(Enum.HumanoidStateType.Jumping)
+							if brain.curveSide then
+								brain.curveStrafe(root, hum, brain.curveSide, brain.aimDir)
+							end
 						end
 						return
 					end
