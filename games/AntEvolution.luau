@@ -2414,19 +2414,29 @@ local function installHub()
 	end
 
 	local function toggle(parent, title, key, desc)
-		local element = parent:Toggle({
-			Title = title,
-			Desc = desc,
-			Value = STATE[key] == true,
-			Callback = function(value)
-				value = value == true
-				if (STATE[key] == true) == value then
-					return
-				end
-				elevate()
-				onToggle(key, value)
-			end,
-		})
+		if type(parent) ~= "table" or type(parent.Toggle) ~= "function" then
+			return nil
+		end
+		elevate()
+		local ok, element = pcall(function()
+			return parent:Toggle({
+				Title = title,
+				Desc = desc,
+				Value = STATE[key] == true,
+				Callback = function(value)
+					value = value == true
+					if (STATE[key] == true) == value then
+						return
+					end
+					elevate()
+					onToggle(key, value)
+				end,
+			})
+		end)
+		if not ok or type(element) ~= "table" then
+			warn("[Zinoos hub] " .. title .. " failed: " .. tostring(element))
+			return nil
+		end
 		local control = STATE.toggleControls[key]
 		if type(control) ~= "table" then
 			control = {}
@@ -2460,21 +2470,31 @@ local function installHub()
 
 	local dropdowns = {}
 	local function choice(parent, title, desc, options, getValue, setValue)
-		local element = parent:Dropdown({
-			Title = title,
-			Desc = desc,
-			Values = options,
-			Value = getValue(),
-			Callback = function(value)
-				value = optionName(value)
-				if type(value) ~= "string" or value == getValue() then
-					return
-				end
-				elevate()
-				setValue(value)
-				saveConfig()
-			end,
-		})
+		if type(parent) ~= "table" or type(parent.Dropdown) ~= "function" then
+			return nil
+		end
+		elevate()
+		local ok, element = pcall(function()
+			return parent:Dropdown({
+				Title = title,
+				Desc = desc,
+				Values = options,
+				Value = getValue(),
+				Callback = function(value)
+					value = optionName(value)
+					if type(value) ~= "string" or value == getValue() then
+						return
+					end
+					elevate()
+					setValue(value)
+					saveConfig()
+				end,
+			})
+		end)
+		if not ok or type(element) ~= "table" then
+			warn("[Zinoos hub] " .. title .. " failed: " .. tostring(element))
+			return nil
+		end
 		table.insert(dropdowns, { element = element, get = getValue })
 		return element
 	end
@@ -2521,7 +2541,17 @@ local function installHub()
 
 	local liveText = {}
 	local function info(parent, title, text)
-		local paragraph = parent:Paragraph({ Title = title, Desc = text })
+		if type(parent) ~= "table" or type(parent.Paragraph) ~= "function" then
+			return nil
+		end
+		elevate()
+		local ok, paragraph = pcall(function()
+			return parent:Paragraph({ Title = title, Desc = text })
+		end)
+		if not ok or type(paragraph) ~= "table" then
+			warn("[Zinoos hub] " .. title .. " failed: " .. tostring(paragraph))
+			return nil
+		end
 		liveText[paragraph] = text
 		if type(parent) == "table" and parent.__type == "Section" then
 			paragraphSection[paragraph] = parent
@@ -2538,22 +2568,43 @@ local function installHub()
 	end
 
 	local function button(parent, title, desc, icon, callback)
-		return parent:Button({
-			Title = title,
-			Desc = desc,
-			Icon = icon,
-			Callback = function()
-				elevate()
-				local ok, err = pcall(callback)
-				if not ok then
-					notify("system", title .. " failed", tostring(err))
-				end
-			end,
-		})
+		if type(parent) ~= "table" or type(parent.Button) ~= "function" then
+			return nil
+		end
+		elevate()
+		local ok, element = pcall(function()
+			return parent:Button({
+				Title = title,
+				Desc = desc,
+				Icon = icon,
+				Callback = function()
+					elevate()
+					local ran, err = pcall(callback)
+					if not ran then
+						notify("system", title .. " failed", tostring(err))
+					end
+				end,
+			})
+		end)
+		if not ok or type(element) ~= "table" then
+			warn("[Zinoos hub] " .. title .. " failed: " .. tostring(element))
+			return nil
+		end
+		return element
 	end
 
 	local function section(tab, title, icon)
-		local box = tab:Section({ Title = title, Icon = icon, Box = true, Opened = true })
+		if type(tab) ~= "table" or type(tab.Section) ~= "function" then
+			return nil
+		end
+		elevate()
+		local ok, box = pcall(function()
+			return tab:Section({ Title = title, Icon = icon, Box = true, Opened = true })
+		end)
+		if not ok or type(box) ~= "table" then
+			warn("[Zinoos hub] " .. title .. " failed: " .. tostring(box))
+			return nil
+		end
 		table.insert(sections, box)
 		return box
 	end
@@ -2631,12 +2682,12 @@ local function installHub()
 		end, function(option)
 			STATE.egg = option
 		end)
-		button(hatchBox, "Golden Egg", "Opens the Robux prompt. It does not buy on its own", "gem", function()
+		button(hatchBox, "Golden Egg", "Opens the Robux prompt. It does not buy on its own", "egg", function()
 			STATE.buyGoldenEgg()
 		end)
 		toggle(hatchBox, "Auto Equip Best Pet", "autoEquip", "Equips your best pets")
 
-		local mutateBox = section(progressTab, "Mutations", "sparkle")
+		local mutateBox = section(progressTab, "Mutations", "sparkles")
 		toggle(mutateBox, "Auto Roll", "autoRoll", "Rolls when you have tokens or the DNA")
 		choice(mutateBox, "Roll Size", "1 uses one roll. 5 uses five", { "1", "5" }, function()
 			return STATE.rollSize
@@ -2673,7 +2724,7 @@ local function installHub()
 		end, function(option)
 			STATE.breed = breedKeyByName[option] or "Keep"
 		end)
-		button(mutateBox, "Wear Breed", "Puts on the breed picked above", "shirt", function()
+		button(mutateBox, "Wear Breed", "Puts on the breed picked above", "user", function()
 			if STATE.wearBreed() then
 				notify("system", "Wearing " .. tostring(STATE.breed), "")
 			else
@@ -2866,7 +2917,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.5"
+STATE.version = "1.0.6"
 
 if running() then
 	elevate()
