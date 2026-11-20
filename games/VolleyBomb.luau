@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.24.0"
+local VERSION = "1.25.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -2547,6 +2547,25 @@ local function stepBrain()
 		local height = ballNow.Y - Ball.Ground(ballNow).Y
 		if height <= 16 and (not velOk or typeof(vel) ~= "Vector3" or vel.Y < 4) then
 			target, targetTime = ballNow, now + math.clamp(height / 30, 0.18, 0.9)
+		end
+	end
+	-- Your own hit can come back off the wall. The predicted landing says it
+	-- has left, so the hub stands still, and the ball drops in the square.
+	-- If the live ball is travelling back toward you, go and play it.
+	if not target and state.HitBy == LocalPlayer and not state.Dead and not state.Toss then
+		local velOk, vel = pcall(Ball.VelocityAt, state, now)
+		local flatVel = velOk and typeof(vel) == "Vector3" and Vector3.new(vel.X, 0, vel.Z) or Vector3.zero
+		local toCenter = Vector3.new(myZone.Position.X - ballNow.X, 0, myZone.Position.Z - ballNow.Z)
+		local comingBack = flatVel.Magnitude < 2 and (typeof(vel) ~= "Vector3" or vel.Y < 6)
+			or (toCenter.Magnitude > 0.5 and flatVel.Magnitude >= 2 and flatVel.Unit:Dot(toCenter.Unit) > 0.15)
+		if comingBack then
+			for step = 0, 0.9, 0.1 do
+				local ahead = Ball.Contain(ballNow + flatVel * step)
+				if Ball.ZoneAt(zones, ahead) == myZone then
+					target, targetTime = ahead, now + math.max(step, 0.2)
+					break
+				end
+			end
 		end
 	end
 	-- In the last moment go for it anyway: a teammate who has not touched it
