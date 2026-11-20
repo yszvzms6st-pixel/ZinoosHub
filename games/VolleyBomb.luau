@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.26.1"
+local VERSION = "1.27.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -129,6 +129,11 @@ local STATE = {
 	autoVote = true,
 	voteMode = "Solo",
 	autoProServer = true,
+	tryhard = false,
+	tryhardHops = 0,
+	tryhardHold = 0,
+	tryhardBest = 0,
+	tryhardBestId = "",
 	-- Shop
 	autoBuyAbility = true,
 	abilityGoal = "Guardian",
@@ -263,7 +268,7 @@ local ABILITY_MOMENT = {
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "showPresses", "humanize", "reaction", "nativeFollowups", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
-	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
+	"autoVote", "voteMode", "autoProServer", "tryhard", "tryhardHops", "tryhardHold", "tryhardBest", "tryhardBestId", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "afk", "stayActive", "autoReload", "notifications", "fpsBoost", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
@@ -3356,7 +3361,7 @@ STATE.proPad = proPad
 local MAIN_PLACE, PRO_PLACE = 98979169190595, 97790681249268
 local function stepProServer()
 	if game.PlaceId == PRO_PLACE then
-		STATE.proStatus = "You're in a Pro Server (1.5x coins)"
+		STATE.proStatus = STATE.tryhardStatus or "You're in a Pro Server (1.5x coins)"
 		return
 	elseif game.PlaceId ~= MAIN_PLACE then
 		STATE.proStatus = "Pro Servers can only be joined from the main lobby"
@@ -3769,27 +3774,142 @@ function STATE.hopPro()
 		notify("Pro Server", "Couldn't read the server list")
 		return false
 	end
-	local options = {}
-	for _, server in ipairs(decoded.data or {}) do
-		local playing = tonumber(server.playing) or 0
-		local max = tonumber(server.maxPlayers) or 0
-		if server.id ~= game.JobId and playing > 0 and playing < max then
-			table.insert(options, server.id)
+	local minimum = tonumber(STATE.hopMinPlayers) or 1
+	STATE.hopMinPlayers = nil
+	local function collect(atLeast)
+		local found = {}
+		for _, server in ipairs(decoded.data or {}) do
+			local playing = tonumber(server.playing) or 0
+			local max = tonumber(server.maxPlayers) or 0
+			if server.id ~= game.JobId and playing >= atLeast and playing < max then
+				table.insert(found, server.id)
+			end
 		end
+		return found
+	end
+	local options = collect(minimum)
+	if #options == 0 and minimum > 1 then
+		options = collect(1)
 	end
 	if #options == 0 then
 		STATE.proStatus = "No other Pro server with room"
 		notify("Pro Server", "No other Pro server with room")
 		return false
 	end
-	local id = options[math.random(1, math.min(#options, 8))]
-	STATE.proStatus = "Hopping to another Pro server"
-	notify("Pro Server", "Hopping to another Pro server")
-	pcall(function()
+	local id = options[math.random(1, math.min(#options, 12))]
+	local reason = STATE.hopReason or "Hopping to another Pro server"
+	STATE.hopReason = nil
+	STATE.proStatus = reason
+	notify("Pro Server", reason)
+	local moved = pcall(function()
 		game:GetService("TeleportService"):TeleportToPlaceInstance(PRO_PLACE, id, LocalPlayer)
 	end)
-	return true
+	return moved
 end
+
+-- Other people in this server who are actually playing, and how many of them
+-- have a lot of wins. AFK players and anyone whose wins have not loaded yet
+-- are left out.
+function STATE.lobbyTryhard()
+	local strong, active, best = 0, 0, 0
+	for _, player in Players:GetPlayers() do
+		if player ~= LocalPlayer and player:GetAttribute("DataLoaded") == true and player:GetAttribute("AFK") ~= true then
+			local stats = player:FindFirstChild("leaderstats")
+			local winsValue = stats and stats:FindFirstChild("Wins")
+			local wins = winsValue and tonumber(winsValue.Value) or 0
+			active += 1
+			if wins >= 200 then
+				strong += 1
+			end
+			if wins > best then
+				best = wins
+			end
+		end
+	end
+	return strong, active, best
+end
+
+function STATE.watchTryhard()
+	if STATE.tryhardWatching == true then
+		return
+	end
+	STATE.tryhardWatching = true
+	task.spawn(function()
+		local started = os.clock()
+		while running() do
+			task.wait(5)
+			if not running() then
+				return
+			end
+			local looking = STATE.tryhard == true and STATE.afk ~= true and game.PlaceId == PRO_PLACE and STATE.tryhardLeaving ~= true
+			if not looking then
+				if STATE.tryhard ~= true then
+					STATE.tryhardStatus = nil
+				end
+			else
+				local strong, active, best = STATE.lobbyTryhard()
+				local present = #Players:GetPlayers() - 1
+				local settling = os.clock() - started < 12 or (present >= 4 and active == 0 and os.clock() - started < 30)
+				local phrase = strong == 1 and "1 other person with 200+ wins" or string.format("%d other people with 200+ wins", strong)
+				if strong >= 3 then
+					STATE.tryhardStatus = phrase
+					if (STATE.tryhardHops or 0) ~= 0 or (STATE.tryhardHold or 0) ~= 0 or (STATE.tryhardBest or 0) ~= 0 then
+						STATE.tryhardHops = 0
+						STATE.tryhardHold = 0
+						STATE.tryhardBest = 0
+						STATE.tryhardBestId = ""
+						if type(STATE.saveConfig) == "function" then
+							STATE.saveConfig()
+						end
+					end
+				elseif settling or arenaName() then
+					STATE.tryhardStatus = arenaName() and (phrase .. ". Leaving after this round") or phrase
+				elseif os.time() < (STATE.tryhardHold or 0) then
+					STATE.tryhardStatus = string.format("No harder lobby yet. Staying. Best other player has %d wins", best)
+				else
+					if strong > (STATE.tryhardBest or 0) and type(game.JobId) == "string" then
+						STATE.tryhardBest = strong
+						STATE.tryhardBestId = game.JobId
+					end
+					local hops = (STATE.tryhardHops or 0) + 1
+					local function remember()
+						if type(STATE.saveConfig) == "function" then
+							STATE.saveConfig()
+						end
+					end
+					if hops > 6 and type(STATE.tryhardBestId) == "string" and STATE.tryhardBestId ~= "" and STATE.tryhardBestId ~= game.JobId then
+						STATE.tryhardHops = 0
+						STATE.tryhardHold = os.time() + 600
+						STATE.tryhardLeaving = true
+						STATE.tryhardStatus = "Going back to the best lobby found"
+						remember()
+						pcall(function()
+							game:GetService("TeleportService"):TeleportToPlaceInstance(PRO_PLACE, STATE.tryhardBestId, LocalPlayer)
+						end)
+					elseif hops > 6 then
+						STATE.tryhardHops = 0
+						STATE.tryhardHold = os.time() + 600
+						STATE.tryhardStatus = string.format("No harder lobby yet. Staying. Best other player has %d wins", best)
+						remember()
+					else
+						STATE.tryhardHops = hops
+						STATE.tryhardLeaving = true
+						STATE.tryhardStatus = phrase .. ". Finding a harder lobby"
+						STATE.hopMinPlayers = 6
+						STATE.hopReason = "This lobby is mostly low wins. Finding a harder one"
+						remember()
+						if STATE.hopPro() ~= true then
+							STATE.tryhardLeaving = false
+							STATE.tryhardHops = math.max(0, hops - 1)
+							remember()
+						end
+					end
+				end
+			end
+		end
+	end)
+end
+STATE.watchTryhard()
 
 function STATE.hop()
 	local ok, body = pcall(function()
@@ -4331,6 +4451,7 @@ local function installHub()
 	local proBox = section(playTab, "Pro Servers", "crown")
 	local proInfo = info(proBox, "Status", "Checking...")
 	toggle(proBox, "Auto Join Pro Servers", "autoProServer", "1.5x coins. Goes to the lobby pad and joins once you have the wins (between rounds)")
+	toggle(proBox, "Tryhard Lobbies", "tryhard", "Between rounds, leaves a Pro server when fewer than 3 other people have 200 wins or more")
 	button(proBox, "Hop Pro Server", "Moves you to a different Pro server", "shuffle", STATE.hopPro)
 
 	-- Shop
@@ -4454,7 +4575,7 @@ local function installHub()
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
 				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false, showPresses = true,
 				humanize = true, reaction = "Normal", nativeFollowups = true, trickShots = true, playerMove = true, proPosition = true, emotes = true, lobbyWander = true,
-				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
+				autoVote = true, voteMode = "Solo", autoProServer = true, tryhard = false, tryhardHops = 0, tryhardHold = 0, tryhardBest = 0, tryhardBestId = "", autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
 				autoDaily = true, autoQuests = true, autoAchievements = true, autoSpin = true,
 				antiAfk = true, afk = false, stayActive = true, autoReload = true, notifications = true, fpsBoost = false, hideOnStart = false, customFov = false, fov = 90, dodgeShockwave = true, avoidBlasts = true,
