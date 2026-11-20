@@ -86,22 +86,27 @@ Settings save per account to `Rayfield/Configurations/ZinoosHub/SolveTheCube_<Us
 
 ## Ant Evolution
 
-Uses the same window as the Lift Rock hub. Pages: Home, Main and Player. The farm walks you onto nearby food and the game collects it.
+Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progress, Player and Settings. The farm walks you onto nearby food and the game collects it.
 
-**Main**
+**Farm**
 
 - **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map.
 - **Auto Bite** bites a bug that is already in reach. **Auto Ability** uses your equipped mutation ability on a nearby bug. Dash and Fly are left alone.
 - **Critter ESP** shows bug names and health. **Player ESP** shows other players.
+
+**Progress**
+
 - **Auto Evolve** evolves when you have the power. **Auto Rebirth** rebirths only at the top stage.
 - **Auto Hatch** hatches the egg you pick once you can pay. Royal is the default. Colony is the other choice.
 - **Auto Equip Best Pet** equips your best pets. **Auto Claim Rewards** claims daily, playtime, quests and records. **Redeem Codes** redeems the known codes once.
 
 **Home** shows power, stage, rebirths and what the hub is doing, plus **Claim Now** and **Equip Best Now**.
 
-**Player** has WalkSpeed, Infinite Jump, Noclip, Instant ProximityPrompt, Fly, Anti AFK, No Gameplay Paused, Auto Reconnect on Kick, Disable 3D Rendering, FPS Boost, Hide UI On Start, **Toggle Key**, and Rejoin, Server Hop, Lowest Server, Copy Job ID and Unload.
+**Player** has Walk Speed, Infinite Jump, Noclip, Instant Interactions, Fly, Anti AFK, Auto Reconnect, Hide Roblox Pause Popup, Potato Mode, AFK Black Screen, and Rejoin, Server Hop, Lowest Player Server and Copy Job ID.
 
-Settings save per account to `Rayfield/Configurations/ZinoosHub/AntEvolution_<UserId>.rfld`. With no theme saved it uses the theme from your Lift Rock save. Your Toggle Key opens and closes the menu; Left Control hides or restores the whole hub.
+**Settings** has the theme, menu size, open key, and Unload. The Zinoos button opens the window. Right Control opens and closes it on PC.
+
+Settings save per account to `Rayfield/Configurations/ZinoosHub/AntEvolution_<UserId>.rfld`.
 
 ## Climb For Animals Eggs
 

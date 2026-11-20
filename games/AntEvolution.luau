@@ -1,6 +1,6 @@
 -- Zinoos hub for Ant Evolution.
--- Same menu as the Lift Rock hub. The farm steps you onto nearby food and lets the game
--- collect it, then evolves, rebirths, hatches and claims through the game's own remotes.
+-- Same WindUI window as Throw Food For Animals. The farm steps you onto nearby food
+-- and lets the game collect it, then evolves, rebirths, hatches and claims.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -13,9 +13,12 @@ if game.GameId ~= 10773487349 then
 	return
 end
 
-pcall(function()
-	setthreadidentity(8)
-end)
+local function elevate()
+	if typeof(setthreadidentity) == "function" then
+		pcall(setthreadidentity, 8)
+	end
+end
+elevate()
 
 local LocalPlayer = Players.LocalPlayer
 local genv = getgenv()
@@ -23,6 +26,7 @@ local genv = getgenv()
 -- One copy at a time: a new run stops the old one first.
 if typeof(genv.ZinoosAntStop) == "function" then
 	pcall(genv.ZinoosAntStop)
+	elevate()
 end
 genv.ZinoosAntGen = (typeof(genv.ZinoosAntGen) == "number" and genv.ZinoosAntGen or 0) + 1
 local token = genv.ZinoosAntGen
@@ -141,6 +145,7 @@ local FLAG_KEYS = {
 	Disable3d = "disable3d",
 	FpsBoost = "fpsBoost",
 	HideOnStart = "hideOnStart",
+	Notifications = "notifications",
 }
 
 local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
@@ -149,6 +154,8 @@ local EGG_OPTIONS = { "Royal", "Colony" }
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	Egg = { key = "egg", options = EGG_OPTIONS },
+	WindTheme = { key = "windTheme" },
+	HubSize = { key = "hubSize", options = { "Compact", "Normal", "Large" } },
 }
 STATE.LIST_KEYS = {}
 local NUMBERS = { FlySpeed = { "flySpeed", 10, 300 } }
@@ -1264,7 +1271,7 @@ local function stepEvolve()
 	STATE.rebirths = rebirths
 	STATE.dna = stateNumber("DNA")
 	local species = Config.SpeciesAt(stage)
-	STATE.stageName = type(species) == "table" and (species.short or species.name) or tostring(stage)
+	STATE.stageName = type(species) == "table" and (species.name or species.short) or tostring(stage)
 	if os.clock() < farm.nextEvolve or not living() then
 		return
 	end
@@ -1703,886 +1710,213 @@ trackConnection(LocalPlayer.Idled:Connect(function()
 	pulseAntiAfk()
 end))
 
+local function notify(category, title, message)
+	if STATE.notifications == false then
+		return false
+	end
+	noteActivity(tostring(title) .. " · " .. tostring(message or ""))
+	if typeof(STATE.toast) == "function" then
+		return pcall(STATE.toast, {
+			category = category,
+			title = tostring(title or "Zinoos Hub"),
+			message = tostring(message or ""),
+		})
+	end
+	return false
+end
+
+-- The dashboard is the same WindUI window Throw Food For Animals uses.
+local WINDUI_URL = "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
+
+local function loadWindUI()
+	local source = genv.ZinoosWindUISource
+	if type(source) ~= "string" or #source < 1000 then
+		local ok, body = pcall(function()
+			return game:HttpGet(WINDUI_URL)
+		end)
+		elevate()
+		if not ok or type(body) ~= "string" or #body < 1000 then
+			return nil, "download failed"
+		end
+		source = body
+		genv.ZinoosWindUISource = source
+	end
+	local chunk, compileError = loadstring(source, "=WindUI")
+	if not chunk then
+		genv.ZinoosWindUISource = nil
+		return nil, compileError
+	end
+	local ok, library = pcall(chunk)
+	elevate()
+	if not ok or type(library) ~= "table" then
+		return nil, tostring(library)
+	end
+	return library
+end
+
+local ZINOOS_THEME = {
+	Name = "Zinoos",
+	Accent = Color3.fromHex("#1c1733"),
+	Dialog = Color3.fromHex("#15111f"),
+	Outline = Color3.fromHex("#FFFFFF"),
+	Text = Color3.fromHex("#F5F7FB"),
+	Placeholder = Color3.fromHex("#9BA8BA"),
+	Background = Color3.fromHex("#0d0b14"),
+	Button = Color3.fromHex("#5b4bb5"),
+	Icon = Color3.fromHex("#b4a7ff"),
+	Toggle = Color3.fromHex("#8268FF"),
+	Slider = Color3.fromHex("#8268FF"),
+	Checkbox = Color3.fromHex("#8268FF"),
+	PanelBackground = Color3.fromHex("#FFFFFF"),
+	PanelBackgroundTransparency = 0.96,
+	SliderIcon = Color3.fromHex("#908F95"),
+	Primary = Color3.fromHex("#8268FF"),
+	LabelBackground = Color3.fromHex("#000000"),
+	LabelBackgroundTransparency = 0.83,
+	ElementBackground = Color3.fromHex("#1a1628"),
+	ElementBackgroundTransparency = 0,
+}
+
 local function installHub()
+	elevate()
 	destroyMenus()
-	STATE.themeSwitches = {}
 
-	local theme = STATE.hubThemeDef()
-	local accent = theme.accent
-	local ink = theme.ink
-	local muted = theme.muted
-	local panel = theme.panel
-	local side = theme.side
-	local cardColor = theme.card
-	local selected = theme.selected
-	local off = theme.off
-	local line = theme.stroke
-	local mint = theme.accent
-	local inkDark = theme.inkDark
-	local cardFade = theme.cardFade
-	local function role(object, kind)
-		object:SetAttribute("ZinoosRole", kind)
-		return object
+	local WindUI, loadError = loadWindUI()
+	if not WindUI then
+		warn("[Zinoos hub] Menu could not load (" .. tostring(loadError) .. "). Automation is still running with your saved settings.")
+		return
+	end
+	STATE.windUI = WindUI
+	pcall(WindUI.AddTheme, WindUI, ZINOOS_THEME)
+	pcall(WindUI.SetNotificationLower, WindUI, true)
+	elevate()
+
+	local camera = workspace.CurrentCamera
+	local view = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local touch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local small = touch or view.X < 900 or view.Y < 560
+	local themeName = type(STATE.windTheme) == "string" and STATE.windTheme ~= "" and STATE.windTheme or "Zinoos"
+	if type(WindUI.Themes) == "table" and WindUI.Themes[themeName] == nil then
+		themeName = "Zinoos"
 	end
 
-	local TweenService = game:GetService("TweenService")
-	local tweenInfo = {
-		open = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		fade = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		hover = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		toggle = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		card = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-		drop = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-	}
-	local liveTweens = {}
-	local function playMotion(object, props, info)
-		local old = liveTweens[object]
-		if old then
-			pcall(function()
-				old:Cancel()
-			end)
+	local Window = WindUI:CreateWindow({
+		Title = "Zinoos Hub",
+		Icon = "sparkles",
+		Author = "Ant Evolution",
+		Folder = "ZinoosHub",
+		Size = small and UDim2.fromOffset(520, 330) or UDim2.fromOffset(720, 520),
+		MinSize = small and Vector2.new(420, 260) or Vector2.new(560, 360),
+		MaxSize = Vector2.new(900, 620),
+		Theme = themeName,
+		Resizable = true,
+		SideBarWidth = small and 150 or 190,
+		HideSearchBar = false,
+		ScrollBarEnabled = not small,
+		AutoScale = true,
+		ToggleKey = Enum.KeyCode[STATE.toggleKey] or Enum.KeyCode.RightControl,
+		User = { Enabled = true, Anonymous = false },
+		OpenButton = {
+			Title = "Zinoos Hub",
+			Icon = "sparkles",
+			CornerRadius = UDim.new(1, 0),
+			StrokeThickness = 2,
+			Color = ColorSequence.new(Color3.fromHex("8268FF"), Color3.fromHex("C084FC")),
+			OnlyMobile = false,
+			Enabled = true,
+			Draggable = true,
+		},
+	})
+	elevate()
+	if not Window then
+		warn("[Zinoos hub] Menu window could not be created.")
+		return
+	end
+	STATE.windWindow = Window
+
+	local okFit, fitScale = pcall(Window.GetUIScale, Window)
+	fitScale = okFit and tonumber(fitScale) or 1
+	local SIZE_FACTORS = { Compact = 0.94, Normal = 1, Large = 1.08 }
+	do
+		local scale = fitScale * (SIZE_FACTORS[STATE.hubSize] or 1)
+		if small then
+			scale = math.min(scale, fitScale)
 		end
-		local tween = TweenService:Create(object, info or tweenInfo.hover, props)
-		liveTweens[object] = tween
-		tween.Completed:Connect(function()
-			if liveTweens[object] == tween then
-				liveTweens[object] = nil
+		if math.abs(scale - fitScale) > 0.001 then
+			pcall(Window.SetUIScale, Window, scale)
+		end
+		elevate()
+	end
+	pcall(Window.Tag, Window, { Title = "v" .. tostring(STATE.version or "1.0.0"), Color = Color3.fromHex("#8268FF") })
+	if STATE.admin then
+		pcall(Window.Tag, Window, { Title = "Admin", Color = Color3.fromHex("#F6BE3A") })
+	end
+
+	local windowGone = false
+	hubCleanup(function()
+		if not windowGone then
+			windowGone = true
+			elevate()
+			pcall(Window.Destroy, Window)
+		end
+		for _, name in ipairs({ "ScreenGui", "NotificationGui", "DropdownGui", "TooltipGui" }) do
+			local layer = WindUI[name]
+			if typeof(layer) == "Instance" then
+				pcall(layer.Destroy, layer)
 			end
-		end)
-		tween:Play()
-		return tween
-	end
-	local function bindPress(gui)
-		local scale = Instance.new("UIScale")
-		scale.Name = "PressScale"
-		scale.Parent = gui
-		gui.MouseButton1Down:Connect(function()
-			playMotion(scale, { Scale = 0.98 }, tweenInfo.hover)
-		end)
-		gui.MouseButton1Up:Connect(function()
-			playMotion(scale, { Scale = 1 }, tweenInfo.hover)
-		end)
-		gui.MouseLeave:Connect(function()
-			if scale.Scale ~= 1 then
-				playMotion(scale, { Scale = 1 }, tweenInfo.hover)
-			end
-		end)
-	end
-
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "ZinoosAntMenu"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 220
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = CoreGui
-
-	local uiScale = Instance.new("UIScale")
-	uiScale.Parent = gui
-	local function viewSize()
-		local camera = workspace.CurrentCamera
-		return camera and camera.ViewportSize or Vector2.new(1280, 720)
-	end
-	local holder
-	local launcher
-	local fullMode = false
-	local applyHubLayout
-	local function fitScale()
-		local view = viewSize()
-		local phone = UserInputService.TouchEnabled and math.min(view.X, view.Y) < 820
-		local compact = phone or view.X < 760 or view.Y < 560 or (UserInputService.TouchEnabled and view.X < 900)
-		local margin = (compact or fullMode) and 0 or 16
-		local baseW, baseH
-		local phoneScale = 1
-		if phone and not fullMode then
-			-- Phones get their own size table: scale, share of screen width, share of screen height.
-			local fit = STATE.phoneHubSizes[STATE.hubSize or "Compact"] or STATE.phoneHubSizes.Compact
-			phoneScale = fit[1]
-			local pixelsW = math.min(math.floor(view.X * fit[2]), view.X - 20)
-			local pixelsH = math.min(math.floor(view.Y * fit[3]), view.Y - 20)
-			baseW = math.max(280, math.floor(pixelsW / phoneScale))
-			baseH = math.max(300, math.floor(pixelsH / phoneScale))
-		elseif compact or fullMode then
-			baseW = math.max(320, view.X - margin * 2)
-			baseH = math.max(480, view.Y - margin * 2)
-		else
-			local wanted = STATE.hubScaleValue and STATE.hubScaleValue() or 1
-			baseW = math.min(972, math.max(640, math.floor((view.X - 32) / wanted)))
-			baseH = math.min(668, math.max(480, math.floor((view.Y - 32) / wanted)))
 		end
-		holder.Size = UDim2.fromOffset(baseW, baseH)
-		local desktopScale = (phone or compact or fullMode) and 1 or (STATE.hubScaleValue and STATE.hubScaleValue() or 1)
-		if phone and not fullMode then
-			desktopScale = phoneScale
-		end
-		uiScale.Scale = desktopScale
-		if launcher then
-			launcher.Size = phone and UDim2.fromOffset(232, 120) or UDim2.fromOffset(300, 136)
-		end
-		if applyHubLayout then
-			applyHubLayout(view, compact, baseW)
-		end
-	end
+		STATE.toast = nil
+	end)
 
-	launcher = Instance.new("CanvasGroup")
-	launcher.Name = "Zinoos hub"
-	launcher.BackgroundColor3 = side
-	role(launcher, "side")
-	launcher.BorderSizePixel = 0
-	launcher.AnchorPoint = Vector2.new(0, 0.5)
-	launcher.Position = UDim2.new(0, 28, 0.58, 0)
-	launcher.Size = UDim2.fromOffset(300, 136)
-	launcher.GroupTransparency = 0
-	launcher.Active = true
-	launcher.Visible = true
-	launcher.Parent = gui
-	local launcherCorner = Instance.new("UICorner")
-	launcherCorner.CornerRadius = UDim.new(0, 16)
-	launcherCorner.Parent = launcher
-	local launcherStroke = Instance.new("UIStroke")
-	launcherStroke.Color = line
-	launcherStroke.Transparency = 0.45
-	launcherStroke.Thickness = 1
-	launcherStroke.Parent = launcher
-	local dockAvatar = Instance.new("ImageLabel")
-	dockAvatar.BackgroundColor3 = cardColor
-	dockAvatar.BorderSizePixel = 0
-	dockAvatar.Position = UDim2.fromOffset(14, 14)
-	dockAvatar.Size = UDim2.fromOffset(36, 36)
-	dockAvatar.Parent = launcher
-	local dockAvatarCorner = Instance.new("UICorner")
-	dockAvatarCorner.CornerRadius = UDim.new(1, 0)
-	dockAvatarCorner.Parent = dockAvatar
-	local dockName = Instance.new("TextLabel")
-	dockName.BackgroundTransparency = 1
-	dockName.Font = Enum.Font.GothamBold
-	dockName.Text = LocalPlayer.DisplayName
-	dockName.TextColor3 = ink
-	role(dockName, "ink")
-	dockName.TextSize = 15
-	dockName.TextXAlignment = Enum.TextXAlignment.Left
-	dockName.TextTruncate = Enum.TextTruncate.AtEnd
-	dockName.Position = UDim2.fromOffset(60, 14)
-	dockName.Size = UDim2.new(1, -150, 0, 18)
-	dockName.Parent = launcher
-	local dockGame = Instance.new("TextLabel")
-	dockGame.BackgroundTransparency = 1
-	dockGame.Font = Enum.Font.Gotham
-	dockGame.Text = STATE.admin and "Admin" or "Ant Evolution"
-	dockGame.TextColor3 = STATE.admin and accent or muted
-	role(dockGame, STATE.admin and "accentText" or "muted")
-	dockGame.TextSize = 12
-	dockGame.TextXAlignment = Enum.TextXAlignment.Left
-	dockGame.Position = UDim2.fromOffset(60, 32)
-	dockGame.Size = UDim2.new(1, -150, 0, 16)
-	dockGame.Parent = launcher
-	local dockClock = Instance.new("TextLabel")
-	dockClock.BackgroundTransparency = 1
-	dockClock.Font = Enum.Font.GothamBold
-	dockClock.Text = "0:00"
-	dockClock.TextColor3 = ink
-	role(dockClock, "ink")
-	dockClock.TextSize = 14
-	dockClock.TextXAlignment = Enum.TextXAlignment.Right
-	dockClock.Position = UDim2.new(1, -126, 0, 16)
-	dockClock.Size = UDim2.fromOffset(100, 18)
-	dockClock.Parent = launcher
-	local dockStats = Instance.new("TextLabel")
-	dockStats.BackgroundTransparency = 1
-	dockStats.Font = Enum.Font.Gotham
-	dockStats.Text = "60 fps    0 ms"
-	dockStats.TextColor3 = mint
-	role(dockStats, "accentText")
-	dockStats.TextSize = 12
-	dockStats.TextXAlignment = Enum.TextXAlignment.Left
-	dockStats.Position = UDim2.fromOffset(14, 64)
-	dockStats.Size = UDim2.new(1, -28, 0, 16)
-	dockStats.Parent = launcher
-	local barTrack = Instance.new("Frame")
-	barTrack.BackgroundColor3 = accent
-	barTrack.BackgroundTransparency = 0.72
-	barTrack.BorderSizePixel = 0
-	barTrack.Position = UDim2.fromOffset(14, 86)
-	barTrack.Size = UDim2.new(1, -28, 0, 4)
-	barTrack.Parent = launcher
-	local barTrackCorner = Instance.new("UICorner")
-	barTrackCorner.CornerRadius = UDim.new(1, 0)
-	barTrackCorner.Parent = barTrack
-	local fpsBar = Instance.new("Frame")
-	fpsBar.BackgroundColor3 = mint
-	fpsBar.BorderSizePixel = 0
-	fpsBar.Size = UDim2.fromScale(0.7, 1)
-	fpsBar.Parent = barTrack
-	local fpsBarCorner = Instance.new("UICorner")
-	fpsBarCorner.CornerRadius = UDim.new(1, 0)
-	fpsBarCorner.Parent = fpsBar
-	local dockHint = Instance.new("TextLabel")
-	dockHint.BackgroundTransparency = 1
-	dockHint.Font = Enum.Font.Gotham
-	dockHint.Text = "Click or press Right Ctrl to open"
-	dockHint.TextColor3 = muted
-	role(dockHint, "muted")
-	dockHint.TextSize = 12
-	dockHint.TextXAlignment = Enum.TextXAlignment.Left
-	dockHint.Position = UDim2.fromOffset(14, 100)
-	dockHint.Size = UDim2.new(1, -28, 0, 18)
-	dockHint.Parent = launcher
-	local fpsCount = 0
-	trackConnection(RunService.Heartbeat:Connect(function()
-		fpsCount += 1
-	end))
-
-	holder = Instance.new("Frame")
-	holder.Name = "Holder"
-	holder.AnchorPoint = Vector2.new(0.5, 0.5)
-	holder.Position = UDim2.fromScale(0.5, 0.5)
-	holder.Size = UDim2.fromOffset(972, 668)
-	holder.BackgroundTransparency = 1
-	holder.Visible = false
-	holder.Parent = gui
-	fitScale()
-	local windowScale = Instance.new("UIScale")
-	windowScale.Name = "WindowMotion"
-	windowScale.Parent = holder
-
-	local shadow = Instance.new("Frame")
-	shadow.BackgroundColor3 = Color3.new(0, 0, 0)
-	shadow.BackgroundTransparency = 1
-	shadow.BorderSizePixel = 0
-	shadow.Position = UDim2.fromOffset(0, 8)
-	shadow.Size = UDim2.fromScale(1, 1)
-	shadow.ZIndex = 1
-	shadow.Parent = holder
-	local shadowCorner = Instance.new("UICorner")
-	shadowCorner.CornerRadius = UDim.new(0, 18)
-	shadowCorner.Parent = shadow
-
-	local window = Instance.new("Frame")
-	window.Name = "Window"
-	window.BackgroundColor3 = panel
-	role(window, "panel")
-	window.BorderSizePixel = 0
-	window.Size = UDim2.fromScale(1, 1)
-	window.ZIndex = 2
-	window.Parent = holder
-	local windowCorner = Instance.new("UICorner")
-	windowCorner.CornerRadius = UDim.new(0, 16)
-	windowCorner.Parent = window
-	local windowStroke = Instance.new("UIStroke")
-	windowStroke.Color = line
-	windowStroke.Transparency = 0.55
-	windowStroke.Thickness = 1
-	windowStroke.Parent = window
-	local wallpaper = Instance.new("CanvasGroup")
-	wallpaper.Name = "Wallpaper"
-	wallpaper.BackgroundTransparency = 1
-	wallpaper.BorderSizePixel = 0
-	wallpaper.Size = UDim2.fromScale(1, 1)
-	wallpaper.ZIndex = 1
-	wallpaper.Parent = window
-	local wallpaperCorner = Instance.new("UICorner")
-	wallpaperCorner.CornerRadius = UDim.new(0, 16)
-	wallpaperCorner.Parent = wallpaper
-	local wallpaperImage = Instance.new("ImageLabel")
-	wallpaperImage.BackgroundTransparency = 1
-	wallpaperImage.BorderSizePixel = 0
-	wallpaperImage.Size = UDim2.fromScale(1, 1)
-	wallpaperImage.ScaleType = Enum.ScaleType.Crop
-	wallpaperImage.ImageTransparency = 1
-	wallpaperImage.ZIndex = 1
-	wallpaperImage.Parent = wallpaper
-	local wallpaperScrim = Instance.new("Frame")
-	wallpaperScrim.Name = "Scrim"
-	wallpaperScrim.BackgroundColor3 = Color3.new(0, 0, 0)
-	wallpaperScrim.BackgroundTransparency = 0.38
-	wallpaperScrim.BorderSizePixel = 0
-	wallpaperScrim.Size = UDim2.fromScale(1, 1)
-	wallpaperScrim.ZIndex = 2
-	wallpaperScrim.Parent = wallpaper
-
-	local sideWrap = Instance.new("CanvasGroup")
-	sideWrap.Name = "SideWrap"
-	sideWrap.BackgroundTransparency = 1
-	sideWrap.BorderSizePixel = 0
-	sideWrap.Size = UDim2.new(0.25, 0, 1, 0)
-	sideWrap.GroupTransparency = 1
-	sideWrap.ZIndex = 3
-	sideWrap.Parent = window
-	local sidebar = Instance.new("Frame")
-	sidebar.Name = "Sidebar"
-	sidebar.BackgroundColor3 = side
-	role(sidebar, "side")
-	sidebar.BackgroundTransparency = 0
-	sidebar.BorderSizePixel = 0
-	sidebar.Size = UDim2.fromScale(1, 1)
-	sidebar.ZIndex = 3
-	sidebar.Parent = sideWrap
-	local sideCorner = Instance.new("UICorner")
-	sideCorner.CornerRadius = UDim.new(0, 16)
-	sideCorner.Parent = sidebar
-	local sideFill = Instance.new("Frame")
-	sideFill.BackgroundColor3 = side
-	role(sideFill, "side")
-	sideFill.BackgroundTransparency = 0
-	sideFill.BorderSizePixel = 0
-	sideFill.Position = UDim2.new(1, -16, 0, 0)
-	sideFill.Size = UDim2.new(0, 16, 1, 0)
-	sideFill.ZIndex = 3
-	sideFill.Parent = sidebar
-
-	local mark = Instance.new("Frame")
-	mark.BackgroundColor3 = accent
-	mark.BorderSizePixel = 0
-	mark.Position = UDim2.fromOffset(16, 16)
-	mark.Size = UDim2.fromOffset(28, 28)
-	mark.ZIndex = 4
-	mark.Parent = sidebar
-	local markCorner = Instance.new("UICorner")
-	markCorner.CornerRadius = UDim.new(1, 0)
-	markCorner.Parent = mark
-	local markText = Instance.new("TextLabel")
-	markText.BackgroundTransparency = 1
-	markText.Font = Enum.Font.GothamBlack
-	markText.Text = "Z"
-	markText.TextColor3 = inkDark
-	role(markText, "inkDark")
-	markText.TextSize = 16
-	markText.Size = UDim2.fromScale(1, 1)
-	markText.ZIndex = 5
-	markText.Parent = mark
-	local markImage = Instance.new("ImageLabel")
-	markImage.BackgroundTransparency = 1
-	markImage.BorderSizePixel = 0
-	markImage.Size = UDim2.fromScale(1, 1)
-	markImage.ScaleType = Enum.ScaleType.Crop
-	markImage.ZIndex = 6
-	markImage.Parent = mark
-	local markImageCorner = Instance.new("UICorner")
-	markImageCorner.CornerRadius = UDim.new(1, 0)
-	markImageCorner.Parent = markImage
-	task.spawn(STATE.loadThemeImages)
-
-	local brand = Instance.new("TextLabel")
-	brand.BackgroundTransparency = 1
-	brand.Font = Enum.Font.GothamBold
-	brand.Text = "Zinoos"
-	brand.TextColor3 = ink
-	role(brand, "ink")
-	brand.TextSize = 16
-	brand.TextXAlignment = Enum.TextXAlignment.Left
-	brand.Position = UDim2.fromOffset(52, 14)
-	brand.Size = UDim2.new(1, -60, 0, 20)
-	brand.ZIndex = 4
-	brand.Parent = sidebar
-	local brandSub = Instance.new("TextLabel")
-	brandSub.BackgroundTransparency = 1
-	brandSub.Font = Enum.Font.Gotham
-	brandSub.Text = "Ant Evolution"
-	brandSub.TextColor3 = muted
-	role(brandSub, "muted")
-	brandSub.TextSize = 12
-	brandSub.TextXAlignment = Enum.TextXAlignment.Left
-	brandSub.Position = UDim2.fromOffset(52, 32)
-	brandSub.Size = UDim2.new(1, -60, 0, 16)
-	brandSub.ZIndex = 4
-	brandSub.Parent = sidebar
-
-	local content = Instance.new("Frame")
-	content.BackgroundTransparency = 1
-	content.Position = UDim2.new(0.25, 0, 0, 0)
-	content.Size = UDim2.new(0.75, 0, 1, 0)
-	content.ZIndex = 3
-	content.Parent = window
-	local headWrap = Instance.new("CanvasGroup")
-	headWrap.Name = "HeadWrap"
-	headWrap.BackgroundTransparency = 1
-	headWrap.BorderSizePixel = 0
-	headWrap.Size = UDim2.new(1, 0, 0, 64)
-	headWrap.GroupTransparency = 1
-	headWrap.ZIndex = 4
-	headWrap.Parent = content
-	local header = Instance.new("Frame")
-	header.Name = "DragBar"
-	header.Active = true
-	header.BackgroundColor3 = panel
-	header.BackgroundTransparency = 1
-	header.BorderSizePixel = 0
-	header.Size = UDim2.fromScale(1, 1)
-	header.ZIndex = 4
-	header.Parent = headWrap
-	local pageTitle = Instance.new("TextLabel")
-	pageTitle.BackgroundTransparency = 1
-	pageTitle.Font = Enum.Font.GothamBold
-	pageTitle.Text = "Home"
-	pageTitle.TextColor3 = ink
-	role(pageTitle, "ink")
-	pageTitle.TextSize = 18
-	pageTitle.TextXAlignment = Enum.TextXAlignment.Left
-	pageTitle.Position = UDim2.fromOffset(28, 0)
-	pageTitle.Size = UDim2.new(0.42, 0, 1, 0)
-	pageTitle.ZIndex = 4
-	pageTitle.Parent = header
-
-	local search = Instance.new("TextBox")
-	search.Name = "Search"
-	search.BackgroundColor3 = cardColor
-	search.BackgroundTransparency = cardFade
-	search.BorderSizePixel = 0
-	search.ClearTextOnFocus = false
-	search.Font = Enum.Font.Gotham
-	search.PlaceholderText = "Search"
-	search.PlaceholderColor3 = muted
-	search.Text = ""
-	search.TextColor3 = ink
-	role(search, "field")
-	search.TextSize = 14
-	search.TextXAlignment = Enum.TextXAlignment.Left
-	search.AnchorPoint = Vector2.new(1, 0.5)
-	search.Position = UDim2.new(1, -96, 0.5, 0)
-	search.Size = UDim2.fromOffset(200, 34)
-	search.ZIndex = 5
-	search.Parent = header
-	local searchCorner = Instance.new("UICorner")
-	searchCorner.CornerRadius = UDim.new(0, 8)
-	searchCorner.Parent = search
-	local searchStroke = Instance.new("UIStroke")
-	searchStroke.Color = accent
-	searchStroke.Transparency = 0.58
-	searchStroke.Thickness = 1
-	searchStroke.Parent = search
-	local searchPad = Instance.new("UIPadding")
-	searchPad.PaddingLeft = UDim.new(0, 10)
-	searchPad.Parent = search
-
-	local fullButton = Instance.new("TextButton")
-	fullButton.Name = "Fullscreen"
-	fullButton.AutoButtonColor = false
-	fullButton.Text = "⛶"
-	fullButton.Font = Enum.Font.Gotham
-	fullButton.TextSize = 16
-	fullButton.TextColor3 = muted
-	role(fullButton, "muted")
-	fullButton.BackgroundTransparency = 1
-	fullButton.AnchorPoint = Vector2.new(1, 0.5)
-	fullButton.Position = UDim2.new(1, -48, 0.5, 0)
-	fullButton.Size = UDim2.fromOffset(32, 32)
-	fullButton.ZIndex = 5
-	fullButton.Parent = header
-	local closeButton = Instance.new("TextButton")
-	closeButton.AutoButtonColor = false
-	closeButton.Text = "X"
-	closeButton.Font = Enum.Font.GothamBold
-	closeButton.TextSize = 14
-	closeButton.TextColor3 = muted
-	role(closeButton, "muted")
-	closeButton.BackgroundTransparency = 1
-	closeButton.AnchorPoint = Vector2.new(1, 0.5)
-	closeButton.Position = UDim2.new(1, -12, 0.5, 0)
-	closeButton.Size = UDim2.fromOffset(28, 28)
-	closeButton.ZIndex = 5
-	closeButton.Parent = header
-
-	local pageWrap = Instance.new("CanvasGroup")
-	pageWrap.Name = "PageWrap"
-	pageWrap.BackgroundTransparency = 1
-	pageWrap.BorderSizePixel = 0
-	pageWrap.Position = UDim2.fromOffset(0, 64)
-	pageWrap.Size = UDim2.new(1, 0, 1, -64)
-	pageWrap.GroupTransparency = 1
-	pageWrap.ZIndex = 4
-	pageWrap.Parent = content
-	local pageHost = Instance.new("Frame")
-	pageHost.BackgroundTransparency = 1
-	pageHost.Size = UDim2.fromScale(1, 1)
-	pageHost.ZIndex = 4
-	pageHost.Parent = pageWrap
-
-	local pages = {}
-	local navButtons = {}
-	local function newPage(name)
-		local page = Instance.new("ScrollingFrame")
-		page.Name = name
-		page.BackgroundTransparency = 1
-		page.BorderSizePixel = 0
-		page.Size = UDim2.fromScale(1, 1)
-		page.ScrollBarThickness = 3
-		page.ScrollBarImageColor3 = muted
-		page.ScrollBarImageTransparency = 0.35
-		page.CanvasSize = UDim2.new()
-		page.AutomaticCanvasSize = Enum.AutomaticSize.Y
-		page.Visible = false
-		page.ZIndex = 4
-		page.Parent = pageHost
-		local pad = Instance.new("UIPadding")
-		pad.PaddingLeft = UDim.new(0, 28)
-		pad.PaddingRight = UDim.new(0, 28)
-		pad.PaddingTop = UDim.new(0, 8)
-		pad.PaddingBottom = UDim.new(0, 28)
-		pad.Parent = page
-		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 12)
-		layout.SortOrder = Enum.SortOrder.LayoutOrder
-		layout.Parent = page
-		pages[name] = page
-		return page
-	end
-
-	local homePage = newPage("Home")
-	local mainPage = newPage("Main")
-	local playerPage = newPage("Player")
-
-	local currentPage = "Home"
-	local pageToken = 0
-	local function playCards(page)
-		if not page then
+	local function rebuildMenu()
+		if windowGone then
 			return
 		end
-		pageToken += 1
-		local token = pageToken
-		local index = 0
-		local function visit(root)
-			local kids = root:GetChildren()
-			table.sort(kids, function(a, b)
-				local aOrder = a:IsA("GuiObject") and a.LayoutOrder or 0
-				local bOrder = b:IsA("GuiObject") and b.LayoutOrder or 0
-				return aOrder < bOrder
-			end)
-			for _, child in ipairs(kids) do
-				if child:GetAttribute("ZinoosSlot") == true then
-					local motion = child:FindFirstChild("Motion")
-					if motion and motion:IsA("CanvasGroup") then
-						index += 1
-						local step = index
-						motion.Position = UDim2.fromOffset(0, 12)
-						motion.GroupTransparency = 1
-						task.delay((step - 1) * 0.035, function()
-							if token ~= pageToken or not motion.Parent then
-								return
-							end
-							playMotion(motion, {
-								Position = UDim2.fromOffset(0, 0),
-								GroupTransparency = 0,
-							}, tweenInfo.card)
-						end)
-					end
-				elseif child:IsA("Frame") and child.BackgroundTransparency >= 1 and child:FindFirstChildOfClass("UIListLayout") then
-					visit(child)
+		windowGone = true
+		elevate()
+		pcall(Window.Destroy, Window)
+		task.delay(0.35, function()
+			if running() then
+				elevate()
+				local ok, err = pcall(installHub)
+				if not ok then
+					warn("[Zinoos hub] Menu rebuild failed: " .. tostring(err))
 				end
 			end
-		end
-		visit(page)
+		end)
 	end
-	local function showPage(name)
-		currentPage = name
-		for pageName, page in pairs(pages) do
-			page.Visible = pageName == name
-		end
-		pageTitle.Text = name
-		local themeNow = STATE.hubThemeDef()
-		for buttonName, button in pairs(navButtons) do
-			local on = buttonName == name
-			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
-			playMotion(button, { BackgroundTransparency = on and themeNow.selectedFade or 1 }, tweenInfo.hover)
-		end
-		if holder.Visible then
-			playCards(pages[name])
-		end
-		if name == "Player" then
-			STATE.webhookReveal = false
-			if STATE.applyWebhookMask then
-				STATE.applyWebhookMask()
+	pcall(Window.OnDestroy, Window, function()
+		if not windowGone then
+			windowGone = true
+			if running() then
+				task.defer(unloadHub)
 			end
-		end
-	end
-
-	local function onActivate(control, callback, selectable)
-		control.Active = true
-		control.Selectable = selectable ~= false
-		control.Activated:Connect(callback)
-	end
-
-	local function navIcon(parent, kind)
-		local icon = Instance.new("Frame")
-		icon.BackgroundTransparency = 1
-		icon.BorderSizePixel = 0
-		icon.Position = UDim2.fromOffset(12, 10)
-		icon.Size = UDim2.fromOffset(16, 16)
-		icon.ZIndex = 6
-		icon.Parent = parent
-		local function mark(w, h, x, y, round)
-			local part = Instance.new("Frame")
-			part.BackgroundTransparency = 1
-			part.BorderSizePixel = 0
-			part.Position = UDim2.fromOffset(x, y)
-			part.Size = UDim2.fromOffset(w, h)
-			part.ZIndex = 6
-			part.Parent = icon
-			local stroke = Instance.new("UIStroke")
-			stroke.Color = ink
-			stroke:SetAttribute("ZinoosRole", "iconStroke")
-			stroke.Thickness = 1.25
-			stroke.Parent = part
-			local corner = Instance.new("UICorner")
-			corner.CornerRadius = UDim.new(round and 1 or 0, round and 0 or 2)
-			corner.Parent = part
-			return part
-		end
-		if kind == "Home" then
-			mark(10, 7, 3, 8, false)
-			local roof = mark(2, 8, 7, 1, false)
-			roof.Rotation = 40
-		elseif kind == "Main" then
-			mark(6, 6, 0, 0, false)
-			mark(6, 6, 9, 0, false)
-			mark(6, 6, 0, 9, false)
-			mark(6, 6, 9, 9, false)
-		else
-			mark(10, 10, 3, 3, true)
-		end
-	end
-	local function addNav(name, order)
-		local button = Instance.new("TextButton")
-		button.Name = name
-		button.AutoButtonColor = false
-		button.Text = ""
-		button.Font = Enum.Font.GothamMedium
-		button.TextSize = 15
-		button.TextColor3 = ink
-		button.TextXAlignment = Enum.TextXAlignment.Left
-		local navLabel = Instance.new("TextLabel")
-		navLabel.Name = "Label"
-		navLabel.BackgroundTransparency = 1
-		navLabel.Font = Enum.Font.GothamMedium
-		navLabel.Text = name
-		navLabel.TextSize = 15
-		navLabel.TextColor3 = ink
-		role(navLabel, "ink")
-		navLabel.TextXAlignment = Enum.TextXAlignment.Left
-		navLabel.TextTruncate = Enum.TextTruncate.AtEnd
-		navLabel.Position = UDim2.fromOffset(36, 0)
-		navLabel.Size = UDim2.new(1, -44, 1, 0)
-		navLabel.ZIndex = 6
-		navLabel.Parent = button
-		button.BackgroundColor3 = selected
-		button.BackgroundTransparency = 1
-		button.BorderSizePixel = 0
-		button.Position = UDim2.fromOffset(12, 78 + (order - 1) * 42)
-		button.Size = UDim2.new(1, -24, 0, 36)
-		button.ZIndex = 4
-		button.Parent = sidebar
-		local navCorner = Instance.new("UICorner")
-		navCorner.CornerRadius = UDim.new(0, 10)
-		navCorner.Parent = button
-		navIcon(button, name)
-		navButtons[name] = button
-		bindPress(button)
-		button.MouseEnter:Connect(function()
-			if currentPage ~= name then
-				local themeNow = STATE.hubThemeDef()
-				playMotion(button, { BackgroundColor3 = themeNow.hover, BackgroundTransparency = themeNow.hoverFade }, tweenInfo.hover)
-			end
-		end)
-		button.MouseLeave:Connect(function()
-			if currentPage ~= name then
-				local themeNow = STATE.hubThemeDef()
-				playMotion(button, { BackgroundColor3 = themeNow.hover, BackgroundTransparency = 1 }, tweenInfo.hover)
-			end
-		end)
-		onActivate(button, function()
-			showPage(name)
-		end)
-	end
-	addNav("Home", 1)
-	addNav("Main", 2)
-	addNav("Player", 3)
-
-	local profile = Instance.new("Frame")
-	profile.BackgroundColor3 = cardColor
-	profile.BackgroundTransparency = cardFade
-	role(profile, "card")
-	profile.BorderSizePixel = 0
-	profile.AnchorPoint = Vector2.new(0, 1)
-	profile.Position = UDim2.new(0, 12, 1, -14)
-	profile.Size = UDim2.new(1, -24, 0, 56)
-	profile.ZIndex = 4
-	profile.Parent = sidebar
-	local profileCorner = Instance.new("UICorner")
-	profileCorner.CornerRadius = UDim.new(0, 12)
-	profileCorner.Parent = profile
-	local profileStroke = Instance.new("UIStroke")
-	profileStroke.Color = accent
-	profileStroke.Transparency = 0.58
-	profileStroke.Thickness = 1
-	profileStroke.Parent = profile
-	local avatar = Instance.new("ImageLabel")
-	avatar.BackgroundColor3 = cardColor
-	avatar.BorderSizePixel = 0
-	avatar.Size = UDim2.fromOffset(32, 32)
-	avatar.Position = UDim2.fromOffset(10, 10)
-	avatar.ZIndex = 5
-	avatar.Parent = profile
-	local avatarCorner = Instance.new("UICorner")
-	avatarCorner.CornerRadius = UDim.new(1, 0)
-	avatarCorner.Parent = avatar
-	task.spawn(function()
-		local ok, image = pcall(function()
-			return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
-		end)
-		if ok and gui.Parent then
-			avatar.Image = image
-			dockAvatar.Image = image
 		end
 	end)
-	local profileName = Instance.new("TextLabel")
-	profileName.BackgroundTransparency = 1
-	profileName.Font = Enum.Font.GothamBold
-	profileName.Text = LocalPlayer.DisplayName
-	profileName.TextColor3 = ink
-	role(profileName, "ink")
-	profileName.TextSize = 13
-	profileName.TextXAlignment = Enum.TextXAlignment.Left
-	profileName.TextTruncate = Enum.TextTruncate.AtEnd
-	profileName.Position = UDim2.fromOffset(50, 10)
-	profileName.Size = UDim2.new(1, -60, 0, 16)
-	profileName.ZIndex = 5
-	profileName.Parent = profile
-	local profileGame = Instance.new("TextLabel")
-	profileGame.BackgroundTransparency = 1
-	profileGame.Font = Enum.Font.Gotham
-	profileGame.Text = STATE.admin and "Admin" or "Ant Evolution"
-	profileGame.TextColor3 = STATE.admin and accent or muted
-	role(profileGame, STATE.admin and "accentText" or "muted")
-	profileGame.TextSize = 11
-	profileGame.TextXAlignment = Enum.TextXAlignment.Left
-	profileGame.Position = UDim2.fromOffset(50, 28)
-	profileGame.Size = UDim2.new(1, -60, 0, 14)
-	profileGame.ZIndex = 5
-	profileGame.Parent = profile
 
-	local function label(parent, text, size, color, font, height)
-		local item = Instance.new("TextLabel")
-		item.BackgroundTransparency = 1
-		item.Font = font or Enum.Font.Gotham
-		item.Text = text
-		item.TextColor3 = color or ink
-		if color == muted then
-			item:SetAttribute("ZinoosRole", "muted")
-		elseif color == accent then
-			item:SetAttribute("ZinoosRole", "accentText")
-		elseif color == inkDark then
-			item:SetAttribute("ZinoosRole", "inkDark")
-		else
-			item:SetAttribute("ZinoosRole", "ink")
-		end
-		item.TextSize = size or 14
-		item.TextWrapped = true
-		item.TextXAlignment = Enum.TextXAlignment.Left
-		item.TextYAlignment = Enum.TextYAlignment.Top
-		item.Size = UDim2.new(1, 0, 0, height or 20)
-		item.ZIndex = 5
-		item.Parent = parent
-		return item
-	end
-
-	local function card(parent, title, order)
-		local slot = Instance.new("Frame")
-		slot.Name = title
-		slot.BackgroundTransparency = 1
-		slot.BorderSizePixel = 0
-		slot.LayoutOrder = order
-		slot.AutomaticSize = Enum.AutomaticSize.Y
-		slot.Size = UDim2.new(1, 0, 0, 0)
-		slot.ZIndex = 5
-		slot:SetAttribute("ZinoosSlot", true)
-		slot.Parent = parent
-		local box = Instance.new("CanvasGroup")
-		box.Name = "Motion"
-		box.BackgroundColor3 = cardColor
-		box.BackgroundTransparency = cardFade
-		role(box, "card")
-		box.BorderSizePixel = 0
-		box.AutomaticSize = Enum.AutomaticSize.Y
-		box.Size = UDim2.new(1, 0, 0, 0)
-		box.GroupTransparency = 0
-		box.ZIndex = 5
-		box.Parent = slot
-		local boxCorner = Instance.new("UICorner")
-		boxCorner.CornerRadius = UDim.new(0, 12)
-		boxCorner.Parent = box
-		local boxStroke = Instance.new("UIStroke")
-		boxStroke.Color = line
-		boxStroke.Transparency = 0.62
-		boxStroke.Thickness = 1
-		boxStroke.Parent = box
-		local boxPad = Instance.new("UIPadding")
-		boxPad.PaddingTop = UDim.new(0, 12)
-		boxPad.PaddingBottom = UDim.new(0, 12)
-		boxPad.PaddingLeft = UDim.new(0, 14)
-		boxPad.PaddingRight = UDim.new(0, 14)
-		boxPad.Parent = box
-		local boxLayout = Instance.new("UIListLayout")
-		boxLayout.Padding = UDim.new(0, 6)
-		boxLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		boxLayout.Parent = box
-		local heading = label(box, title, 13, muted, Enum.Font.GothamBold, 16)
-		heading.LayoutOrder = 0
-		return box
-	end
-
-	local searchRows = {}
-	local function remember(row, cardFrame, text)
-		row:SetAttribute("ZinoosSearch", string.lower(text))
-		local page = "Main"
-		local current = row
-		while current do
-			if current == playerPage then
-				page = "Player"
-				break
-			elseif current == homePage then
-				page = "Home"
-				break
-			elseif current == mainPage then
-				page = "Main"
-				break
-			end
-			current = current.Parent
-		end
-		searchRows[#searchRows + 1] = { row = row, card = cardFrame, text = string.lower(text), page = page }
-	end
-
-	local function paintSwitch(track, knob, on, instant)
-		local themeNow = STATE.hubThemeDef()
-		local goal = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
-		local color = on and themeNow.accent or themeNow.off
-		local knobColor = on and themeNow.inkDark or themeNow.accent
-		local glow = track:FindFirstChild("Glow")
-		local glowFade = on and 0.82 or 0.35
-		if instant then
-			knob.Position = goal
-			knob.BackgroundColor3 = knobColor
-			track.BackgroundColor3 = color
-		if glow and glow:IsA("UIStroke") then
-			glow.Color = themeNow.accent
-			glow.Transparency = glowFade
-		end
-			return
-		end
-		playMotion(knob, { Position = goal, BackgroundColor3 = knobColor }, tweenInfo.toggle)
-		playMotion(track, { BackgroundColor3 = color }, tweenInfo.toggle)
-		if glow and glow:IsA("UIStroke") then
-			glow.Color = themeNow.accent
-			playMotion(glow, { Transparency = glowFade }, tweenInfo.toggle)
-		end
+	STATE.toast = function(entry)
+		task.spawn(function()
+			elevate()
+			pcall(WindUI.Notify, WindUI, {
+				Title = tostring(entry.title),
+				Content = tostring(entry.message),
+				Icon = "bell",
+				Duration = 4.5,
+			})
+		end)
+		return true
 	end
 
 	local function onToggle(key, on)
 		STATE[key] = on
-		if key == "antiAfk" and on and pulseAntiAfk then
+		if key == "antiAfk" and on then
 			task.defer(pulseAntiAfk)
 		elseif key == "disable3d" then
 			STATE.apply3d()
 		elseif key == "fpsBoost" then
 			STATE.applyFpsBoost()
+		elseif key == "noPausePopup" then
+			hidePausePopup()
 		elseif key == "autoEquip" and on then
 			task.spawn(STATE.equipBestNow)
 		elseif key == "autoClaim" and on then
@@ -2593,1307 +1927,418 @@ local function installHub()
 				hum.WalkSpeed = 16
 			end
 		end
+		elevate()
 		saveConfig()
 	end
 
-	local function makeSwitch(parentBox, name, key, hint)
-		local row = Instance.new("Frame")
-		row.Name = name
-		row.BackgroundTransparency = 1
-		row.LayoutOrder = 1
-		row.Size = UDim2.new(1, 0, 0, hint and 50 or 30)
-		row.ZIndex = 6
-		row.Parent = parentBox
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamMedium
-		title.Text = name
-		title.TextColor3 = ink
-		role(title, "ink")
-		title.TextSize = 14
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Size = UDim2.new(1, -52, 0, 18)
-		title.ZIndex = 6
-		title.Parent = row
-		if hint then
-			local note = Instance.new("TextLabel")
-			note.BackgroundTransparency = 1
-			note.Font = Enum.Font.Gotham
-			note.Text = hint
-			note.TextColor3 = muted
-			role(note, "muted")
-			note.TextSize = 11
-			note.TextWrapped = true
-			note.TextXAlignment = Enum.TextXAlignment.Left
-			note.Position = UDim2.fromOffset(0, 18)
-			note.Size = UDim2.new(1, -52, 0, 28)
-			note.ZIndex = 6
-			note.Parent = row
-		end
-		local track = Instance.new("TextButton")
-		track.AutoButtonColor = false
-		track.Text = ""
-		track.AnchorPoint = Vector2.new(1, 0.5)
-		track.Position = UDim2.new(1, 0, 0.5, 0)
-		track.Size = UDim2.fromOffset(36, 20)
-		track.ZIndex = 7
-		track.Parent = row
-		local trackCorner = Instance.new("UICorner")
-		trackCorner.CornerRadius = UDim.new(1, 0)
-		trackCorner.Parent = track
-		local trackStroke = Instance.new("UIStroke")
-		trackStroke.Name = "Glow"
-		trackStroke:SetAttribute("ZinoosRole", "switchGlow")
-		trackStroke.Color = accent
-		trackStroke.Transparency = 0.35
-		trackStroke.Thickness = 1
-		trackStroke.Parent = track
-		local knob = Instance.new("Frame")
-		knob.AnchorPoint = Vector2.new(0, 0.5)
-		knob.Size = UDim2.fromOffset(14, 14)
-		knob.BackgroundColor3 = Color3.new(1, 1, 1)
-		knob.BorderSizePixel = 0
-		knob.ZIndex = 8
-		knob.Parent = track
-		local knobCorner = Instance.new("UICorner")
-		knobCorner.CornerRadius = UDim.new(1, 0)
-		knobCorner.Parent = knob
+	local function toggle(parent, title, key, desc)
+		local element = parent:Toggle({
+			Title = title,
+			Desc = desc,
+			Value = STATE[key] == true,
+			Callback = function(value)
+				value = value == true
+				if (STATE[key] == true) == value then
+					return
+				end
+				elevate()
+				onToggle(key, value)
+			end,
+		})
 		local control = STATE.toggleControls[key]
 		if type(control) ~= "table" then
 			control = {}
 			STATE.toggleControls[key] = control
 		end
 		control.value = STATE[key] == true
-		paintSwitch(track, knob, control.value, true)
-		onActivate(track, function()
-			control.value = not control.value
-			paintSwitch(track, knob, control.value)
-			onToggle(key, control.value == true)
-		end)
-		STATE.themeSwitches[#STATE.themeSwitches + 1] = { track = track, knob = knob, key = key }
-		remember(row, parentBox, name .. " " .. (hint or ""))
-		return row
+		control.element = element
+		return element
 	end
 
-	local popupBlock = Instance.new("TextButton")
-	popupBlock.BackgroundTransparency = 1
-	popupBlock.Text = ""
-	popupBlock.Size = UDim2.fromScale(1, 1)
-	popupBlock.Visible = false
-	popupBlock.ZIndex = 20
-	popupBlock.Parent = window
-	local popup = Instance.new("CanvasGroup")
-	popup.BackgroundColor3 = side
-	popup.BackgroundTransparency = 0.08
-	role(popup, "side")
-	popup.BorderSizePixel = 0
-	popup.ClipsDescendants = true
-	popup.Visible = false
-	popup.ZIndex = 21
-	popup.Size = UDim2.fromOffset(180, 0)
-	popup.Parent = window
-	local popupCorner = Instance.new("UICorner")
-	popupCorner.CornerRadius = UDim.new(0, 10)
-	popupCorner.Parent = popup
-	local popupStroke = Instance.new("UIStroke")
-	popupStroke.Color = line
-	popupStroke.Transparency = 0.45
-	popupStroke.Parent = popup
-	local popupScroll = Instance.new("ScrollingFrame")
-	popupScroll.BackgroundTransparency = 1
-	popupScroll.BorderSizePixel = 0
-	popupScroll.Size = UDim2.fromScale(1, 1)
-	popupScroll.CanvasSize = UDim2.fromOffset(0, 0)
-	popupScroll.ScrollBarThickness = 4
-	popupScroll.ScrollBarImageColor3 = accent
-	popupScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-	popupScroll.AutomaticCanvasSize = Enum.AutomaticSize.None
-	popupScroll.ZIndex = 22
-	popupScroll.Parent = popup
-	local popupLayout = Instance.new("UIListLayout")
-	popupLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	popupLayout.Parent = popupScroll
-	local popupPad = Instance.new("UIPadding")
-	popupPad.PaddingTop = UDim.new(0, 4)
-	popupPad.PaddingBottom = UDim.new(0, 4)
-	popupPad.Parent = popupScroll
-
-	local function closePopup()
-		popup.Visible = false
-		popupBlock.Visible = false
-		for _, child in ipairs(popupScroll:GetChildren()) do
-			if child:IsA("TextButton") then
-				child:Destroy()
-			end
+	local function syncToggle(key)
+		local control = STATE.toggleControls[key]
+		if type(control) ~= "table" then
+			return
+		end
+		local value = STATE[key] == true
+		control.value = value
+		local element = control.element
+		if element and element.Value ~= value then
+			elevate()
+			pcall(element.Set, element, value, false)
 		end
 	end
-	onActivate(popupBlock, closePopup, false)
 
-	local function openPopup(anchor, options, current, callback, multiple)
-		closePopup()
-		local rowHeight = 28
-		local picked = {}
-		if multiple and type(current) == "table" then
-			for _, name in ipairs(current) do
-				picked[name] = true
-			end
+	local function optionName(value)
+		if type(value) == "table" then
+			return value.Title or value.Name
 		end
-		local selectedIndex = 1
-		local foundSelected = false
-		local function paintChoice(choice, option)
-			local themeNow = STATE.hubThemeDef()
-			local on = (multiple and picked[option] == true) or (not multiple and option == current)
-			choice.BackgroundColor3 = on and themeNow.selected or themeNow.side
-			choice.BackgroundTransparency = on and themeNow.selectedFade or 1
-			choice.TextColor3 = themeNow.ink
-			choice.Text = (on and "  ✓ " or "    ") .. option
-		end
-		for index, option in ipairs(options) do
-			if multiple and picked[option] and not foundSelected then
-				selectedIndex = index
-				foundSelected = true
-			elseif not multiple and option == current then
-				selectedIndex = index
-			end
-			local choice = Instance.new("TextButton")
-			choice.Name = "Choice"
-			choice.LayoutOrder = index
-			choice.AutoButtonColor = false
-			choice.Font = Enum.Font.Gotham
-			choice.TextSize = 13
-			choice.TextColor3 = ink
-			choice.TextXAlignment = Enum.TextXAlignment.Left
-			choice.Size = UDim2.new(1, -8, 0, rowHeight)
-			choice.ZIndex = 23
-			choice.Parent = popupScroll
-			paintChoice(choice, option)
-			onActivate(choice, function()
-				if multiple then
-					picked[option] = not picked[option]
-					paintChoice(choice, option)
-					callback(option)
-				else
-					callback(option)
-					closePopup()
+		return value
+	end
+
+	local dropdowns = {}
+	local function choice(parent, title, desc, options, getValue, setValue)
+		local element = parent:Dropdown({
+			Title = title,
+			Desc = desc,
+			Values = options,
+			Value = getValue(),
+			Callback = function(value)
+				value = optionName(value)
+				if type(value) ~= "string" or value == getValue() then
+					return
 				end
-			end)
+				elevate()
+				setValue(value)
+				saveConfig()
+			end,
+		})
+		table.insert(dropdowns, { element = element, get = getValue })
+		return element
+	end
+
+	local sections = {}
+	local paragraphSection = {}
+	local pendingReflow = {}
+	local function isShown(box)
+		local frame = typeof(box.ElementFrame) == "Instance" and box.ElementFrame or nil
+		if not frame or not frame.Parent then
+			return false
 		end
-		local popupWidth = 180
-		for _, option in ipairs(options) do
-			local estimate = 36 + #tostring(option) * 7
-			if estimate > popupWidth then
-				popupWidth = estimate
+		local node = frame
+		while node and not node:IsA("ScreenGui") do
+			if node:IsA("GuiObject") and not node.Visible then
+				return false
 			end
+			node = node.Parent
 		end
-		if popupWidth > 280 then
-			popupWidth = 280
-		end
-		local contentHeight = #options * rowHeight + 8
-		local scale = uiScale.Scale
-		if scale < 0.05 then
-			scale = 1
-		end
-		local view = viewSize()
-		local origin = window.AbsolutePosition
-		local anchorPos = anchor.AbsolutePosition
-		local anchorHeight = anchor.AbsoluteSize.Y
-		local roomBelow = view.Y - (anchorPos.Y + anchorHeight + 8)
-		local roomAbove = anchorPos.Y - 8
-		local room = math.max(roomBelow, roomAbove)
-		room = math.clamp(room, rowHeight * scale + 8, math.max(rowHeight * scale + 8, view.Y - 16))
-		local popupPixels = math.min(contentHeight * scale, room)
-		local popupHeight = popupPixels / scale
-		popup.Size = UDim2.fromOffset(popupWidth, 0)
-		popup.GroupTransparency = 1
-		playMotion(popup, {
-			Size = UDim2.fromOffset(popupWidth, popupHeight),
-			GroupTransparency = 0,
-		}, tweenInfo.drop)
-		popupScroll.CanvasSize = UDim2.fromOffset(0, contentHeight)
-		local openAbove = roomBelow + 1 < popupPixels and roomAbove > roomBelow
-		local pixelY = openAbove and (anchorPos.Y - popupPixels - 6) or (anchorPos.Y + anchorHeight + 6)
-		pixelY = math.clamp(pixelY, 8, math.max(8, view.Y - popupPixels - 8))
-		local pixelX = math.clamp(anchorPos.X, 8, math.max(8, view.X - popupWidth * scale - 8))
-		popup.Position = UDim2.fromOffset((pixelX - origin.X) / scale, (pixelY - origin.Y) / scale)
-		local scrollY = math.max(0, (selectedIndex - 1) * rowHeight)
-		local visibleRows = math.max(popupHeight - 8, rowHeight)
-		if scrollY > contentHeight - visibleRows then
-			scrollY = math.max(0, contentHeight - visibleRows)
-		end
-		popupScroll.CanvasPosition = Vector2.new(0, scrollY)
-		popup.Visible = true
-		popupBlock.Visible = true
+		return node ~= nil and node.Enabled
 	end
-
-	local function makeDropdown(parentBox, name, getValue, options, callback, stacked)
-		local row = Instance.new("Frame")
-		row.BackgroundTransparency = 1
-		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, stacked and 52 or 30)
-		row.ZIndex = 6
-		row.Parent = parentBox
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamMedium
-		title.Text = name
-		title.TextColor3 = ink
-		role(title, "ink")
-		title.TextSize = 14
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.TextTruncate = Enum.TextTruncate.AtEnd
-		title.Size = stacked and UDim2.new(1, 0, 0, 18) or UDim2.new(0.48, 0, 1, 0)
-		title.ZIndex = 6
-		title.Parent = row
-		local pick = Instance.new("TextButton")
-		pick.AutoButtonColor = false
-		pick.Font = Enum.Font.Gotham
-		pick.TextSize = 13
-		pick.TextColor3 = ink
-		role(pick, "field")
-		pick.TextXAlignment = stacked and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
-		pick.TextTruncate = Enum.TextTruncate.AtEnd
-		pick.Text = stacked and (" " .. getValue()) or getValue()
-		pick.BackgroundColor3 = panel
-		pick.BackgroundTransparency = cardFade
-		pick.AnchorPoint = stacked and Vector2.new(0, 1) or Vector2.new(1, 0.5)
-		pick.Position = stacked and UDim2.new(0, 0, 1, 0) or UDim2.new(1, 0, 0.5, 0)
-		pick.Size = stacked and UDim2.new(1, 0, 0, 26) or UDim2.fromOffset(132, 26)
-		pick.ZIndex = 7
-		pick.Parent = row
-		local pickCorner = Instance.new("UICorner")
-		pickCorner.CornerRadius = UDim.new(0, 8)
-		pickCorner.Parent = pick
-		local pickStroke = Instance.new("UIStroke")
-		pickStroke.Color = accent
-		pickStroke.Transparency = 0.58
-		pickStroke.Thickness = 1
-		pickStroke.Parent = pick
-		bindPress(pick)
-		onActivate(pick, function()
-			openPopup(pick, options, getValue(), function(option)
-				callback(option)
-				pick.Text = stacked and (" " .. getValue()) or getValue()
-			end)
+	local function reflow(box)
+		if not box or windowGone or box.Opened ~= true or not isShown(box) then
+			return
+		end
+		elevate()
+		pcall(box.Open, box, true)
+	end
+	local function reflowShown()
+		for _, box in ipairs(sections) do
+			reflow(box)
+		end
+	end
+	local function queueReflow(box)
+		if not box or pendingReflow[box] then
+			return
+		end
+		pendingReflow[box] = true
+		task.delay(0.1, function()
+			pendingReflow[box] = nil
+			reflow(box)
 		end)
-		remember(row, parentBox, name)
-		return pick
 	end
 
-	local function makeMultiDropdown(parentBox, name, getList, options, onToggleName, labelOf)
-		local showList = labelOf or STATE.rarityLabel
-		local row = Instance.new("Frame")
-		row.BackgroundTransparency = 1
-		row.LayoutOrder = 2
-		row.Size = UDim2.new(1, 0, 0, 30)
-		row.ZIndex = 6
-		row.Parent = parentBox
-		local title = Instance.new("TextLabel")
-		title.BackgroundTransparency = 1
-		title.Font = Enum.Font.GothamMedium
-		title.Text = name
-		title.TextColor3 = ink
-		role(title, "ink")
-		title.TextSize = 14
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.Size = UDim2.new(0.42, 0, 1, 0)
-		title.ZIndex = 6
-		title.Parent = row
-		local pick = Instance.new("TextButton")
-		pick.AutoButtonColor = false
-		pick.Font = Enum.Font.Gotham
-		pick.TextSize = 13
-		pick.TextColor3 = ink
-		role(pick, "field")
-		pick.TextXAlignment = Enum.TextXAlignment.Left
-		pick.TextTruncate = Enum.TextTruncate.AtEnd
-		pick.Text = " " .. showList(getList())
-		pick.BackgroundColor3 = panel
-		pick.BackgroundTransparency = cardFade
-		pick.AnchorPoint = Vector2.new(1, 0.5)
-		pick.Position = UDim2.new(1, 0, 0.5, 0)
-		pick.Size = UDim2.fromOffset(210, 26)
-		pick.ZIndex = 7
-		pick.Parent = row
-		local pickCorner = Instance.new("UICorner")
-		pickCorner.CornerRadius = UDim.new(0, 8)
-		pickCorner.Parent = pick
-		local pickStroke = Instance.new("UIStroke")
-		pickStroke.Color = accent
-		pickStroke.Transparency = 0.58
-		pickStroke.Thickness = 1
-		pickStroke.Parent = pick
-		bindPress(pick)
-		onActivate(pick, function()
-			openPopup(pick, options, getList(), function(option)
-				onToggleName(option)
-				pick.Text = " " .. showList(getList())
-			end, true)
-		end)
-		remember(row, parentBox, name)
-		return pick
-	end
-
-	STATE.toggleControls = {}
-
-	local columns = Instance.new("Frame")
-	columns.BackgroundTransparency = 1
-	columns.Size = UDim2.new(1, 0, 0, 0)
-	columns.AutomaticSize = Enum.AutomaticSize.Y
-	columns.Parent = mainPage
-	local columnLayout = Instance.new("UIListLayout")
-	columnLayout.FillDirection = Enum.FillDirection.Horizontal
-	columnLayout.Padding = UDim.new(0, 12)
-	columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	columnLayout.Parent = columns
-
-	local function column(order)
-		local frame = Instance.new("Frame")
-		frame.BackgroundTransparency = 1
-		frame.LayoutOrder = order
-		frame.Size = UDim2.new(0.5, -6, 0, 0)
-		frame.AutomaticSize = Enum.AutomaticSize.Y
-		frame.Parent = columns
-		local layout = Instance.new("UIListLayout")
-		layout.Padding = UDim.new(0, 12)
-		layout.SortOrder = Enum.SortOrder.LayoutOrder
-		layout.Parent = frame
-		return frame
-	end
-	local leftColumn = column(1)
-	local rightColumn = column(2)
-
-local farmCard = card(leftColumn, "FARM", 1)
-makeSwitch(farmCard, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. The game collects it")
-makeSwitch(farmCard, "Auto Bite", "autoBite", "Bites a bug when it is already in reach")
-makeSwitch(farmCard, "Auto Ability", "autoAbility", "Uses your mutation ability on a nearby bug")
-makeSwitch(farmCard, "Critter ESP", "critterEsp", "Shows bug names and health")
-makeSwitch(farmCard, "Player ESP", "playerEsp", "Shows other players")
-
-local progressCard = card(rightColumn, "PROGRESS", 1)
-makeSwitch(progressCard, "Auto Evolve", "autoEvolve", "Evolves when you have the power")
-makeSwitch(progressCard, "Auto Rebirth", "autoRebirth", "Rebirths only when you are at the top stage")
-makeSwitch(progressCard, "Auto Hatch", "autoHatch", "Hatches the egg below when you can pay for it")
-makeDropdown(progressCard, "Egg", function()
-	return STATE.egg
-end, { "Royal", "Colony" }, function(option)
-	STATE.egg = option
-	saveConfig()
-end)
-makeSwitch(progressCard, "Auto Equip Best Pet", "autoEquip", "Equips your best pets")
-makeSwitch(progressCard, "Auto Claim Rewards", "autoClaim", "Claims daily, playtime, quests and records")
-makeSwitch(progressCard, "Redeem Codes", "autoCodes", "Redeems the known codes once")
-
-	local screenCard = card(rightColumn, "SCREEN", 4)
-	makeDropdown(screenCard, "Hub Size", function()
-		return STATE.hubSize or "Compact"
-	end, { "Compact", "Normal", "Large" }, function(option)
-		if STATE.hubSizes[option] then
-			STATE.hubSize = option
+	local liveText = {}
+	local function info(parent, title, text)
+		local paragraph = parent:Paragraph({ Title = title, Desc = text })
+		liveText[paragraph] = text
+		if type(parent) == "table" and parent.__type == "Section" then
+			paragraphSection[paragraph] = parent
 		end
-		saveConfig()
-		fitScale()
-		task.defer(function()
-			if typeof(STATE.clampHub) == "function" then
-				pcall(STATE.clampHub)
-			end
-		end)
-	end, true)
-
-	local function statChip(parentFrame, title, order)
-		local chip = Instance.new("Frame")
-		chip.BackgroundColor3 = cardColor
-		chip.BackgroundTransparency = cardFade
-		role(chip, "card")
-		chip.BorderSizePixel = 0
-		chip.LayoutOrder = order
-		chip.Size = UDim2.new(0.5, -5, 0, 58)
-		chip.ZIndex = 5
-		chip.Parent = parentFrame
-		local chipCorner = Instance.new("UICorner")
-		chipCorner.CornerRadius = UDim.new(0, 12)
-		chipCorner.Parent = chip
-		local chipStroke = Instance.new("UIStroke")
-		chipStroke.Color = accent
-		chipStroke.Transparency = 0.62
-		chipStroke.Thickness = 1
-		chipStroke.Parent = chip
-		local chipTitle = Instance.new("TextLabel")
-		chipTitle.BackgroundTransparency = 1
-		chipTitle.Font = Enum.Font.Gotham
-		chipTitle.Text = title
-		chipTitle.TextColor3 = muted
-		role(chipTitle, "muted")
-		chipTitle.TextSize = 12
-		chipTitle.TextXAlignment = Enum.TextXAlignment.Left
-		chipTitle.Position = UDim2.fromOffset(12, 8)
-		chipTitle.Size = UDim2.new(1, -20, 0, 16)
-		chipTitle.ZIndex = 6
-		chipTitle.Parent = chip
-		local chipValue = Instance.new("TextLabel")
-		chipValue.BackgroundTransparency = 1
-		chipValue.Font = Enum.Font.GothamBold
-		chipValue.Text = "-"
-		chipValue.TextColor3 = ink
-		role(chipValue, "ink")
-		chipValue.TextSize = 18
-		chipValue.TextXAlignment = Enum.TextXAlignment.Left
-		chipValue.Position = UDim2.fromOffset(12, 26)
-		chipValue.Size = UDim2.new(1, -20, 0, 24)
-		chipValue.ZIndex = 6
-		chipValue.Parent = chip
-		return chipValue
+		return paragraph
+	end
+	local function setInfo(paragraph, text)
+		if paragraph and liveText[paragraph] ~= text then
+			liveText[paragraph] = text
+			elevate()
+			pcall(paragraph.SetDesc, paragraph, text)
+			queueReflow(paragraphSection[paragraph])
+		end
 	end
 
-	local lookCard = card(homePage, "THEME", 0)
-	local themeNote = label(lookCard, "Paste a theme and import it. It saves on this account.", 12, muted, Enum.Font.Gotham, 32)
-	themeNote.LayoutOrder = 1
-	local themeBox = Instance.new("TextBox")
-	themeBox.Name = "ThemeImport"
-	themeBox.BackgroundColor3 = panel
-	themeBox.BackgroundTransparency = cardFade
-	themeBox.BorderSizePixel = 0
-	themeBox.ClearTextOnFocus = false
-	themeBox.MultiLine = true
-	themeBox.TextWrapped = true
-	themeBox.Font = Enum.Font.Gotham
-	themeBox.PlaceholderText = "{\"Kind\":\"theme\",\"Name\":\"My theme\",\"Theme\":{...}}"
-	themeBox.PlaceholderColor3 = muted
-	themeBox.Text = ""
-	themeBox.TextColor3 = ink
-	themeBox.TextSize = 12
-	themeBox.TextXAlignment = Enum.TextXAlignment.Left
-	themeBox.TextYAlignment = Enum.TextYAlignment.Top
-	themeBox.LayoutOrder = 2
-	themeBox.Size = UDim2.new(1, 0, 0, 78)
-	themeBox.ZIndex = 6
-	themeBox.Parent = lookCard
-	role(themeBox, "field")
-	local themeBoxCorner = Instance.new("UICorner")
-	themeBoxCorner.CornerRadius = UDim.new(0, 8)
-	themeBoxCorner.Parent = themeBox
-	local themeBoxPad = Instance.new("UIPadding")
-	themeBoxPad.PaddingTop = UDim.new(0, 6)
-	themeBoxPad.PaddingBottom = UDim.new(0, 6)
-	themeBoxPad.PaddingLeft = UDim.new(0, 8)
-	themeBoxPad.PaddingRight = UDim.new(0, 8)
-	themeBoxPad.Parent = themeBox
-	local themeStatus = label(lookCard, STATE.themeName or "AstaTheme", 12, muted, Enum.Font.Gotham, 16)
-	themeStatus.Name = "ThemeStatus"
-	themeStatus.LayoutOrder = 3
-	local importButton = Instance.new("TextButton")
-	importButton.AutoButtonColor = false
-	importButton.Font = Enum.Font.GothamBold
-	importButton.Text = "Import Theme"
-	importButton.TextSize = 14
-	importButton.TextColor3 = inkDark
-	importButton.BackgroundColor3 = accent
-	importButton.LayoutOrder = 4
-	importButton.Size = UDim2.new(1, 0, 0, 34)
-	importButton.ZIndex = 6
-	importButton.Parent = lookCard
-	role(importButton, "accentFill")
-	importButton:SetAttribute("ZinoosTextRole", "inkDark")
-	local importCorner = Instance.new("UICorner")
-	importCorner.CornerRadius = UDim.new(0, 8)
-	importCorner.Parent = importButton
-	bindPress(importButton)
-	onActivate(importButton, function()
-		local imported, err = STATE.useTheme(themeBox.Text)
-		if imported then
-			themeBox.Text = ""
-			themeStatus.Text = "Imported " .. (STATE.themeName or "theme")
-			themeStatus.TextColor3 = STATE.hubThemeDef().accent
-		else
-			themeStatus.Text = err or "That is not a theme."
-			themeStatus.TextColor3 = Color3.fromRGB(255, 120, 150)
+	local function button(parent, title, desc, icon, callback)
+		return parent:Button({
+			Title = title,
+			Desc = desc,
+			Icon = icon,
+			Callback = function()
+				elevate()
+				local ok, err = pcall(callback)
+				if not ok then
+					notify("system", title .. " failed", tostring(err))
+				end
+			end,
+		})
+	end
+
+	local function section(tab, title, icon)
+		local box = tab:Section({ Title = title, Icon = icon, Box = true, Opened = true })
+		table.insert(sections, box)
+		return box
+	end
+
+	local function confirm(title, content, onYes)
+		local ok = pcall(Window.Dialog, Window, {
+			Title = title,
+			Content = content,
+			Buttons = {
+				{ Title = "Cancel", Variant = "Secondary", Callback = function() end },
+				{ Title = "Confirm", Variant = "Primary", Callback = function()
+					elevate()
+					onYes()
+				end },
+			},
+		})
+		if not ok then
+			onYes()
 		end
+	end
+
+	local homeTab = Window:Tab({ Title = "Home", Icon = "house" })
+	local farmTab = Window:Tab({ Title = "Farm", Icon = "target" })
+	local progressTab = Window:Tab({ Title = "Progress", Icon = "trending-up" })
+	local playerTab = Window:Tab({ Title = "Player", Icon = "user" })
+	local settingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
+	elevate()
+
+	local overview = info(homeTab, "Overview", "Loading your stats...")
+	button(homeTab, "Start / Stop Farm", "Turns Auto Orb Farm on or off", "power", function()
+		local on = STATE.autoOrb ~= true
+		onToggle("autoOrb", on)
+		syncToggle("autoOrb")
+		notify("system", on and "Farm started" or "Farm stopped", on and "Walking to nearby food" or "Auto Orb Farm is off")
 	end)
-	remember(importButton, lookCard, "import theme")
+	button(homeTab, "Claim Now", "Claims daily, playtime, quests and records", "gift", function()
+		STATE.claimNow()
+		notify("system", "Claimed what was ready", "")
+	end)
+	button(homeTab, "Equip Best Now", "Equips your best pets", "paw-print", function()
+		STATE.equipBestNow()
+		notify("system", "Best pets equipped", "")
+	end)
+	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
-	local introSlot = Instance.new("Frame")
-	introSlot.BackgroundTransparency = 1
-	introSlot.BorderSizePixel = 0
-	introSlot.LayoutOrder = 1
-	introSlot.AutomaticSize = Enum.AutomaticSize.Y
-	introSlot.Size = UDim2.new(1, 0, 0, 0)
-	introSlot:SetAttribute("ZinoosSlot", true)
-	introSlot.Parent = homePage
-	local intro = Instance.new("CanvasGroup")
-	intro.Name = "Motion"
-	intro.BackgroundTransparency = 1
-	intro.AutomaticSize = Enum.AutomaticSize.Y
-	intro.Size = UDim2.new(1, 0, 0, 0)
-	intro.Parent = introSlot
-	local introLayout = Instance.new("UIListLayout")
-	introLayout.Padding = UDim.new(0, 4)
-	introLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	introLayout.Parent = intro
-	local welcome = label(intro, "Welcome", 22, ink, Enum.Font.GothamBold, 28)
-	welcome.LayoutOrder = 1
-	local blurb = label(intro, "Steps you onto nearby food so the game collects it, then evolves, rebirths, hatches and claims.", 14, muted, Enum.Font.Gotham, 36)
-	blurb.LayoutOrder = 2
-	local sessionStarted = os.time()
-	local function sessionClock()
-		local elapsed = math.max(0, os.time() - sessionStarted)
-		local hours = math.floor(elapsed / 3600)
-		local minutes = math.floor((elapsed % 3600) / 60)
-		local seconds = elapsed % 60
-		if hours > 0 then
-			return string.format("%d:%02d:%02d", hours, minutes, seconds)
-		end
-		return string.format("%d:%02d", minutes, seconds)
+	local farmInfo
+	do
+		local farmBox = section(farmTab, "Food", "apple")
+		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. The game collects it")
+		toggle(farmBox, "Auto Bite", "autoBite", "Bites a bug when it is already in reach")
+		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your mutation ability on a nearby bug")
+		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))
+
+		local espBox = section(farmTab, "ESP", "eye")
+		toggle(espBox, "Critter ESP", "critterEsp", "Shows bug names and health")
+		toggle(espBox, "Player ESP", "playerEsp", "Shows other players")
 	end
-	local sessionText = label(intro, "Session 0:00", 14, ink, Enum.Font.GothamBold, 20)
-	sessionText.LayoutOrder = 3
-	local statSlot = Instance.new("Frame")
-	statSlot.BackgroundTransparency = 1
-	statSlot.BorderSizePixel = 0
-	statSlot.LayoutOrder = 4
-	statSlot.AutomaticSize = Enum.AutomaticSize.Y
-	statSlot.Size = UDim2.new(1, 0, 0, 0)
-	statSlot:SetAttribute("ZinoosSlot", true)
-	statSlot.Parent = homePage
-	local statGrid = Instance.new("CanvasGroup")
-	statGrid.Name = "Motion"
-	statGrid.BackgroundTransparency = 1
-	statGrid.Size = UDim2.new(1, 0, 0, 128)
-	statGrid.Parent = statSlot
-	local solvesText = statChip(statGrid, "Power", 1)
-	solvesText.Parent.Position = UDim2.fromOffset(0, 0)
-	local movesText = statChip(statGrid, "Stage", 2)
-	movesText.Parent.Position = UDim2.new(0.5, 5, 0, 0)
-	local tableText = statChip(statGrid, "Rebirths", 3)
-	tableText.Parent.Position = UDim2.fromOffset(0, 68)
-	local statusText = statChip(statGrid, "Doing", 4)
-	statusText.Parent.Position = UDim2.new(0.5, 5, 0, 68)
-	statusText.TextSize = 14
-	statusText.TextTruncate = Enum.TextTruncate.AtEnd
-	local refreshHealth = nil
-	STATE.refreshHealth = nil
 
-	local note = card(homePage, "HOW IT WORKS", 7)
-	local noteBody = label(note, "The farm walks you onto food that is already near you, and the game collects it. Evolve only fires when you have the power. Rebirth only fires at the top stage. Hatch buys the egg you picked.", 13, ink, Enum.Font.Gotham, 56)
-	noteBody.LayoutOrder = 1
+	do
+		local growBox = section(progressTab, "Evolve", "sparkles")
+		toggle(growBox, "Auto Evolve", "autoEvolve", "Evolves when you have the power")
+		toggle(growBox, "Auto Rebirth", "autoRebirth", "Rebirths only when you are at the top stage")
 
-	local activityCard = card(homePage, "ACTIVITY", 8)
-	local activityBody = label(activityCard, "Waiting for the next thing the hub does.", 13, muted, Enum.Font.Gotham, 72)
-	activityBody.LayoutOrder = 1
-	activityBody.AutomaticSize = Enum.AutomaticSize.Y
-	activityBody.Size = UDim2.new(1, 0, 0, 0)
-	activityBody.TextWrapped = true
-	remember(activityBody, activityCard, "activity status solves")
-	local function refreshActivity()
+		local hatchBox = section(progressTab, "Pets", "egg")
+		toggle(hatchBox, "Auto Hatch", "autoHatch", "Hatches the egg below when you can pay for it")
+		choice(hatchBox, "Egg", "Royal waits until you can afford it", EGG_OPTIONS, function()
+			return STATE.egg
+		end, function(option)
+			STATE.egg = option
+		end)
+		toggle(hatchBox, "Auto Equip Best Pet", "autoEquip", "Equips your best pets")
+
+		local claimBox = section(progressTab, "Rewards", "gift")
+		toggle(claimBox, "Auto Claim Rewards", "autoClaim", "Claims daily, playtime, quests and records")
+		toggle(claimBox, "Redeem Codes", "autoCodes", "Redeems the known codes once")
+	end
+
+	do
+		local moveBox = section(playerTab, "Movement", "footprints")
+		toggle(moveBox, "Custom Walk Speed", "walkSpeed")
+		choice(moveBox, "Walk Speed", "16 is the normal speed", SPEED_OPTIONS, function()
+			return tostring(STATE.speed)
+		end, function(option)
+			STATE.speed = tonumber(option) or STATE.speed
+		end)
+		toggle(moveBox, "Infinite Jump", "infiniteJump")
+		toggle(moveBox, "Noclip", "noclip")
+		toggle(moveBox, "Instant Interactions", "instantPrompts", "No hold time on prompts")
+		toggle(moveBox, "Fly", "fly", "PC: WASD, Space up, Left Ctrl down")
+		choice(moveBox, "Fly Speed", nil, FLY_SPEED_OPTIONS, function()
+			return tostring(STATE.flySpeed)
+		end, function(option)
+			STATE.flySpeed = tonumber(option) or STATE.flySpeed
+		end)
+
+		local clientBox = section(playerTab, "Performance & AFK", "cpu")
+		toggle(clientBox, "Anti AFK", "antiAfk")
+		toggle(clientBox, "Auto Reconnect on Kick", "autoReconnect")
+		toggle(clientBox, "Hide Roblox Pause Popup", "noPausePopup")
+		toggle(clientBox, "Potato Mode", "fpsBoost", "Lowest graphics, no shadows or effects")
+		toggle(clientBox, "AFK Black Screen", "disable3d", "Stops drawing the world")
+
+		local serverBox = section(playerTab, "Server", "server")
+		info(serverBox, "This Server", "Job " .. string.sub(game.JobId, 1, 8) .. "... · Place " .. tostring(game.PlaceId))
+		button(serverBox, "Rejoin", nil, "rotate-ccw", function()
+			STATE.rejoin()
+		end)
+		button(serverBox, "Server Hop", nil, "shuffle", function()
+			if not STATE.hop(false) then
+				notify("system", "No other server found", "Try again in a moment")
+			end
+		end)
+		button(serverBox, "Lowest Player Server", nil, "users", function()
+			if not STATE.hop(true) then
+				notify("system", "No other server found", "Try again in a moment")
+			end
+		end)
+		button(serverBox, "Copy Job ID", nil, "copy", function()
+			notify("system", STATE.copyJobId() and "Job ID copied" or "Copy is not available", game.JobId)
+		end)
+	end
+
+	do
+		local lookBox = section(settingsTab, "Look", "palette")
+		local themes = { "Zinoos" }
+		local okThemes, list = pcall(WindUI.GetThemes, WindUI)
+		if okThemes and type(list) == "table" then
+			for key, value in pairs(list) do
+				local name = type(key) == "string" and key or value
+				if type(name) == "string" and name ~= "Zinoos" and not table.find(themes, name) then
+					table.insert(themes, name)
+				end
+			end
+			table.sort(themes, function(a, b)
+				if a == "Zinoos" then
+					return true
+				end
+				if b == "Zinoos" then
+					return false
+				end
+				return a < b
+			end)
+		end
+		choice(lookBox, "Theme", nil, themes, function()
+			return themeName
+		end, function(option)
+			themeName = option
+			STATE.windTheme = option
+			pcall(WindUI.SetTheme, WindUI, option)
+		end)
+		choice(lookBox, "Menu Size", nil, { "Compact", "Normal", "Large" }, function()
+			return STATE.hubSize or "Normal"
+		end, function(option)
+			STATE.hubSize = option
+			saveConfig()
+			rebuildMenu()
+		end)
+		choice(lookBox, "Open / Close Key (PC)", nil, KEY_OPTIONS, function()
+			return STATE.toggleKey
+		end, function(option)
+			STATE.toggleKey = option
+			pcall(Window.SetToggleKey, Window, Enum.KeyCode[option])
+		end)
+		toggle(lookBox, "Start Hidden", "hideOnStart", "Opens with the key or the Zinoos button")
+		toggle(lookBox, "Hub Notifications", "notifications")
+
+		local configBox = section(settingsTab, "Config", "save")
+		info(configBox, "Saving", "Changes save automatically for this Roblox account.")
+		button(configBox, "Save Now", nil, "save", function()
+			saveConfig()
+			notify("system", "Saved", "Settings saved for " .. LocalPlayer.DisplayName)
+		end)
+
+		local communityBox = section(settingsTab, "Community", "message-circle")
+		button(communityBox, "Copy Discord Invite", "discord.gg/94pC3T6NZG", "copy", function()
+			local invite = "https://discord.gg/94pC3T6NZG"
+			if typeof(setclipboard) == "function" and pcall(setclipboard, invite) then
+				notify("system", "Invite copied", "Paste it in your browser")
+			else
+				notify("system", "Discord invite", invite)
+			end
+		end)
+		button(communityBox, "Unload Hub", "Stops everything and removes the menu", "log-out", function()
+			confirm("Unload Zinoos Hub?", "All automation stops until you run the loader again.", function()
+				task.defer(unloadHub)
+			end)
+		end)
+	end
+
+	pcall(Window.SelectTab, Window, 1)
+	for _, delay in ipairs({ 0.2, 0.6, 1.5 }) do
+		task.delay(delay, reflowShown)
+	end
+	local tabModule = Window.TabModule
+	if type(tabModule) == "table" and type(tabModule.OnChange) == "function" then
+		local previous = tabModule.OnChangeFunc
+		pcall(tabModule.OnChange, tabModule, function(...)
+			if type(previous) == "function" then
+				pcall(previous, ...)
+			end
+			task.delay(0.15, reflowShown)
+			task.delay(0.5, reflowShown)
+		end)
+	end
+
+	local sessionStarted = os.time()
+	local function refresh()
+		local elapsed = math.max(0, os.time() - sessionStarted)
+		local clock = elapsed >= 3600
+			and string.format("%d:%02d:%02d", elapsed // 3600, elapsed % 3600 // 60, elapsed % 60)
+			or string.format("%d:%02d", elapsed // 60, elapsed % 60)
+		elevate()
+		setInfo(overview, string.format(
+			"%s\nPower %s  ·  %s  ·  Rebirth %s\nDNA %s  ·  Egg %s\nSession %s",
+			tostring(STATE.status or "Waiting"),
+			STATE.shortNumber(STATE.power or 0),
+			tostring(STATE.stageName or ""),
+			tostring(STATE.rebirths or 0),
+			STATE.shortNumber(STATE.dna or 0),
+			tostring(STATE.egg or "Royal"),
+			clock
+		))
 		local lines = {
-			"Status · " .. tostring(STATE.status or "Waiting"),
 			"Food · " .. tostring(STATE.detail or ""),
 			"Stage · " .. tostring(STATE.stageName or ""),
-			"DNA · " .. STATE.shortNumber(STATE.dna or 0),
 		}
 		if STATE.antiAfk == true then
-			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK working through VirtualUser" or "Anti AFK waiting for idle"
+			lines[#lines + 1] = STATE.antiAfkOperational == true and "Anti AFK active" or "Anti AFK waiting for idle"
 		end
-		if #STATE.activity > 0 then
-			lines[#lines + 1] = table.concat(STATE.activity, "\n")
+		for _, item in ipairs(STATE.activity) do
+			lines[#lines + 1] = tostring(item)
 		end
-		local text = table.concat(lines, "\n")
-		if activityBody.Text ~= text then
-			activityBody.Text = text
-		end
-		activityBody.TextColor3 = STATE.hubThemeDef().ink
+		setInfo(activityInfo, table.concat(lines, "\n"))
+		setInfo(farmInfo, tostring(STATE.status or "Waiting") .. "\n" .. tostring(STATE.detail or ""))
 	end
-	STATE.refreshActivity = refreshActivity
 
-	local function actionButton(parentFrame, text, order, filled, callback)
-		local button = Instance.new("TextButton")
-		button.AutoButtonColor = false
-		button.Font = Enum.Font.GothamBold
-		button.Text = text
-		button.TextSize = 14
-		button.TextColor3 = filled and inkDark or ink
-		button.BackgroundColor3 = filled and accent or panel
-		button.BackgroundTransparency = filled and 0 or cardFade
-		role(button, filled and "accentFill" or "card")
-		button:SetAttribute("ZinoosTextRole", filled and "inkDark" or "ink")
-		button.LayoutOrder = order
-		button.Size = UDim2.new(1, 0, 0, 34)
-		button.ZIndex = 6
-		button.Parent = parentFrame
-		local buttonCorner = Instance.new("UICorner")
-		buttonCorner.CornerRadius = UDim.new(0, 8)
-		buttonCorner.Parent = button
-		if not filled then
-			local buttonStroke = Instance.new("UIStroke")
-			buttonStroke.Color = accent
-			buttonStroke.Transparency = 0.5
-			buttonStroke.Thickness = 1
-			buttonStroke.Parent = button
-		end
-		bindPress(button)
-		button.MouseEnter:Connect(function()
-			local themeNow = STATE.hubThemeDef()
-			local base = filled and themeNow.accent or themeNow.card
-			playMotion(button, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) }, tweenInfo.hover)
-		end)
-		button.MouseLeave:Connect(function()
-			local themeNow = STATE.hubThemeDef()
-			playMotion(button, { BackgroundColor3 = filled and themeNow.accent or themeNow.card }, tweenInfo.hover)
-		end)
-		onActivate(button, callback)
-		remember(button, parentFrame, text)
-		return button
-	end
-	local playerSlot = Instance.new("Frame")
-	playerSlot.BackgroundTransparency = 1
-	playerSlot.BorderSizePixel = 0
-	playerSlot.LayoutOrder = 1
-	playerSlot.AutomaticSize = Enum.AutomaticSize.Y
-	playerSlot.Size = UDim2.new(1, 0, 0, 0)
-	playerSlot:SetAttribute("ZinoosSlot", true)
-	playerSlot.Parent = playerPage
-	local playerMotion = Instance.new("CanvasGroup")
-	playerMotion.Name = "Motion"
-	playerMotion.BackgroundTransparency = 1
-	playerMotion.AutomaticSize = Enum.AutomaticSize.Y
-	playerMotion.Size = UDim2.new(1, 0, 0, 0)
-	playerMotion.Parent = playerSlot
-	local playerBlurb = label(playerMotion, "Movement and client options. WalkSpeed is left alone while you are seated.", 14, muted, Enum.Font.Gotham, 36)
-	playerBlurb.LayoutOrder = 1
-
-	local movement = card(playerPage, "MOVEMENT", 2)
-	makeSwitch(movement, "WalkSpeed", "walkSpeed")
-	makeDropdown(movement, "Speed", function()
-		return tostring(STATE.speed)
-	end, SPEED_OPTIONS, function(option)
-		STATE.speed = tonumber(option) or STATE.speed
-		saveConfig()
-	end)
-	makeSwitch(movement, "Infinite Jump", "infiniteJump")
-	makeSwitch(movement, "Noclip", "noclip")
-	makeSwitch(movement, "Instant ProximityPrompt", "instantPrompts", "Prompts fire without holding the key")
-
-	local flyCard = card(playerPage, "FLY", 3)
-	makeSwitch(flyCard, "Fly", "fly", "WASD to move, Space up, Left Ctrl down")
-	makeDropdown(flyCard, "Fly Speed", function()
-		return tostring(STATE.flySpeed)
-	end, FLY_SPEED_OPTIONS, function(option)
-		STATE.flySpeed = tonumber(option) or STATE.flySpeed
-		saveConfig()
-	end)
-
-	local clientCard = card(playerPage, "CLIENT", 4)
-	makeSwitch(clientCard, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
-	makeSwitch(clientCard, "No Gameplay Paused", "noPausePopup", "Hides the Gameplay Paused popup")
-	makeSwitch(clientCard, "Auto Reconnect on Kick", "autoReconnect", "Rejoins the game when you get disconnected")
-	makeSwitch(clientCard, "Disable 3D Rendering", "disable3d", "Big FPS saver while you AFK")
-	makeSwitch(clientCard, "FPS Boost", "fpsBoost", "Lowest graphics, no shadows or effects")
-	makeSwitch(clientCard, "Hide UI On Start", "hideOnStart", "Starts hidden. Press the toggle key to show it")
-	makeDropdown(clientCard, "Toggle Key", function()
-		return STATE.toggleKey
-	end, KEY_OPTIONS, function(option)
-		STATE.toggleKey = option
-		saveConfig()
-	end)
-
-	local serverCard = card(playerPage, "SERVER", 5)
-	local serverNote = label(serverCard, "Job " .. string.sub(game.JobId, 1, 8) .. "...  ·  Place " .. tostring(game.PlaceId), 12, muted, Enum.Font.Gotham, 16)
-	serverNote.LayoutOrder = 1
-	actionButton(serverCard, "Rejoin", 2, false, function()
-		STATE.rejoin()
-	end)
-	actionButton(serverCard, "Server Hop", 3, false, function()
-		if not STATE.hop(false) then
-			serverNote.Text = "No other server found"
-		end
-	end)
-	actionButton(serverCard, "Lowest Server", 4, false, function()
-		if not STATE.hop(true) then
-			serverNote.Text = "No other server found"
-		end
-	end)
-	actionButton(serverCard, "Copy Job ID", 5, false, function()
-		serverNote.Text = STATE.copyJobId() and "Job ID copied" or "Copy is not available"
-	end)
-	actionButton(serverCard, "Unload", 6, true, function()
-		task.defer(unloadHub)
-	end)
-
-	local function applySearch()
-		local query = string.lower(search.Text)
-		local used = {}
-		local pages = {}
-		for _, item in ipairs(searchRows) do
-			local show = query == "" or string.find(item.text, query, 1, true) ~= nil
-			item.row.Visible = show
-			if show and query ~= "" then
-				used[item.card] = true
-				pages[item.page or "Main"] = true
-			end
-		end
-		for _, item in ipairs(searchRows) do
-			item.card.Visible = query == "" or used[item.card] == true
-		end
-		if query == "" then
-			return
-		end
-		local current = "Main"
-		if homePage.Visible then
-			current = "Home"
-		elseif playerPage.Visible then
-			current = "Player"
-		end
-		if pages[current] then
-			return
-		end
-		if pages.Home and not pages.Main and not pages.Player then
-			showPage("Home")
-		elseif pages.Main and not pages.Home and not pages.Player then
-			showPage("Main")
-		elseif pages.Player and not pages.Home and not pages.Main then
-			showPage("Player")
-		elseif pages.Home then
-			showPage("Home")
-		elseif pages.Main then
-			showPage("Main")
-		elseif pages.Player then
-			showPage("Player")
-		end
-	end
-	trackConnection(search:GetPropertyChangedSignal("Text"):Connect(applySearch))
-	local function refreshHome()
-		solvesText.Text = STATE.shortNumber(STATE.power or 0)
-		movesText.Text = tostring(STATE.stageName or "")
-		tableText.Text = tostring(STATE.rebirths or 0)
-		statusText.Text = tostring(STATE.status or "Waiting")
-	end
-	refreshHome()
-	refreshActivity()
-	local function refreshSession()
-		local clockText = sessionClock()
-		sessionText.Text = "Session " .. clockText
-		dockClock.Text = clockText
-		local fps = fpsCount
-		fpsCount = 0
-		local ping = 0
-		pcall(function()
-			ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5)
-		end)
-		dockStats.Text = string.format("%d fps    %d ms", fps, ping)
-		local fill = math.clamp(fps / 80, 0.08, 1)
-		fpsBar.Size = UDim2.fromScale(fill, 1)
-		local themeNow = STATE.hubThemeDef()
-		fpsBar.BackgroundColor3 = fps >= 30 and themeNow.accent or (themeNow.risky or Color3.new(1, 1, 1))
-	end
-	refreshSession()
 	task.spawn(function()
-		pcall(function()
-			setthreadidentity(8)
-		end)
-		while running() and gui.Parent do
-			pcall(refreshHome)
-			pcall(refreshActivity)
-			pcall(refreshSession)
+		while running() and not windowGone do
+			pcall(refresh)
 			task.wait(1)
 		end
 	end)
 
-	local function applyLook()
-		local themeNow = STATE.hubThemeDef()
-		for _, obj in ipairs(gui:GetDescendants()) do
-			if obj:IsA("UIStroke") and obj:GetAttribute("ZinoosRole") == nil then
-				obj:SetAttribute("ZinoosRole", "stroke")
-			end
-			local kind = obj:GetAttribute("ZinoosRole")
-			local textKind = obj:GetAttribute("ZinoosTextRole")
-			if kind == "panel" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.panel
-			elseif kind == "side" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.side
-			elseif kind == "card" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.card
-				obj.BackgroundTransparency = themeNow.cardFade
-			elseif kind == "field" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.card
-				obj.BackgroundTransparency = themeNow.cardFade
-				if obj:IsA("TextButton") or obj:IsA("TextBox") or obj:IsA("TextLabel") then
-					obj.TextColor3 = themeNow.ink
-				end
-				if obj:IsA("TextBox") then
-					obj.PlaceholderColor3 = themeNow.muted
-				end
-			elseif kind == "accentFill" and obj:IsA("GuiObject") then
-				obj.BackgroundColor3 = themeNow.accent
-				obj.BackgroundTransparency = 0
-			elseif kind == "ink" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.ink
-			elseif kind == "muted" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.muted
-			elseif kind == "inkDark" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.inkDark
-			elseif kind == "accentText" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.accent
-			elseif kind == "stroke" and obj:IsA("UIStroke") then
-				obj.Color = themeNow.stroke
-				obj.Transparency = themeNow.strokeFade
-			elseif kind == "iconStroke" and obj:IsA("UIStroke") then
-				obj.Color = themeNow.ink
-			end
-			if textKind == "inkDark" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.inkDark
-			elseif textKind == "ink" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
-				obj.TextColor3 = themeNow.ink
-			end
-		end
-		barTrack.BackgroundColor3 = themeNow.accent
-		barTrack.BackgroundTransparency = themeNow.barFade
-		if themeNow.wallpaper and type(STATE.themeWall) == "string" then
-			wallpaperImage.Image = STATE.themeWall
-			wallpaperImage.ImageTransparency = themeNow.wallFade
-		else
-			wallpaperImage.ImageTransparency = 1
-		end
-		if themeNow.icon and type(STATE.themeIcon) == "string" then
-			markImage.Image = STATE.themeIcon
-			markImage.ImageTransparency = 0
-			mark.BackgroundTransparency = 1
-			markText.Visible = false
-		else
-			markImage.ImageTransparency = 1
-			mark.BackgroundColor3 = themeNow.accent
-			mark.BackgroundTransparency = 0
-			markText.TextColor3 = themeNow.inkDark
-			markText.Visible = true
-		end
-		for _, entry in ipairs(STATE.themeSwitches) do
-			if entry.track.Parent then
-				paintSwitch(entry.track, entry.knob, STATE[entry.key] == true, true)
-			end
-		end
-		for buttonName, button in pairs(navButtons) do
-			local on = buttonName == currentPage
-			button.BackgroundColor3 = on and themeNow.selected or themeNow.hover
-			button.BackgroundTransparency = on and themeNow.selectedFade or 1
-			local navLabel = button:FindFirstChild("Label")
-			if navLabel and navLabel:IsA("TextLabel") then
-				navLabel.TextColor3 = themeNow.ink
-			end
-		end
-		if STATE.refreshTracker then
-			pcall(STATE.refreshTracker)
-		end
-	end
-	STATE.applyLook = applyLook
-	applyLook()
-
-	showPage("Home")
-
-	local function placeTopLeft(obj, absX, absY)
-		local parentPos = obj.Parent.AbsolutePosition
-		local scale = uiScale.Scale
-		if scale < 0.05 then
-			scale = 1
-		end
-		local size = obj.AbsoluteSize
-		local anchor = obj.AnchorPoint
-		obj.Position = UDim2.fromOffset((absX - parentPos.X + anchor.X * size.X) / scale, (absY - parentPos.Y + anchor.Y * size.Y) / scale)
-	end
-
-	local function clampObject(obj)
-		local view = viewSize()
-		local size = obj.AbsoluteSize
-		local pos = obj.AbsolutePosition
-		local x = math.clamp(pos.X, 0, math.max(0, view.X - size.X))
-		local y = math.clamp(pos.Y, 0, math.max(0, view.Y - size.Y))
-		if math.abs(x - pos.X) > 1 or math.abs(y - pos.Y) > 1 then
-			placeTopLeft(obj, x, y)
-		end
-	end
-	STATE.clampHub = function()
-		clampObject(holder)
-		if launcher then
-			clampObject(launcher)
-		end
-	end
-
-	local function rememberSpot(obj, keyX, keyY)
-		local view = viewSize()
-		if view.X < 1 or view.Y < 1 then
-			return
-		end
-		local pos = obj.AbsolutePosition
-		STATE[keyX] = pos.X / view.X
-		STATE[keyY] = pos.Y / view.Y
-		saveConfig()
-	end
-
-	local function rememberLayout()
-		if not gui.Parent then
-			return
-		end
-		clampObject(holder)
-		clampObject(launcher)
-		local view = viewSize()
-		if view.X < 1 or view.Y < 1 then
-			return
-		end
-		local changed = false
-		if type(STATE.menuX) == "number" and type(STATE.menuY) == "number" then
-			local menuPos = holder.AbsolutePosition
-			local nextX = menuPos.X / view.X
-			local nextY = menuPos.Y / view.Y
-			if math.abs(nextX - STATE.menuX) > 0.002 or math.abs(nextY - STATE.menuY) > 0.002 then
-				STATE.menuX = nextX
-				STATE.menuY = nextY
-				changed = true
-			end
-		end
-		if STATE.dockCustom and type(STATE.dockX) == "number" and type(STATE.dockY) == "number" then
-			local dockPos = launcher.AbsolutePosition
-			local nextX = dockPos.X / view.X
-			local nextY = dockPos.Y / view.Y
-			if math.abs(nextX - STATE.dockX) > 0.002 or math.abs(nextY - STATE.dockY) > 0.002 then
-				STATE.dockX = nextX
-				STATE.dockY = nextY
-				changed = true
-			end
-		end
-		if changed then
-			saveConfig()
-		end
-	end
-	applyHubLayout = function(_, compact, baseW)
-		local narrow = compact or baseW < 860
-		sideWrap.Size = compact and UDim2.new(0, 72, 1, 0) or UDim2.new(0.25, 0, 1, 0)
-		content.Position = compact and UDim2.fromOffset(72, 0) or UDim2.new(0.25, 0, 0, 0)
-		content.Size = compact and UDim2.new(1, -72, 1, 0) or UDim2.new(0.75, 0, 1, 0)
-		brand.Visible = not compact
-		brandSub.Visible = not compact
-		profile.Visible = not compact
-		columnLayout.FillDirection = narrow and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
-		local columnSize = narrow and UDim2.new(1, 0, 0, 0) or UDim2.new(0.5, -6, 0, 0)
-		leftColumn.Size = columnSize
-		rightColumn.Size = columnSize
-		for index, name in ipairs({ "Home", "Main", "Player" }) do
-			local button = navButtons[name]
-			if button then
-				local label = button:FindFirstChild("Label")
-				if label then
-					label.Visible = not compact
-				end
-				button.Size = compact and UDim2.fromOffset(48, 44) or UDim2.new(1, -24, 0, 36)
-				button.Position = UDim2.fromOffset(12, compact and (70 + (index - 1) * 52) or (78 + (index - 1) * 42))
-			end
-		end
-		for _, page in pairs(pages) do
-			local pad = page:FindFirstChildOfClass("UIPadding")
-			if pad then
-				pad.PaddingLeft = UDim.new(0, compact and 12 or 28)
-				pad.PaddingRight = UDim.new(0, compact and 12 or 28)
-			end
-		end
-		search.Size = UDim2.fromOffset(compact and 140 or 200, compact and 40 or 34)
-	end
-	fitScale()
-	local function refit()
-		fitScale()
-		task.defer(rememberLayout)
-	end
-	local viewSignal = nil
-	local function bindView()
-		if viewSignal then
-			pcall(function()
-				viewSignal:Disconnect()
-			end)
-			viewSignal = nil
-		end
-		local camera = workspace.CurrentCamera
-		if camera then
-			viewSignal = trackConnection(camera:GetPropertyChangedSignal("ViewportSize"):Connect(refit))
-		end
-	end
-	trackConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-		refit()
-		bindView()
-	end))
-	bindView()
-
-	task.defer(function()
-		if not gui.Parent then
-			return
-		end
-		local view = viewSize()
-		if type(STATE.menuX) == "number" and type(STATE.menuY) == "number" then
-			placeTopLeft(holder, STATE.menuX * view.X, STATE.menuY * view.Y)
-			clampObject(holder)
-		end
-		if STATE.dockCustom and type(STATE.dockX) == "number" and type(STATE.dockY) == "number" then
-			placeTopLeft(launcher, STATE.dockX * view.X, STATE.dockY * view.Y)
-			clampObject(launcher)
-		end
-	end)
-
-	local dragTarget = nil
-	local dragStart = nil
-	local dragOrigin = nil
-	local dragMoved = false
-
-	local function beginDrag(target, input)
-		dragTarget = target
-		dragStart = input.Position
-		dragOrigin = target.AbsolutePosition
-		dragMoved = false
-	end
-
-	local function canDragFrom(input)
-		local hits = gui:GetGuiObjectsAtPosition(input.Position.X, input.Position.Y)
-		for _, hit in ipairs(hits) do
-			if hit:IsA("GuiButton") or hit:IsA("TextBox") then
-				return false
-			end
-		end
-		return true
-	end
-
-	header.InputBegan:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		if canDragFrom(input) then
-			beginDrag(holder, input)
-		end
-	end)
-	sidebar.InputBegan:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		if canDragFrom(input) then
-			beginDrag(holder, input)
-		end
-	end)
-	launcher.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			beginDrag(launcher, input)
-		end
-	end)
-
-	local openToken = 0
-	local function setOpen(open)
-		openToken += 1
-		local token = openToken
-		if open then
-			STATE.webhookReveal = false
-			if STATE.applyWebhookMask then
-				STATE.applyWebhookMask()
-			end
-			playMotion(launcher, { GroupTransparency = 1 }, tweenInfo.hover)
-			holder.Visible = true
-			shadow.Visible = true
-			windowScale.Scale = 0.9
-			sideWrap.GroupTransparency = 1
-			headWrap.GroupTransparency = 1
-			pageWrap.GroupTransparency = 1
-			playMotion(windowScale, { Scale = 1 }, tweenInfo.open)
-			task.delay(0.12, function()
-				if token ~= openToken or not gui.Parent then
-					return
-				end
-				launcher.Visible = false
-				launcher.GroupTransparency = 0
-			end)
-			task.delay(0.22, function()
-				if token ~= openToken or not gui.Parent then
-					return
-				end
-				playMotion(sideWrap, { GroupTransparency = 0 }, tweenInfo.fade)
-				task.delay(0.04, function()
-					if token ~= openToken or not gui.Parent then
-						return
-					end
-					playMotion(headWrap, { GroupTransparency = 0 }, tweenInfo.fade)
-				end)
-				task.delay(0.08, function()
-					if token ~= openToken or not gui.Parent then
-						return
-					end
-					playMotion(pageWrap, { GroupTransparency = 0 }, tweenInfo.fade)
-					playCards(pages[currentPage])
-				end)
-			end)
-			return
-		end
-		closePopup()
-		playMotion(pageWrap, { GroupTransparency = 1 }, tweenInfo.fade)
-		playMotion(headWrap, { GroupTransparency = 1 }, tweenInfo.fade)
-		playMotion(sideWrap, { GroupTransparency = 1 }, tweenInfo.fade)
-		playMotion(windowScale, { Scale = 0.9 }, tweenInfo.open)
-		task.delay(0.26, function()
-			if token ~= openToken or not gui.Parent then
-				return
-			end
-			holder.Visible = false
-			shadow.Visible = false
-			windowScale.Scale = 1
-			launcher.Visible = true
-			launcher.GroupTransparency = 1
-			playMotion(launcher, { GroupTransparency = 0 }, tweenInfo.fade)
+	if STATE.hideOnStart == true then
+		task.defer(function()
+			elevate()
+			pcall(Window.Close, Window)
 		end)
 	end
-
-	local dragConn = trackConnection(UserInputService.InputChanged:Connect(function(input)
-		if not dragTarget or not dragStart or not dragOrigin then
-			return
-		end
-		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		local delta = input.Position - dragStart
-		if not dragMoved and delta.Magnitude < 8 then
-			return
-		end
-		dragMoved = true
-		placeTopLeft(dragTarget, dragOrigin.X + delta.X, dragOrigin.Y + delta.Y)
-	end))
-	local dragEndConn = trackConnection(UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		local target = dragTarget
-		local moved = dragMoved
-		dragTarget = nil
-		dragStart = nil
-		dragOrigin = nil
-		dragMoved = false
-		if not target or not target.Parent then
-			return
-		end
-		if moved then
-			clampObject(target)
-			if target == holder then
-				rememberSpot(holder, "menuX", "menuY")
-			else
-				STATE.dockCustom = true
-				rememberSpot(launcher, "dockX", "dockY")
-			end
-			return
-		end
-		if target == launcher then
-			setOpen(true)
-		end
-	end))
-
-	bindPress(closeButton)
-	bindPress(fullButton)
-	fullButton.MouseEnter:Connect(function()
-		playMotion(fullButton, { TextColor3 = STATE.hubThemeDef().ink }, tweenInfo.hover)
-	end)
-	fullButton.MouseLeave:Connect(function()
-		playMotion(fullButton, { TextColor3 = STATE.hubThemeDef().muted }, tweenInfo.hover)
-	end)
-	onActivate(fullButton, function()
-		fullMode = not fullMode
-		fullButton.Text = fullMode and "▣" or "⛶"
-		fitScale()
-	end)
-	onActivate(closeButton, function()
-		if not STATE.dockCustom then
-			local spot = holder.AbsolutePosition
-			placeTopLeft(launcher, spot.X + 16, spot.Y + 16)
-		end
-		setOpen(false)
-	end)
-
-	local keyConn = trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or search:IsFocused() then
-			return
-		end
-		if input.KeyCode == Enum.KeyCode.LeftControl then
-			gui.Enabled = not gui.Enabled
-			return
-		end
-		if input.KeyCode.Name == STATE.toggleKey then
-			setOpen(not holder.Visible)
-		end
-	end))
-
-	local actionsCard = card(homePage, "ACTIONS", 9)
-	local actionsNote = label(actionsCard, "Run these now instead of waiting for the next pass.", 12, muted, Enum.Font.Gotham, 16)
-	actionsNote.LayoutOrder = 1
-	actionButton(actionsCard, "Claim Now", 2, true, function()
-		task.spawn(function()
-			STATE.claimNow()
-			actionsNote.Text = "Claimed what was ready"
-		end)
-	end)
-	actionButton(actionsCard, "Equip Best Now", 3, false, function()
-		task.spawn(function()
-			actionsNote.Text = STATE.equipBestNow() and "Best pets equipped" or "Equip was rejected"
-		end)
-	end)
-
-	do
-		local discordInvite = "https://discord.gg/94pC3T6NZG"
-		local communityCard = card(homePage, "COMMUNITY", 2)
-		local communityNote = label(communityCard, "Join the ZinoosHub Discord for updates, support and new games.", 13, muted, Enum.Font.Gotham, 36)
-		communityNote.LayoutOrder = 1
-		local communityResult = label(communityCard, "", 13, accent, Enum.Font.Gotham, 18)
-		communityResult.LayoutOrder = 3
-		actionButton(communityCard, "Copy Discord Invite", 2, true, function()
-			if typeof(setclipboard) == "function" and pcall(setclipboard, discordInvite) then
-				communityResult.Text = "Invite copied. Paste it in your browser."
-			else
-				communityResult.Text = discordInvite
-			end
-		end)
-	end
-
-	local saveCard = card(homePage, "CONFIG", 10)
-	local saveNote = label(saveCard, "Saves the toggles, timings and theme for this account. Your other account keeps its own save.", 13, muted, Enum.Font.Gotham, 40)
-	saveNote.LayoutOrder = 1
-	local saveResult = label(saveCard, "", 13, accent, Enum.Font.Gotham, 18)
-	saveResult.LayoutOrder = 3
-	actionButton(saveCard, "Save Config", 2, true, function()
-		saveConfig()
-		saveResult.Text = "Saved for " .. LocalPlayer.DisplayName
-		saveResult.TextColor3 = accent
-	end)
-
-	windowScale.Scale = 0.9
-	sideWrap.GroupTransparency = 1
-	headWrap.GroupTransparency = 1
-	pageWrap.GroupTransparency = 1
-	holder.Visible = false
-	shadow.Visible = false
-	launcher.Visible = STATE.hideOnStart ~= true
-	dockHint.Text = "Click or press " .. tostring(STATE.toggleKey) .. " to open"
-
-	STATE.hubWindow = {
-		Unload = function()
-			unloadHub()
-		end,
-	}
 end
-loadSaved()
 
-task.spawn(function()
-	if not running() then
-		return
-	end
-	local ok, err = pcall(installHub)
+loadSaved()
+if STATE.notifications == nil then
+	STATE.notifications = true
+end
+STATE.version = "1.0.0"
+
+if running() then
+	elevate()
+	local ok, err = xpcall(installHub, debug.traceback)
 	if not ok then
 		warn("[Zinoos hub] " .. tostring(err))
-		if running() then
-			shutdownHub()
-		end
 	end
-end)
-
-local function raiseIdentity()
-	pcall(function()
-		setthreadidentity(8)
-	end)
 end
 
 task.spawn(function()
-	raiseIdentity()
+	elevate()
 	while running() do
 		local ok, err = pcall(stepFarm)
 		if not ok then
@@ -3907,7 +2352,7 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-	raiseIdentity()
+	elevate()
 	while running() do
 		pcall(stepBite)
 		pcall(stepAbility)
