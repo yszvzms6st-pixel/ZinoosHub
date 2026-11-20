@@ -101,7 +101,7 @@ do
 	end
 end
 
-local VERSION = "1.16.0"
+local VERSION = "1.17.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -115,6 +115,7 @@ local STATE = {
 	aimMode = "Hardest to save",
 	autoAbility = true,
 	showLanding = false,
+	showPresses = true,
 	humanize = true,
 	reaction = "Normal",
 	nativeFollowups = true,
@@ -259,7 +260,7 @@ local ABILITY_MOMENT = {
 -- Config ---------------------------------------------------------------------
 local CONFIG_PATH = "Rayfield/Configurations/ZinoosHub/VolleyBomb_" .. tostring(LocalPlayer.UserId) .. ".rfld"
 local SAVE_KEYS = {
-	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "humanize", "reaction", "nativeFollowups", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
+	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "showPresses", "humanize", "reaction", "nativeFollowups", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
 	"antiAfk", "stayActive", "autoReload", "notifications", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
@@ -432,6 +433,78 @@ local function equippedAbility()
 	return dataGet("EquippedAbility")
 end
 
+-- Show Button Presses: when auto play hits, dives or uses your ability, the
+-- matching button at the bottom of the screen dips in with a click ripple, so
+-- you can see what it's pressing. Purely visual and only on your own screen.
+do
+	local TweenService = game:GetService("TweenService")
+	local lastPress = {}
+	function STATE.pressButton(name)
+		if STATE.showPresses ~= true or os.clock() - (lastPress[name] or 0) < 0.15 then
+			return
+		end
+		lastPress[name] = os.clock()
+		task.spawn(pcall, function()
+			local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+			local hud = gui and gui:FindFirstChild("HUD")
+			local inner = hud and hud:FindFirstChild("HUD")
+			if not inner then
+				return
+			end
+			-- PC/console buttons live in Bottom, phone buttons in MobileControls.
+			local button
+			for _, holderName in ipairs({ "Bottom", "MobileControls" }) do
+				local holder = inner:FindFirstChild(holderName)
+				local found = holder and holder.Visible and holder:FindFirstChild(name)
+				if found and found:IsA("GuiObject") and found.Visible then
+					button = found
+					break
+				end
+			end
+			if not button then
+				return
+			end
+			-- Press-in bounce (skipped if the game already scales this button).
+			local scale = button:FindFirstChild("ZinoosPress")
+			local other = false
+			for _, child in ipairs(button:GetChildren()) do
+				if child:IsA("UIScale") and child ~= scale then
+					other = true
+				end
+			end
+			if not other then
+				if not scale then
+					scale = Instance.new("UIScale")
+					scale.Name = "ZinoosPress"
+					scale.Parent = button
+				end
+				scale.Scale = 0.84
+				TweenService:Create(scale, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+			end
+			-- Click ripple, like the game's own tap effect.
+			local ripple = Instance.new("Frame")
+			ripple.Name = "ZinoosRipple"
+			ripple.AnchorPoint = Vector2.new(0.5, 0.5)
+			ripple.Position = UDim2.fromScale(0.5, 0.5)
+			ripple.Size = UDim2.fromScale(0.2, 0.2)
+			ripple.SizeConstraint = Enum.SizeConstraint.RelativeYY
+			ripple.BackgroundColor3 = Color3.new(1, 1, 1)
+			ripple.BackgroundTransparency = 0.35
+			ripple.BorderSizePixel = 0
+			ripple.ZIndex = button.ZIndex + 5
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = ripple
+			ripple.Parent = button
+			local tween = TweenService:Create(ripple, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.fromScale(1.5, 1.5), BackgroundTransparency = 1 })
+			tween.Completed:Once(function()
+				ripple:Destroy()
+			end)
+			tween:Play()
+		end)
+	end
+end
+
 -- Uses the equipped ability when this moment suits it. A spike also counts as
 -- a hit, so hit abilities fire before spikes too.
 local function useAbility(moment)
@@ -467,6 +540,7 @@ local function useAbility(moment)
 	local ok = pcall(AbilityController.ActivateEquipped, AbilityController)
 	elevate()
 	if ok then
+		STATE.pressButton("AbilityTwoButton")
 		stats.abilities = (stats.abilities or 0) + 1
 		if name == "Superspike" then
 			STATE.superReadySince = nil
@@ -924,6 +998,8 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 	elevate()
 	if not ok then
 		brain.pendingKind = nil
+	else
+		STATE.pressButton("BumpSpikeButton")
 	end
 	return ok
 end
@@ -1014,6 +1090,7 @@ local function startNativeDive(root, hum, dir, plan)
 		end
 		return false
 	end
+	STATE.pressButton("AbilityButton")
 	stats.dives += 1
 	return true
 end
@@ -1030,6 +1107,7 @@ local function tryTip(char, root, state, zones, myZone, ballPos, now)
 	local ok = pcall(BallController.Swing, BallController)
 	elevate()
 	if ok then
+		STATE.pressButton("BumpSpikeButton")
 		STATE.playStatus = "Floated it over"
 		return true
 	end
@@ -1608,6 +1686,7 @@ local function stepBrain()
 			local served = pcall(BallController.Swing, BallController)
 			elevate()
 			if served then
+				STATE.pressButton("BumpSpikeButton")
 				stats.serves += 1
 				STATE.playStatus = "Served"
 				-- Mixed serves so nobody can read them: mostly jump serves
@@ -3470,6 +3549,7 @@ local function installHub()
 	toggle(aimBox, "Smart Aim", "smartAim", "Works out where each hit lands and sends it into another player's square")
 	choice(aimBox, "Aim For", "Hardest to save = far from the player · Fastest = shortest flight", AIM_OPTIONS, "aimMode")
 	toggle(aimBox, "Show Landing Spot", "showLanding", "Purple circle where the ball will land")
+	toggle(aimBox, "Show Button Presses", "showPresses", "The Bump/Spike, Dive and ability buttons at the bottom press in when auto play uses them (only on your screen)")
 	local humanBox = section(playTab, "Play Like A Human", "user-check")
 	toggle(humanBox, "Humanize", "humanize", "Human reaction time, the game's real bump/spike animations, turning before hits, not-quite-perfect positioning and aim, a short wait before serving, moving around while waiting")
 	choice(humanBox, "Reaction Speed", "Fast 0.07-0.16s · Normal 0.14-0.28s · Relaxed 0.24-0.42s", REACTION_OPTIONS, "reaction")
@@ -3633,7 +3713,7 @@ local function installHub()
 		confirm("Reset every setting?", "All options go back to their defaults.", function()
 			local defaults = {
 				autoHit = true, autoMove = true, autoSpike = true, autoDive = true, autoServe = true,
-				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false,
+				smartAim = true, aimMode = "Hardest to save", autoAbility = true, showLanding = false, showPresses = true,
 				humanize = true, reaction = "Normal", nativeFollowups = true, trickShots = true, playerMove = true, proPosition = true, emotes = true, lobbyWander = true,
 				autoVote = true, voteMode = "Solo", autoProServer = true, autoBuyAbility = true, abilityGoal = "Guardian", abilityBuyMode = "Just my main ability", skipAbilities = {}, autoEquipAbility = true,
 				autoBuyPacks = true, saveForAbility = false, packChoice = "Both", showTracker = true,
