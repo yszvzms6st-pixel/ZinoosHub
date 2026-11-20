@@ -1182,6 +1182,50 @@ local function stepSugar(character, root, cube)
 	STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
 end
 
+local OrbRender
+local function orbRender()
+	if OrbRender == nil then
+		local ok, render = pcall(function()
+			return require(ReplicatedStorage.Ant.Client.OrbRender)
+		end)
+		OrbRender = ok and render or false
+	end
+	if OrbRender == false then
+		return nil
+	end
+	return OrbRender
+end
+
+local function liveTarget(origin)
+	local render = orbRender()
+	local now = os.clock()
+	if render then
+		local id, pos = render.Nearest(origin, 140)
+		if type(id) == "number" and typeof(pos) == "Vector3" and (farm.skip[id] or 0) <= now then
+			local tier = render.Get(id)
+			return id, { tier = tier, pos = pos }
+		end
+		local bestId, bestOrb, bestDist
+		for cachedId in pairs(farm.orbs) do
+			if (farm.skip[cachedId] or 0) <= now then
+				local tier, livePos = render.Get(cachedId)
+				if typeof(livePos) == "Vector3" then
+					local dist = (livePos - origin).Magnitude
+					if dist <= 140 and (not bestDist or dist < bestDist) then
+						bestId = cachedId
+						bestOrb = { tier = tier, pos = livePos }
+						bestDist = dist
+					end
+				end
+			end
+		end
+		if bestOrb then
+			return bestId, bestOrb
+		end
+	end
+	return pickOrb(origin)
+end
+
 local function stepFarm()
 	if STATE.autoOrb ~= true then
 		STATE.detail = "Farm off"
@@ -1205,12 +1249,7 @@ local function stepFarm()
 		stepSugar(character, root, cube)
 		return
 	end
-	if not farm.ready then
-		STATE.status = "Looking for food"
-		refreshOrbs()
-		return
-	end
-	local id, orb = pickOrb(root.Position)
+	local id, orb = liveTarget(root.Position)
 	if not orb then
 		STATE.status = "No food nearby"
 		refreshOrbs()
@@ -1219,7 +1258,17 @@ local function stepFarm()
 	local _, foodName = orbValue(orb.tier)
 	local offset = Vector3.new(orb.pos.X - root.Position.X, 0, orb.pos.Z - root.Position.Z)
 	local distance = offset.Magnitude
-	if distance <= magnetRadius() * 0.8 and math.abs(orb.pos.Y - root.Position.Y) < 12 and under then
+	local gap = (orb.pos - root.Position).Magnitude
+	if gap <= magnetRadius() * 0.95 then
+		if not farm.eat or farm.eat.id ~= id then
+			farm.eat = { id = id, at = os.clock(), power = stateNumber("Power") }
+		elseif os.clock() - farm.eat.at > 2.5 and math.abs(stateNumber("Power") - farm.eat.power) < 0.05 then
+			farm.skip[id] = os.clock() + 10
+			farm.eat = nil
+			farm.chase = nil
+			STATE.status = "Skipped food that would not collect"
+			return
+		end
 		STATE.status = "Eating " .. foodName
 		farm.chase = nil
 		return
@@ -2443,7 +2492,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.0"
+STATE.version = "1.0.1"
 
 if running() then
 	elevate()
