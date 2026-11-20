@@ -46,6 +46,10 @@ local STATE = {
 	autoHatch = true,
 	egg = "Royal",
 	autoEquip = true,
+	autoRoll = false,
+	autoMutations = false,
+	rollSize = "1",
+	breed = "Keep",
 	autoClaim = true,
 	autoCodes = true,
 	walkSpeed = false,
@@ -56,6 +60,8 @@ local STATE = {
 	noclip = false,
 	instantPrompts = false,
 	fly = false,
+	autoSprint = false,
+	chaseBugs = false,
 	flySpeed = 60,
 	noPausePopup = true,
 	autoReconnect = false,
@@ -133,6 +139,8 @@ local FLAG_KEYS = {
 	AutoRebirth = "autoRebirth",
 	AutoHatch = "autoHatch",
 	AutoEquip = "autoEquip",
+	AutoRoll = "autoRoll",
+	AutoMutations = "autoMutations",
 	AutoClaim = "autoClaim",
 	AutoCodes = "autoCodes",
 	WalkSpeed = "walkSpeed",
@@ -142,6 +150,8 @@ local FLAG_KEYS = {
 	Noclip = "noclip",
 	InstantPrompts = "instantPrompts",
 	Fly = "fly",
+	AutoSprint = "autoSprint",
+	ChaseBugs = "chaseBugs",
 	NoPausePopup = "noPausePopup",
 	AutoReconnect = "autoReconnect",
 	Disable3d = "disable3d",
@@ -156,6 +166,8 @@ local EGG_OPTIONS = { "Royal", "Colony" }
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	Egg = { key = "egg", options = EGG_OPTIONS },
+	RollSize = { key = "rollSize", options = { "1", "5" } },
+	Breed = { key = "breed" },
 	WindTheme = { key = "windTheme" },
 	HubSize = { key = "hubSize", options = { "Compact", "Normal", "Large" } },
 }
@@ -976,6 +988,8 @@ local farm = {
 	nextEvolve = 0,
 	nextHatch = 0,
 	nextEquip = 0,
+	nextRoll = 0,
+	nextMutations = 0,
 	nextClaim = 0,
 	claiming = false,
 	nextCommunity = 0,
@@ -1271,6 +1285,41 @@ local function liveTarget(origin)
 	return pickOrb(origin)
 end
 
+local function stepToward(character, root, point, status, detail)
+	local offset = Vector3.new(point.X - root.Position.X, 0, point.Z - root.Position.Z)
+	if offset.Magnitude < 1 then
+		return true
+	end
+	local aim = point
+	if offset.Magnitude > 6 then
+		aim = point - offset.Unit * 4
+	end
+	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
+	if flat.Magnitude > 14 then
+		aim = root.Position + flat.Unit * 14
+		flat = flat.Unit * 14
+	end
+	local ground = groundAt(aim, character, root.Position.Y)
+	if (not ground or math.abs(ground.Y - root.Position.Y) > 22) and flat.Magnitude > 4 then
+		ground = groundAt(root.Position + flat.Unit * 4, character, root.Position.Y)
+	end
+	if not ground or ground.Y <= VOID_Y or math.abs(ground.Y - root.Position.Y) > 22 then
+		return false
+	end
+	local goal = standOn(ground, character, root)
+	local look = Vector3.new(point.X, goal.Y, point.Z)
+	root.AssemblyLinearVelocity = Vector3.zero
+	if (look - goal).Magnitude < 1 then
+		root.CFrame = CFrame.new(goal)
+	else
+		root.CFrame = CFrame.lookAt(goal, look)
+	end
+	STATE.status = status
+	STATE.detail = detail
+	return true
+end
+
+local nearestCritter
 local function stepFarm()
 	if STATE.autoOrb ~= true then
 		STATE.detail = "Farm off"
@@ -1293,6 +1342,27 @@ local function stepFarm()
 	if cube then
 		stepSugar(character, root, cube)
 		return
+	end
+	if STATE.chaseBugs == true then
+		local model, foeRoot, foeDist = nearestCritter(root.Position, 140)
+		if foeRoot then
+			local length = tonumber(character:GetAttribute("Length")) or 10
+			local reach = 18
+			local reachOk, gotReach = pcall(function()
+				return Config.BiteRange(length)
+			end)
+			if reachOk and type(gotReach) == "number" then
+				reach = gotReach + 6
+			end
+			if foeDist <= reach then
+				STATE.status = "Fighting " .. model.Name
+				STATE.detail = string.format("%s  %d away", model.Name, math.floor(foeDist))
+				return
+			end
+			if stepToward(character, root, foeRoot.Position, "Chasing " .. model.Name, string.format("%s  %d away", model.Name, math.floor(foeDist))) then
+				return
+			end
+		end
 	end
 	local id, orb = liveTarget(root.Position)
 	if not orb then
@@ -1330,31 +1400,11 @@ local function stepFarm()
 	if distance > 6 and offset.Magnitude > 0 then
 		aim = orb.pos - offset.Unit * 5
 	end
-	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
-	if flat.Magnitude > 14 then
-		aim = root.Position + flat.Unit * 14
-	end
-	local ground = groundAt(aim, character, root.Position.Y)
-	if (not ground or math.abs(ground.Y - root.Position.Y) > 22) and flat.Magnitude > 4 then
-		local shorter = root.Position + flat.Unit * 4
-		ground = groundAt(shorter, character, root.Position.Y)
-	end
-	if not ground or ground.Y <= VOID_Y or math.abs(ground.Y - root.Position.Y) > 22 then
+	if not stepToward(character, root, aim, string.format("Walking to %s", foodName), string.format("%s  %d away", foodName, math.floor(distance))) then
 		farm.skip[id] = os.clock() + 8
 		farm.chase = nil
 		STATE.status = "Skipped food off the ground"
-		return
 	end
-	local goal = standOn(ground, character, root)
-	local look = Vector3.new(orb.pos.X, goal.Y, orb.pos.Z)
-	root.AssemblyLinearVelocity = Vector3.zero
-	if (look - goal).Magnitude < 1 then
-		root.CFrame = CFrame.new(goal)
-	else
-		root.CFrame = CFrame.lookAt(goal, look)
-	end
-	STATE.status = string.format("Walking to %s", foodName)
-	STATE.detail = string.format("%s  %d away", foodName, math.floor(distance))
 end
 
 local function critterRoot(model)
@@ -1368,7 +1418,7 @@ local function critterRoot(model)
 	return model:FindFirstChildWhichIsA("BasePart")
 end
 
-local function nearestCritter(origin, limit)
+function nearestCritter(origin, limit)
 	local folder = Workspace:FindFirstChild("Ants")
 	local critters = folder and folder:FindFirstChild("Critters")
 	if not critters then
@@ -1521,6 +1571,126 @@ local function stepHatch()
 	end
 	farm.nextHatch = os.clock() + 2
 	invoke("HatchPet", STATE.egg)
+end
+
+local RARITY_RANK = {
+	Common = 1,
+	Uncommon = 2,
+	Rare = 3,
+	Epic = 4,
+	Legendary = 5,
+	Mythic = 6,
+	Secret = 7,
+}
+
+local function stepRoll()
+	if STATE.autoRoll ~= true or os.clock() < farm.nextRoll then
+		return
+	end
+	local count = STATE.rollSize == "5" and 5 or 1
+	local tokens = math.max(0, math.floor(stateNumber("RollTokens")))
+	local cost = tonumber(Config.RollCostDna) or 120
+	local afford = tokens + math.floor(math.max(0, stateNumber("DNA")) / cost)
+	if afford < count then
+		farm.nextRoll = os.clock() + 5
+		return
+	end
+	farm.nextRoll = os.clock() + 6
+	invoke("RollMutation", count)
+	noteActivity(count == 1 and "Rolled 1 mutation" or "Rolled 5 mutations")
+end
+
+local function stepMutations()
+	if STATE.autoMutations ~= true or os.clock() < farm.nextMutations then
+		return
+	end
+	farm.nextMutations = os.clock() + 8
+	local owned = stateJson("Mutations")
+	if type(owned) ~= "table" then
+		return
+	end
+	local slots = math.clamp(math.floor(stateNumber("Slots")), 1, tonumber(Config.MaxSlots) or 3)
+	local ranked = {}
+	for key, amount in pairs(owned) do
+		local info = type(key) == "string" and Config.MutationByKey[key] or nil
+		if type(info) == "table" and (tonumber(amount) or 0) > 0 then
+			table.insert(ranked, {
+				key = key,
+				rank = RARITY_RANK[info.rarity] or 0,
+				amount = tonumber(amount) or 0,
+			})
+		end
+	end
+	table.sort(ranked, function(a, b)
+		if a.rank ~= b.rank then
+			return a.rank > b.rank
+		end
+		return a.amount > b.amount
+	end)
+	local equipped = stateJson("Equipped")
+	if type(equipped) ~= "table" then
+		equipped = {}
+	end
+	for slot = 1, slots do
+		local want = ranked[slot]
+		if want and equipped[slot] ~= want.key then
+			invoke("EquipMutation", want.key, slot)
+		end
+	end
+end
+
+local function breedInfo(key)
+	if type(key) ~= "string" or key == "" or key == "Keep" then
+		return nil
+	end
+	local info = type(Config.BreedByKey) == "table" and Config.BreedByKey[key] or nil
+	if type(info) ~= "table" then
+		return nil
+	end
+	if type(Config.LimitedBreeds) == "table" then
+		for _, breed in ipairs(Config.LimitedBreeds) do
+			if type(breed) == "table" and breed.key == key then
+				if type(Config.BreedUnlocked) ~= "function" then
+					return nil
+				end
+				local ok, unlocked = pcall(Config.BreedUnlocked, key, stateNumber("Rebirths"), stateJson("LimitedOwned"))
+				if not ok or unlocked ~= true then
+					return nil
+				end
+				break
+			end
+		end
+	end
+	return info
+end
+
+function STATE.wearBreed()
+	local info = breedInfo(STATE.breed)
+	if not info or GameState.Get("Breed") == STATE.breed then
+		return false
+	end
+	invoke("SetBreed", STATE.breed)
+	noteActivity("Wearing " .. tostring(info.name or STATE.breed))
+	return true
+end
+
+function STATE.buyGoldenEgg()
+	local theme = require(ReplicatedStorage.Ant.UI.Theme)
+	theme.Purchase("Product", "PetEggGolden")
+	return true
+end
+
+local function stepSprint()
+	local signals = require(ReplicatedStorage.Ant.Client.Signals)
+	if STATE.autoSprint == true then
+		farm.sprintHeld = true
+		signals.Action:Fire("Sprint", true)
+		return
+	end
+	if farm.sprintHeld then
+		farm.sprintHeld = false
+		signals.Action:Fire("Sprint", false)
+	end
 end
 
 function STATE.equipBestNow()
@@ -2441,6 +2611,7 @@ local function installHub()
 		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. During Sugar Rush it stays in the ring")
 		toggle(farmBox, "Auto Bite", "autoBite", "Bites a bug when it is already in reach")
 		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your mutation ability on a nearby bug")
+		toggle(farmBox, "Chase Bugs", "chaseBugs", "Walks up to a bug so bite and the ability can land")
 		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))
 
 		local espBox = section(farmTab, "ESP", "eye")
@@ -2454,13 +2625,61 @@ local function installHub()
 		toggle(growBox, "Auto Rebirth", "autoRebirth", "Rebirths only when you are at the top stage")
 
 		local hatchBox = section(progressTab, "Pets", "egg")
-		toggle(hatchBox, "Auto Hatch", "autoHatch", "Hatches the egg below when you can pay for it")
-		choice(hatchBox, "Egg", "Royal waits until you can afford it", EGG_OPTIONS, function()
+		toggle(hatchBox, "Auto Hatch", "autoHatch", "Hatches Royal or Colony when you can pay the DNA")
+		choice(hatchBox, "Egg", "Royal costs more and hatches better pets. Colony is cheaper", EGG_OPTIONS, function()
 			return STATE.egg
 		end, function(option)
 			STATE.egg = option
 		end)
+		button(hatchBox, "Golden Egg", "Opens the Robux prompt. It does not buy on its own", "gem", function()
+			STATE.buyGoldenEgg()
+		end)
 		toggle(hatchBox, "Auto Equip Best Pet", "autoEquip", "Equips your best pets")
+
+		local mutateBox = section(progressTab, "Mutations", "sparkle")
+		toggle(mutateBox, "Auto Roll", "autoRoll", "Rolls when you have tokens or the DNA")
+		choice(mutateBox, "Roll Size", "1 uses one roll. 5 uses five", { "1", "5" }, function()
+			return STATE.rollSize
+		end, function(option)
+			STATE.rollSize = option
+		end)
+		toggle(mutateBox, "Auto Equip Best Mutations", "autoMutations", "Fills your slots with the rarest mutations you own")
+		local breedNames = { "Keep" }
+		local breedKeyByName = { Keep = "Keep" }
+		local function addBreed(breed)
+			if type(breed) ~= "table" or type(breed.key) ~= "string" or not breedInfo(breed.key) then
+				return
+			end
+			local name = breed.name or breed.key
+			table.insert(breedNames, name)
+			breedKeyByName[name] = breed.key
+		end
+		if type(Config.Breeds) == "table" then
+			for _, breed in ipairs(Config.Breeds) do
+				addBreed(breed)
+			end
+		end
+		if type(Config.LimitedBreeds) == "table" then
+			for _, breed in ipairs(Config.LimitedBreeds) do
+				addBreed(breed)
+			end
+		end
+		choice(mutateBox, "Breed", "Keep leaves the breed you already have on", breedNames, function()
+			if STATE.breed == "Keep" then
+				return "Keep"
+			end
+			local info = breedInfo(STATE.breed)
+			return type(info) == "table" and (info.name or info.key) or "Keep"
+		end, function(option)
+			STATE.breed = breedKeyByName[option] or "Keep"
+		end)
+		button(mutateBox, "Wear Breed", "Puts on the breed picked above", "shirt", function()
+			if STATE.wearBreed() then
+				notify("system", "Wearing " .. tostring(STATE.breed), "")
+			else
+				notify("system", "Breed left as it is", "Pick a breed other than Keep")
+			end
+		end)
 
 		local claimBox = section(progressTab, "Rewards", "gift")
 		toggle(claimBox, "Auto Claim Rewards", "autoClaim", "Claims daily, playtime, quests and records")
@@ -2480,6 +2699,7 @@ local function installHub()
 		toggle(moveBox, "Noclip", "noclip")
 		toggle(moveBox, "Instant Interactions", "instantPrompts", "No hold time on prompts")
 		toggle(moveBox, "Fly", "fly", "PC: WASD, Space up, Left Ctrl down")
+		toggle(moveBox, "Auto Sprint", "autoSprint", "Holds the game's sprint for you")
 		choice(moveBox, "Fly Speed", nil, FLY_SPEED_OPTIONS, function()
 			return tostring(STATE.flySpeed)
 		end, function(option)
@@ -2646,7 +2866,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.4"
+STATE.version = "1.0.5"
 
 if running() then
 	elevate()
@@ -2677,6 +2897,8 @@ task.spawn(function()
 		pcall(stepAbility)
 		pcall(stepEvolve)
 		pcall(stepHatch)
+		pcall(stepRoll)
+		pcall(stepMutations)
 		pcall(stepEquip)
 		pcall(stepClaims)
 		pcall(stepEsp)
@@ -2688,6 +2910,7 @@ task.spawn(function()
 	while running() do
 		pcall(stepSpeed)
 		pcall(fillStamina)
+		pcall(stepSprint)
 		pcall(hidePausePopup)
 		task.wait(0.25)
 	end
