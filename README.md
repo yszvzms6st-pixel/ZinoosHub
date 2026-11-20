@@ -98,7 +98,9 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 
 - **Auto Evolve** evolves when you have the power. **Auto Rebirth** rebirths only at the top stage.
 - **Auto Hatch** hatches the egg you pick once you can pay. Royal is the default. Colony is the other choice.
-- **Auto Equip Best Pet** equips your best pets. **Auto Claim Rewards** claims daily, playtime, quests and records. **Redeem Codes** redeems the known codes once.
+- **Auto Equip Best Pet** equips your strongest pets. **Auto Fuse Pets** levels a pet when you have enough spare copies while keeping one of each pet.
+- **Auto Roll** rolls mutations, **Auto Equip Best Mutations** fills your slots with the rarest mutations you own, and **Auto Best Breed** wears your strongest unlocked breed.
+- **Auto Claim Rewards** claims daily, playtime, quests and records. **Redeem Codes** redeems the known codes once.
 
 **Home** shows power, stage, rebirths and what the hub is doing, plus **Claim Now** and **Equip Best Now**.
 

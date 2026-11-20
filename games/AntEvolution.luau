@@ -46,6 +46,8 @@ local STATE = {
 	autoHatch = true,
 	egg = "Royal",
 	autoEquip = true,
+	autoFuse = false,
+	autoBestBreed = true,
 	autoRoll = false,
 	autoMutations = false,
 	rollSize = "1",
@@ -109,6 +111,15 @@ local function shutdownHub()
 		genv.ZinoosAntGen = token + 1
 	end
 	STATE._unloaded = true
+	-- A task can already be inside its loop body when the generation changes.
+	-- Turn off client mutations before restoring them so that final iteration
+	-- cannot apply them again after the cleanup handlers have run.
+	STATE.walkSpeed = false
+	STATE.noclip = false
+	STATE.instantPrompts = false
+	STATE.fly = false
+	STATE.autoSprint = false
+	STATE.noPausePopup = false
 	for _, connection in ipairs(runtime.connections) do
 		pcall(function()
 			connection:Disconnect()
@@ -139,6 +150,8 @@ local FLAG_KEYS = {
 	AutoRebirth = "autoRebirth",
 	AutoHatch = "autoHatch",
 	AutoEquip = "autoEquip",
+	AutoFuse = "autoFuse",
+	AutoBestBreed = "autoBestBreed",
 	AutoRoll = "autoRoll",
 	AutoMutations = "autoMutations",
 	AutoClaim = "autoClaim",
@@ -558,8 +571,8 @@ function STATE.writeThemeManifest(manifest)
 	end
 end
 
-function STATE.themeStillCurrent(gen, token)
-	return running() and STATE._gen == gen and genv.ZinoosGen == token and STATE._unloaded ~= true
+function STATE.themeStillCurrent(gen, tokenNow)
+	return running() and STATE._gen == gen and genv.ZinoosAntGen == tokenNow and STATE._unloaded ~= true
 end
 
 function STATE.storeThemeBody(url, body, gen, token)
@@ -654,7 +667,7 @@ function STATE.themeAsset(url, gen, token)
 		return nil
 	end
 	gen = gen or STATE._gen
-	token = token or genv.ZinoosGen
+	token = token or genv.ZinoosAntGen
 	if not STATE.themeStillCurrent(gen, token) then
 		return nil
 	end
@@ -697,7 +710,7 @@ end
 
 function STATE.loadThemeImages()
 	local gen = STATE._gen
-	local token = genv.ZinoosGen
+	local token = genv.ZinoosAntGen
 	local theme = STATE.hubThemeDef()
 	if theme.icon and type(theme.iconUrl) == "string" then
 		local icon = STATE.themeAsset(theme.iconUrl, gen, token)
@@ -721,10 +734,6 @@ function STATE.loadThemeImages()
 	if STATE.themeStillCurrent(gen, token) and STATE.applyLook then
 		STATE.applyLook()
 	end
-end
--- Theme images belong to this run only.
-function STATE.themeStillCurrent(gen, tokenNow)
-	return running() and STATE._unloaded ~= true
 end
 
 -- Without a theme of its own, use the one saved by the Lift Rock hub on this account.
@@ -884,9 +893,23 @@ local function seated()
 	return hum ~= nil and hum.SeatPart ~= nil
 end
 
+local walkSpeedsBefore = setmetatable({}, { __mode = "k" })
+local function restoreWalkSpeed()
+	for hum, speed in pairs(walkSpeedsBefore) do
+		if hum.Parent then
+			hum.WalkSpeed = speed
+		end
+	end
+	table.clear(walkSpeedsBefore)
+end
+hubCleanup(restoreWalkSpeed)
+
 local function stepSpeed()
 	local hum = humanoid()
 	if hum and STATE.walkSpeed == true and not seated() then
+		if walkSpeedsBefore[hum] == nil then
+			walkSpeedsBefore[hum] = hum.WalkSpeed
+		end
 		hum.WalkSpeed = STATE.speed
 	end
 end
@@ -976,6 +999,17 @@ local function invoke(name, ...)
 	end)
 end
 
+local function invokeResult(name, ...)
+	if not running() then
+		return false, nil
+	end
+	local packed = table.pack(...)
+	local ok, result = pcall(function()
+		return Net.Get(name):InvokeServer(table.unpack(packed, 1, packed.n))
+	end)
+	return ok and result ~= false, result
+end
+
 local farm = {
 	orbs = {},
 	ready = false,
@@ -988,6 +1022,8 @@ local farm = {
 	nextEvolve = 0,
 	nextHatch = 0,
 	nextEquip = 0,
+	nextFuse = 0,
+	nextBreed = 0,
 	nextRoll = 0,
 	nextMutations = 0,
 	nextClaim = 0,
@@ -1698,6 +1734,154 @@ function STATE.equipBestNow()
 	return true
 end
 
+local function savedTable(name)
+	local ok, raw = pcall(function()
+		return GameState.Get(name)
+	end)
+	if ok and type(raw) == "string" then
+		return readJson(raw) or {}
+	end
+	if ok and type(raw) == "table" then
+		return raw
+	end
+	return stateJson(name) or {}
+end
+
+local function breedOrder(key)
+	local info = type(key) == "string" and type(Config.BreedByKey) == "table" and Config.BreedByKey[key] or nil
+	if type(info) ~= "table" then
+		return 0
+	end
+	return tonumber(info.order) or 0
+end
+
+local function bestBreedKey()
+	local rebirths = stateNumber("Rebirths")
+	local bestKey, bestOrder = nil, -1
+	local function consider(breed, limited)
+		if type(breed) ~= "table" or type(breed.key) ~= "string" then
+			return
+		end
+		if limited then
+			if type(Config.BreedUnlocked) ~= "function" then
+				return
+			end
+			local ok, open = pcall(Config.BreedUnlocked, breed.key, rebirths, stateJson("LimitedOwned"))
+			if not ok or open ~= true then
+				return
+			end
+		elseif rebirths < (tonumber(breed.rebirths) or 0) then
+			return
+		end
+		local order = tonumber(breed.order) or 0
+		if order > bestOrder then
+			bestKey = breed.key
+			bestOrder = order
+		end
+	end
+	if type(Config.Breeds) == "table" then
+		for _, breed in ipairs(Config.Breeds) do
+			consider(breed, false)
+		end
+	end
+	if type(Config.LimitedBreeds) == "table" then
+		for _, breed in ipairs(Config.LimitedBreeds) do
+			consider(breed, true)
+		end
+	end
+	return bestKey
+end
+
+local function stepBestBreed()
+	if STATE.autoBestBreed ~= true or os.clock() < farm.nextBreed then
+		return
+	end
+	farm.nextBreed = os.clock() + 8
+	local key = bestBreedKey()
+	local wearing = GameState.Get("Breed")
+	if not key or wearing == key or breedOrder(key) <= breedOrder(wearing) then
+		return
+	end
+	local sent = invokeResult("SetBreed", key)
+	if sent then
+		task.delay(0.5, function()
+			local ok, current = pcall(GameState.Get, "Breed")
+			if running() and ok and current == key then
+				noteActivity("Wearing " .. key)
+			end
+		end)
+	end
+end
+
+local function equippedPetCounts()
+	local counts = {}
+	local character = LocalPlayer.Character
+	local raw = character and character:GetAttribute("Pets")
+	local list = nil
+	if type(raw) == "string" then
+		list = readJson(raw)
+	elseif type(raw) == "table" then
+		list = raw
+	end
+	if type(list) == "table" then
+		for _, key in ipairs(list) do
+			if type(key) == "string" then
+				counts[key] = (counts[key] or 0) + 1
+			end
+		end
+	end
+	return counts
+end
+
+local function stepFuse()
+	if STATE.autoFuse ~= true or os.clock() < farm.nextFuse then
+		return
+	end
+	farm.nextFuse = os.clock() + 3
+	if type(Config.PetFuseCost) ~= "function" then
+		return
+	end
+	local maxLevel = 5
+	if type(Config.PetMaxLevel) == "function" then
+		local ok, value = pcall(Config.PetMaxLevel)
+		if ok and type(value) == "number" then
+			maxLevel = value
+		end
+	end
+	local owned = savedTable("PetsOwned")
+	local levels = savedTable("PetLevels")
+	local equipped = equippedPetCounts()
+	for key, amount in pairs(owned) do
+		if type(key) == "string" then
+			local count = math.floor(tonumber(amount) or 0)
+			local level = math.clamp(math.floor(tonumber(levels[key]) or 1), 1, maxLevel)
+			if level < maxLevel then
+				local ok, cost = pcall(Config.PetFuseCost, level)
+				cost = ok and tonumber(cost) or nil
+				local spare = math.max(0, count - math.max(1, equipped[key] or 0))
+				if cost and cost > 0 and spare >= cost then
+					local sent = invokeResult("FusePet", key)
+					if sent then
+						local beforeCount = count
+						local beforeLevel = level
+						task.delay(0.5, function()
+							if not running() then
+								return
+							end
+							local nowOwned = savedTable("PetsOwned")
+							local nowLevels = savedTable("PetLevels")
+							if (tonumber(nowOwned[key]) or 0) ~= beforeCount or (tonumber(nowLevels[key]) or 1) > beforeLevel then
+								noteActivity("Fused " .. key)
+							end
+						end)
+					end
+					return
+				end
+			end
+		end
+	end
+end
+
 local function stepEquip()
 	if STATE.autoEquip ~= true or os.clock() < farm.nextEquip then
 		return
@@ -1982,6 +2166,15 @@ trackConnection(UserInputService.JumpRequest:Connect(function()
 end))
 
 local noclipParts = {}
+local function restoreNoclip()
+	for part in pairs(noclipParts) do
+		if part.Parent then
+			part.CanCollide = true
+		end
+	end
+	table.clear(noclipParts)
+end
+hubCleanup(restoreNoclip)
 trackConnection(RunService.Stepped:Connect(function()
 	local character = LocalPlayer.Character
 	if not character then
@@ -1995,17 +2188,25 @@ trackConnection(RunService.Stepped:Connect(function()
 			end
 		end
 	elseif next(noclipParts) then
-		for part in pairs(noclipParts) do
-			if part.Parent then
-				part.CanCollide = true
-			end
-		end
-		table.clear(noclipParts)
+		restoreNoclip()
 	end
 end))
 
+local promptDurationsBefore = setmetatable({}, { __mode = "k" })
+local function restoreInstantPrompts()
+	for prompt, duration in pairs(promptDurationsBefore) do
+		if prompt.Parent then
+			prompt.HoldDuration = duration
+		end
+	end
+	table.clear(promptDurationsBefore)
+end
+hubCleanup(restoreInstantPrompts)
 trackConnection(ProximityPromptService.PromptShown:Connect(function(prompt)
 	if STATE.instantPrompts == true then
+		if promptDurationsBefore[prompt] == nil then
+			promptDurationsBefore[prompt] = prompt.HoldDuration
+		end
 		prompt.HoldDuration = 0
 	end
 end))
@@ -2067,29 +2268,72 @@ trackConnection(RunService.RenderStepped:Connect(function()
 end))
 
 -- Client helpers.
-local function hidePausePopup()
-	if STATE.noPausePopup ~= true then
+local pauseGuisBefore = setmetatable({}, { __mode = "k" })
+local function restorePausePopup()
+	if next(pauseGuisBefore) == nil then
 		return
 	end
-	local robloxGui = CoreGui:FindFirstChild("RobloxGui")
-	local pause = robloxGui and robloxGui:FindFirstChild("CoreScripts/NetworkPause")
-	if pause then
-		pcall(function()
-			if pause:IsA("ScreenGui") then
-				pause.Enabled = false
-			else
-				pause.Visible = false
+	elevate()
+	local pending = {}
+	for gui, enabled in pairs(pauseGuisBefore) do
+		if gui.Parent then
+			gui.Enabled = enabled
+			table.insert(pending, { gui = gui, enabled = enabled })
+		end
+	end
+	table.clear(pauseGuisBefore)
+	-- One loop body may already be yielding when unload starts. Repeat the
+	-- restoration after those threads have had a chance to observe the stop.
+	task.defer(function()
+		elevate()
+		if running() and STATE.noPausePopup == true then
+			return
+		end
+		for _, entry in ipairs(pending) do
+			if entry.gui.Parent then
+				entry.gui.Enabled = entry.enabled
 			end
-		end)
+		end
+	end)
+end
+hubCleanup(restorePausePopup)
+local function hidePausePopup()
+	if STATE.noPausePopup ~= true then
+		restorePausePopup()
+		return
+	end
+	elevate()
+	local pause = CoreGui:FindFirstChild("RobloxNetworkPauseNotification")
+	if pause and pause:IsA("ScreenGui") then
+		if pauseGuisBefore[pause] == nil then
+			pauseGuisBefore[pause] = pause.Enabled
+		end
+		pause.Enabled = false
 	end
 end
 
+local reconnectPending = false
 pcall(function()
 	trackConnection(GuiService.ErrorMessageChanged:Connect(function(message)
-		if STATE.autoReconnect == true and type(message) == "string" and message ~= "" then
-			task.wait(2)
-			pcall(function()
-				TeleportService:Teleport(game.PlaceId, LocalPlayer)
+		if STATE.autoReconnect == true and reconnectPending ~= true and type(message) == "string" and message ~= "" then
+			reconnectPending = true
+			task.delay(2, function()
+				if not running() or STATE.autoReconnect ~= true then
+					reconnectPending = false
+					return
+				end
+				local ok = pcall(function()
+					TeleportService:Teleport(game.PlaceId, LocalPlayer)
+				end)
+				if not ok then
+					reconnectPending = false
+				else
+					task.delay(10, function()
+						if running() then
+							reconnectPending = false
+						end
+					end)
+				end
 			end)
 		end
 	end))
@@ -2209,9 +2453,12 @@ end
 
 -- The dashboard is the same WindUI window Throw Food For Animals uses.
 local WINDUI_URL = "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
+local WINDUI_CACHE_KEY = WINDUI_URL
 
 local function loadWindUI()
-	local source = genv.ZinoosWindUISource
+	local caches = type(genv.ZinoosWindUISources) == "table" and genv.ZinoosWindUISources or {}
+	genv.ZinoosWindUISources = caches
+	local source = caches[WINDUI_CACHE_KEY]
 	if type(source) ~= "string" or #source < 1000 then
 		local ok, body = pcall(function()
 			return game:HttpGet(WINDUI_URL)
@@ -2221,16 +2468,27 @@ local function loadWindUI()
 			return nil, "download failed"
 		end
 		source = body
+		caches[WINDUI_CACHE_KEY] = source
 		genv.ZinoosWindUISource = source
+		genv.ZinoosWindUISourceKey = WINDUI_CACHE_KEY
 	end
 	local chunk, compileError = loadstring(source, "=WindUI")
 	if not chunk then
-		genv.ZinoosWindUISource = nil
+		caches[WINDUI_CACHE_KEY] = nil
+		if genv.ZinoosWindUISourceKey == WINDUI_CACHE_KEY then
+			genv.ZinoosWindUISource = nil
+			genv.ZinoosWindUISourceKey = nil
+		end
 		return nil, compileError
 	end
 	local ok, library = pcall(chunk)
 	elevate()
 	if not ok or type(library) ~= "table" then
+		caches[WINDUI_CACHE_KEY] = nil
+		if genv.ZinoosWindUISourceKey == WINDUI_CACHE_KEY then
+			genv.ZinoosWindUISource = nil
+			genv.ZinoosWindUISourceKey = nil
+		end
 		return nil, tostring(library)
 	end
 	return library
@@ -2399,15 +2657,14 @@ local function installHub()
 			STATE.applyFpsBoost()
 		elseif key == "noPausePopup" then
 			hidePausePopup()
+		elseif key == "instantPrompts" and not on then
+			restoreInstantPrompts()
 		elseif key == "autoEquip" and on then
 			task.spawn(STATE.equipBestNow)
 		elseif key == "autoClaim" and on then
 			task.spawn(STATE.claimNow)
 		elseif key == "walkSpeed" and not on then
-			local hum = humanoid()
-			if hum then
-				hum.WalkSpeed = 16
-			end
+			restoreWalkSpeed()
 		end
 		elevate()
 		saveConfig()
@@ -2517,10 +2774,10 @@ local function installHub()
 		return node ~= nil and node.Enabled
 	end
 	local function reflow(box)
+		elevate()
 		if not box or windowGone or box.Opened ~= true or not isShown(box) then
 			return
 		end
-		elevate()
 		pcall(box.Open, box, true)
 	end
 	local function reflowShown()
@@ -2685,7 +2942,8 @@ local function installHub()
 		button(hatchBox, "Golden Egg", "Opens the Robux prompt. It does not buy on its own", "egg", function()
 			STATE.buyGoldenEgg()
 		end)
-		toggle(hatchBox, "Auto Equip Best Pet", "autoEquip", "Equips your best pets")
+		toggle(hatchBox, "Auto Equip Best Pet", "autoEquip", "Equips your strongest pets")
+		toggle(hatchBox, "Auto Fuse Pets", "autoFuse", "Levels a pet when you own enough spare copies. It keeps one of each")
 
 		local mutateBox = section(progressTab, "Mutations", "sparkles")
 		toggle(mutateBox, "Auto Roll", "autoRoll", "Rolls when you have tokens or the DNA")
@@ -2695,6 +2953,7 @@ local function installHub()
 			STATE.rollSize = option
 		end)
 		toggle(mutateBox, "Auto Equip Best Mutations", "autoMutations", "Fills your slots with the rarest mutations you own")
+		toggle(mutateBox, "Auto Best Breed", "autoBestBreed", "Wears the strongest breed you have unlocked")
 		local breedNames = { "Keep" }
 		local breedKeyByName = { Keep = "Keep" }
 		local function addBreed(breed)
@@ -2917,7 +3176,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.6"
+STATE.version = "1.0.8"
 
 if running() then
 	elevate()
@@ -2950,7 +3209,9 @@ task.spawn(function()
 		pcall(stepHatch)
 		pcall(stepRoll)
 		pcall(stepMutations)
+		pcall(stepBestBreed)
 		pcall(stepEquip)
+		pcall(stepFuse)
 		pcall(stepClaims)
 		pcall(stepEsp)
 		task.wait(0.35)
@@ -2958,6 +3219,7 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+	elevate()
 	while running() do
 		pcall(stepSpeed)
 		pcall(fillStamina)
