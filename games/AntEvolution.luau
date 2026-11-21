@@ -81,6 +81,7 @@ local STATE = {
 	autoCosmeticCrates = false,
 	cosmeticSlot = "Aura",
 	autoBestAura = false,
+	godMode = true,
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -203,6 +204,7 @@ local FLAG_KEYS = {
 	AutoDungeon = "autoDungeon",
 	AutoCosmeticCrates = "autoCosmeticCrates",
 	AutoBestAura = "autoBestAura",
+	GodMode = "godMode",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	InfiniteJump = "infiniteJump",
@@ -1103,6 +1105,10 @@ local farm = {
 	nextCosmetic = 0,
 	nextAura = 0,
 	dungeonEnterAt = 0,
+	godRecovering = false,
+	godHold = nil,
+	godReturn = nil,
+	godEscapes = 0,
 }
 
 local function readJson(value)
@@ -1288,6 +1294,69 @@ local function spawnStand()
 		return pad.Position + Vector3.new(0, 5, 0)
 	end
 	return Vector3.new(0, 16, 0)
+end
+
+local function healthRatio(character)
+	local hp = tonumber(character:GetAttribute("HP"))
+	local maxHp = tonumber(character:GetAttribute("MaxHP"))
+	if not hp or not maxHp or maxHp <= 0 then
+		return nil, hp, maxHp
+	end
+	return math.clamp(hp / maxHp, 0, 1), hp, maxHp
+end
+
+local function stepGodMode(character, root)
+	local ratio, hp, maxHp = healthRatio(character)
+	if STATE.godMode ~= true then
+		if farm.godRecovering == true then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.CFrame = CFrame.new(farm.godReturn or spawnStand())
+		end
+		farm.godRecovering = false
+		farm.godHold = nil
+		farm.godReturn = nil
+		STATE.godRecovering = false
+		return false
+	end
+	if not ratio then
+		return false
+	end
+	if farm.godRecovering == true then
+		if ratio >= 0.99 then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.CFrame = CFrame.new(farm.godReturn or spawnStand())
+			farm.godRecovering = false
+			farm.godHold = nil
+			farm.godReturn = nil
+			STATE.godRecovering = false
+			STATE.status = "God Mode recovered"
+			STATE.detail = string.format("HP %d/%d", math.floor(hp or 0), math.floor(maxHp or 0))
+			return true
+		end
+		local hold = farm.godHold or (root.Position + Vector3.new(0, 180, 0))
+		farm.godHold = hold
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = CFrame.new(hold)
+		STATE.godRecovering = true
+		STATE.status = "God Mode healing"
+		STATE.detail = string.format("HP %d/%d  ·  %d%%", math.floor(hp or 0), math.floor(maxHp or 0), math.floor(ratio * 100))
+		return true
+	end
+	if ratio <= 0.72 then
+		farm.godRecovering = true
+		farm.godEscapes += 1
+		farm.godReturn = spawnStand()
+		farm.godHold = Vector3.new(root.Position.X, math.max(root.Position.Y + 180, 180), root.Position.Z)
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = CFrame.new(farm.godHold)
+		STATE.godRecovering = true
+		STATE.godEscapes = farm.godEscapes
+		STATE.status = "God Mode escaped"
+		STATE.detail = string.format("HP %d/%d  ·  healing safely", math.floor(hp or 0), math.floor(maxHp or 0))
+		return true
+	end
+	STATE.godRecovering = false
+	return false
 end
 
 local function standOn(ground, character, root)
@@ -1664,6 +1733,9 @@ local function stepFarm()
 	local character, root = living()
 	if not character then
 		STATE.status = "Waiting to move"
+		return
+	end
+	if stepGodMode(character, root) then
 		return
 	end
 	if root.Position.Y < voidY() then
@@ -3894,6 +3966,9 @@ local function installHub()
 	end
 
 	do
+		local safetyBox = section(playerTab, "Survival", "shield-check")
+		toggle(safetyBox, "God Mode", "godMode", "Escapes at 72% HP, waits out combat while real HP regenerates, then returns safely")
+
 		local moveBox = section(playerTab, "Movement", "footprints")
 		toggle(moveBox, "Custom Walk Speed", "walkSpeed")
 		choice(moveBox, "Walk Speed", "16 is the normal speed", SPEED_OPTIONS, function()
@@ -4082,7 +4157,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.2.0"
+STATE.version = "1.2.1"
 
 if running() then
 	elevate()
