@@ -3107,6 +3107,33 @@ end)
 
 local graphicsBefore = nil
 
+local POTATO_VISUAL_CLASSES = {
+	ParticleEmitter = true,
+	Trail = true,
+	Beam = true,
+	Smoke = true,
+	Fire = true,
+	Sparkles = true,
+	Highlight = true,
+	PointLight = true,
+	SpotLight = true,
+	SurfaceLight = true,
+	Decal = true,
+	Texture = true,
+	BloomEffect = true,
+	BlurEffect = true,
+	ColorCorrectionEffect = true,
+	DepthOfFieldEffect = true,
+	SunRaysEffect = true,
+	Atmosphere = true,
+	Clouds = true,
+	Sky = true,
+}
+
+local function isPotatoVisual(instance)
+	return instance ~= nil and POTATO_VISUAL_CLASSES[instance.ClassName] == true
+end
+
 local function lowGraphicsProperty(profile, instance, property, value, keepSuppressed)
 	if graphicsBefore ~= profile or STATE.fpsBoost ~= true or not instance then
 		return
@@ -3147,6 +3174,9 @@ local function optimizeVisual(profile, instance)
 	if graphicsBefore ~= profile or STATE.fpsBoost ~= true or not instance then
 		return
 	end
+	if not isPotatoVisual(instance) then
+		return
+	end
 	if instance:IsA("ParticleEmitter") then
 		lowGraphicsProperty(profile, instance, "Enabled", false, true)
 		lowGraphicsProperty(profile, instance, "Rate", 0, true)
@@ -3172,6 +3202,33 @@ local function optimizeVisual(profile, instance)
 	end
 end
 
+local function scanVisualTree(profile, root)
+	local stack = { root }
+	local scanned = 0
+	local optimized = 0
+	while #stack > 0 and graphicsBefore == profile and STATE.fpsBoost == true do
+		local current = table.remove(stack)
+		local ok, children = pcall(function()
+			return current:GetChildren()
+		end)
+		if ok then
+			for index = #children, 1, -1 do
+				local child = children[index]
+				stack[#stack + 1] = child
+				if isPotatoVisual(child) then
+					optimizeVisual(profile, child)
+					optimized += 1
+				end
+			end
+		end
+		scanned += 1
+		if scanned % 80 == 0 then
+			RunService.Heartbeat:Wait()
+		end
+	end
+	return scanned, optimized
+end
+
 local function restoreGraphics(profile)
 	for _, connection in ipairs(profile.connections) do
 		pcall(function() connection:Disconnect() end)
@@ -3191,6 +3248,11 @@ local function restoreGraphics(profile)
 			settings().Rendering.QualityLevel = profile.quality
 		end
 	end)
+	if type(profile.gameQuality) == "table" then
+		pcall(function()
+			profile.gameQuality.Perf = profile.gamePerf
+		end)
+	end
 end
 
 function STATE.applyFpsBoost()
@@ -3208,6 +3270,14 @@ function STATE.applyFpsBoost()
 			profile.quality = settings().Rendering.QualityLevel
 			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 		end)
+		pcall(function()
+			local quality = require(ReplicatedStorage.Ant.Client.Quality)
+			if type(quality) == "table" then
+				profile.gameQuality = quality
+				profile.gamePerf = quality.Perf
+				quality.Perf = true
+			end
+		end)
 		lowGraphicsProperty(profile, Lighting, "GlobalShadows", false, false)
 		lowGraphicsProperty(profile, Lighting, "EnvironmentDiffuseScale", 0, false)
 		lowGraphicsProperty(profile, Lighting, "EnvironmentSpecularScale", 0, false)
@@ -3220,27 +3290,20 @@ function STATE.applyFpsBoost()
 			lowGraphicsProperty(profile, terrain, "WaterReflectance", 0, false)
 			lowGraphicsProperty(profile, terrain, "WaterTransparency", 1, false)
 		end
-		for _, effect in ipairs(Lighting:GetDescendants()) do
-			optimizeVisual(profile, effect)
-		end
 		table.insert(profile.connections, Workspace.DescendantAdded:Connect(function(instance)
-			task.defer(optimizeVisual, profile, instance)
+			if isPotatoVisual(instance) then
+				task.defer(optimizeVisual, profile, instance)
+			end
 		end))
 		table.insert(profile.connections, Lighting.DescendantAdded:Connect(function(instance)
-			task.defer(optimizeVisual, profile, instance)
+			if isPotatoVisual(instance) then
+				task.defer(optimizeVisual, profile, instance)
+			end
 		end))
 		task.spawn(function()
-			local descendants = Workspace:GetDescendants()
-			for index, instance in ipairs(descendants) do
-				if graphicsBefore ~= profile or STATE.fpsBoost ~= true then
-					return
-				end
-				optimizeVisual(profile, instance)
-				if index % 250 == 0 then
-					RunService.Heartbeat:Wait()
-				end
-			end
-			STATE.detail = "Potato Mode optimized " .. tostring(#descendants) .. " objects"
+			local worldScanned, worldOptimized = scanVisualTree(profile, Workspace)
+			local _, lightingOptimized = scanVisualTree(profile, Lighting)
+			STATE.detail = string.format("Potato Mode optimized %d effects across %d objects", worldOptimized + lightingOptimized, worldScanned)
 			while running() and graphicsBefore == profile and STATE.fpsBoost == true do
 				for instance, properties in pairs(profile.suppressed) do
 					if instance.Parent then
@@ -3253,7 +3316,7 @@ function STATE.applyFpsBoost()
 						end
 					end
 				end
-				task.wait(1.5)
+				task.wait(2)
 			end
 		end)
 	elseif graphicsBefore then
@@ -4157,7 +4220,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.2.1"
+STATE.version = "1.2.2"
 
 if running() then
 	elevate()

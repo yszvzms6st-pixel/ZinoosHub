@@ -111,7 +111,7 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 
 **Home** shows power, stage, rebirths and what the hub is doing, plus **Claim Now** and **Equip Best Now**.
 
-**Player** has server-aware **God Mode**, Walk Speed, Infinite Jump, Noclip, Instant Interactions, Fly, Anti AFK, Auto Reconnect, Hide Roblox Pause Popup, a reversible **Potato Mode** that suppresses particles, trails, beams, lights, decals, water and post effects while keeping the game and hub visible, AFK Black Screen, and Rejoin, Server Hop, Lowest Player Server and Copy Job ID. God Mode escapes at 72% real HP, waits outside attack range for server regeneration, then returns to the map; it does not fake the Humanoid health bar.
+**Player** has server-aware **God Mode**, Walk Speed, Infinite Jump, Noclip, Instant Interactions, Fly, Anti AFK, Auto Reconnect, Hide Roblox Pause Popup, a reversible **Potato Mode** that enables the game's own low-quality path and suppresses particles, trails, beams, lights, decals, water and post effects while keeping the game and hub visible, AFK Black Screen, and Rejoin, Server Hop, Lowest Player Server and Copy Job ID. Potato Mode incrementally scans the world and filters new objects so enabling it does not freeze busy servers. God Mode escapes at 72% real HP, waits outside attack range for server regeneration, then returns to the map; it does not fake the Humanoid health bar.
 
 **Settings** has the theme, menu size, open key, and Unload. The Zinoos button opens the window. Right Control opens and closes it on PC.
 
