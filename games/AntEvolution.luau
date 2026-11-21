@@ -1529,7 +1529,9 @@ local function stepSpecialTravel(character, root)
 		local position = dungeonPortalPosition()
 		if typeof(position) == "Vector3" then
 			local distance = (position - root.Position).Magnitude
-			if distance <= 6 then
+			-- Keep moving into the portal trigger. Stopping six studs away leaves the
+			-- ant parked on "Waiting for the portal" without ever touching it.
+			if distance <= 1.25 then
 				STATE.status = "Entering dungeon"
 				STATE.detail = "Waiting for the portal"
 				return true
@@ -2246,6 +2248,24 @@ local function stepUpgrades()
 	local sent, result = invokeResult("BuyUpgrade", best.key)
 	if remoteAccepted(sent, result) then
 		noteActivity("Upgraded " .. tostring(best.name or best.key))
+		return
+	end
+	if sent and type(result) == "table" and result.ok == false then
+		local message = tostring(result.msg or "")
+		local lower = string.lower(message)
+		if string.find(lower, "gone", 1, true)
+			or string.find(lower, "removed", 1, true)
+			or string.find(lower, "unavailable", 1, true) then
+			-- The v427 server still exposes BuyUpgrade and the old upgrade data, but
+			-- rejects purchases with "Upgrades are gone". Stop retrying the dead
+			-- feature and persist the correction for the next loader run.
+			STATE.autoUpgrade = false
+			STATE.upgradesUnavailable = message ~= "" and message or "Unavailable on this server"
+			noteActivity("Auto upgrades off: " .. STATE.upgradesUnavailable)
+			if STATE.writeConfig then
+				STATE.writeConfig()
+			end
+		end
 	end
 end
 
@@ -3945,7 +3965,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.1.1"
+STATE.version = "1.1.2"
 
 if running() then
 	elevate()
