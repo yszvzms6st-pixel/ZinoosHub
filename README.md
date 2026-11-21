@@ -91,16 +91,22 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 **Farm**
 
 - **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map. While Sugar Rush is up it goes to the sugar ring and stays there, because the top 3 prizes are worth more than the food.
-- **Auto Bite** bites a bug that is already in reach. **Auto Ability** uses your equipped mutation ability on a nearby bug. Dash and Fly are left alone.
+- **Auto Bite** bites a bug that is already in reach. **Auto Ability** uses your equipped mutation ability on a nearby bug. **Chase Bugs** walks into attack range.
+- **Smart Event Priority** targets event bosses and creatures, and handles Treasure Hunt chests. **Auto Collect Worms** collects Worm Rain drops.
+- **Quest Objective Assist** runs the matching food, bug, evolve, roll, pet, worm and dungeon objective. PvP ant quests are a separate opt-in.
+- **Auto Dungeon** enters when a run is available and fights the waves and boss. Dungeon movement uses the lower dungeon floor instead of treating it as the surface void.
 - **Critter ESP** shows bug names and health. **Player ESP** shows other players.
 
 **Progress**
 
 - **Auto Evolve** evolves when you have the power. **Auto Rebirth** rebirths only at the top stage.
-- **Auto Hatch** hatches the egg you pick once you can pay. Royal is the default. Colony is the other choice.
+- **Auto Buy Upgrades** buys the cheapest enabled DNA upgrade. The shared **DNA Reserve** also protects DNA from pet hatches, mutation rolls and cosmetic crates.
+- **Auto Hatch** supports Royal, Colony or Best Affordable and can stop when a selected hatchable pet is owned.
 - **Auto Equip Best Pet** equips your strongest pets. **Auto Fuse Pets** levels a pet when you have enough spare copies while keeping one of each pet.
-- **Auto Roll** rolls mutations, **Auto Equip Best Mutations** fills your slots with the rarest mutations you own, and **Auto Best Breed** wears your strongest unlocked breed.
-- **Auto Claim Rewards** claims daily, playtime, quests and records. **Redeem Codes** redeems the known codes once.
+- **Auto Roll** can save rolls for Lucky Hour or a personal luck boost and stop at a selected rarity or mutation. **Auto Equip Best Mutations** fills your slots with the rarest mutations you own, and **Auto Best Breed** wears your strongest unlocked breed.
+- **Auto Claim Rewards** claims daily, playtime, quests and records. **Auto Battle Pass** claims reached free and already-owned premium rewards, weekly quests and the weekly bonus. **Auto Kill Rewards** claims reached kill milestones. **Redeem Codes** redeems the known codes once.
+- **Auto Mole Trade** exchanges worms for a selected free Mole Shop reward while keeping a worm reserve.
+- **Auto Cosmetic Crates** opens the selected DNA crate while keeping the DNA reserve. **Auto Best Aura** equips the highest-rarity aura you own.
 
 **Home** shows power, stage, rebirths and what the hub is doing, plus **Claim Now** and **Equip Best Now**.
 

@@ -54,6 +54,31 @@ local STATE = {
 	breed = "Keep",
 	autoClaim = true,
 	autoCodes = true,
+	autoUpgrade = false,
+	upgradeJaws = true,
+	upgradeShell = true,
+	upgradeLegs = true,
+	upgradeMagnet = true,
+	upgradeAppetite = true,
+	upgradeRegen = true,
+	dnaReserve = "1000",
+	smartEvents = true,
+	questAssist = true,
+	pvpQuest = false,
+	luckyRollsOnly = false,
+	rollTargetRarity = "Off",
+	rollTargetMutation = "Off",
+	petTarget = "Off",
+	autoBattlePass = true,
+	autoKillRewards = true,
+	autoWorms = true,
+	autoMole = false,
+	moleItem = "Roll",
+	wormReserve = "0",
+	autoDungeon = false,
+	autoCosmeticCrates = false,
+	cosmeticSlot = "Aura",
+	autoBestAura = false,
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -156,6 +181,24 @@ local FLAG_KEYS = {
 	AutoMutations = "autoMutations",
 	AutoClaim = "autoClaim",
 	AutoCodes = "autoCodes",
+	AutoUpgrade = "autoUpgrade",
+	UpgradeJaws = "upgradeJaws",
+	UpgradeShell = "upgradeShell",
+	UpgradeLegs = "upgradeLegs",
+	UpgradeMagnet = "upgradeMagnet",
+	UpgradeAppetite = "upgradeAppetite",
+	UpgradeRegen = "upgradeRegen",
+	SmartEvents = "smartEvents",
+	QuestAssist = "questAssist",
+	PvpQuest = "pvpQuest",
+	LuckyRollsOnly = "luckyRollsOnly",
+	AutoBattlePass = "autoBattlePass",
+	AutoKillRewards = "autoKillRewards",
+	AutoWorms = "autoWorms",
+	AutoMole = "autoMole",
+	AutoDungeon = "autoDungeon",
+	AutoCosmeticCrates = "autoCosmeticCrates",
+	AutoBestAura = "autoBestAura",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	InfiniteJump = "infiniteJump",
@@ -175,12 +218,23 @@ local FLAG_KEYS = {
 
 local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
-local EGG_OPTIONS = { "Royal", "Colony" }
+local EGG_OPTIONS = { "Best Affordable", "Royal", "Colony" }
+local RESERVE_OPTIONS = { "0", "250", "500", "1000", "2500", "5000", "10000", "25000", "50000" }
+local WORM_RESERVE_OPTIONS = { "0", "10", "15", "30", "45", "60", "90" }
+local MOLE_OPTIONS = { "Roll", "Egg", "Power", "Luck", "Royal", "Rolls5", "Drizzle", "Puddle" }
+local COSMETIC_SLOTS = { "Aura", "Trail", "Hat", "Face", "Back", "Mouth" }
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	Egg = { key = "egg", options = EGG_OPTIONS },
 	RollSize = { key = "rollSize", options = { "1", "5" } },
 	Breed = { key = "breed" },
+	DnaReserve = { key = "dnaReserve", options = RESERVE_OPTIONS },
+	WormReserve = { key = "wormReserve", options = WORM_RESERVE_OPTIONS },
+	MoleItem = { key = "moleItem", options = MOLE_OPTIONS },
+	CosmeticSlot = { key = "cosmeticSlot", options = COSMETIC_SLOTS },
+	RollTargetRarity = { key = "rollTargetRarity", options = { "Off", "Legendary", "Mythic", "Secret" } },
+	RollTargetMutation = { key = "rollTargetMutation" },
+	PetTarget = { key = "petTarget" },
 	WindTheme = { key = "windTheme" },
 	HubSize = { key = "hubSize", options = { "Compact", "Normal", "Large" } },
 }
@@ -986,6 +1040,11 @@ STATE.shortNumber = shortNumber
 local Net = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Net"))
 local Config = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Config"))
 local GameState = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Client"):WaitForChild("State"))
+local Content = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Content"))
+local Cosmetics = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Cosmetics"))
+local EventsConfig = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("EventsConfig"))
+
+local globalValue, activeEvent, dungeonState, inDungeon, activeQuestKeys, questNeeds, dnaAvailable
 
 local function invoke(name, ...)
 	local packed = table.pack(...)
@@ -1012,6 +1071,7 @@ end
 
 local farm = {
 	orbs = {},
+	eat = nil :: any,
 	ready = false,
 	nextRefresh = 0,
 	skip = {},
@@ -1032,6 +1092,13 @@ local farm = {
 	nextBite = 0,
 	nextAbility = 0,
 	nextEsp = 0,
+	nextUpgrade = 0,
+	nextPass = 0,
+	nextKillClaim = 0,
+	nextMole = 0,
+	nextCosmetic = 0,
+	nextAura = 0,
+	dungeonEnterAt = 0,
 }
 
 local function readJson(value)
@@ -1186,8 +1253,13 @@ local function pickOrb(origin)
 	return nil
 end
 
-local VOID_Y = -40
-local lastSafe = nil
+local SURFACE_VOID_Y = -40
+local safeSpots = { surface = nil, dungeon = nil }
+
+local function voidY()
+	local inside = inDungeon()
+	return inside and -4000 or SURFACE_VOID_Y
+end
 
 local function rayFilter(character)
 	local params = RaycastParams.new()
@@ -1198,7 +1270,7 @@ end
 
 local function groundAt(xz, character, fromY)
 	local hit = Workspace:Raycast(Vector3.new(xz.X, fromY + 12, xz.Z), Vector3.new(0, -50, 0), rayFilter(character))
-	if hit and hit.Position.Y > VOID_Y and hit.Normal.Y > 0.45 then
+	if hit and hit.Position.Y > voidY() and hit.Normal.Y > 0.45 then
 		return hit.Position
 	end
 	return nil
@@ -1221,7 +1293,8 @@ local function standOn(ground, character, root)
 end
 
 local function putBack(root)
-	local spot = lastSafe or spawnStand()
+	local inside = inDungeon()
+	local spot = safeSpots[inside and "dungeon" or "surface"] or spawnStand()
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.CFrame = CFrame.new(spot)
 	STATE.status = "Back on the map"
@@ -1339,7 +1412,7 @@ local function stepToward(character, root, point, status, detail)
 	if (not ground or math.abs(ground.Y - root.Position.Y) > 22) and flat.Magnitude > 4 then
 		ground = groundAt(root.Position + flat.Unit * 4, character, root.Position.Y)
 	end
-	if not ground or ground.Y <= VOID_Y or math.abs(ground.Y - root.Position.Y) > 22 then
+	if not ground or ground.Y <= voidY() or math.abs(ground.Y - root.Position.Y) > 22 then
 		return false
 	end
 	local goal = standOn(ground, character, root)
@@ -1355,9 +1428,126 @@ local function stepToward(character, root, point, status, detail)
 	return true
 end
 
-local nearestCritter
+local function vectorFromData(row)
+	if typeof(row) == "Vector3" then
+		return row
+	end
+	if type(row) ~= "table" then
+		return nil
+	end
+	local value = type(row.p) == "table" and row.p or type(row.pos) == "table" and row.pos or row
+	local x = tonumber(value.x or value.X or value[1])
+	local y = tonumber(value.y or value.Y or value[2])
+	local z = tonumber(value.z or value.Z or value[3])
+	if x and y and z then
+		return Vector3.new(x, y, z)
+	end
+	return nil
+end
+
+local function nearestWorm(origin)
+	local gameFolder = Workspace:FindFirstChild("Game")
+	local folder = gameFolder and gameFolder:FindFirstChild("Worms")
+	local best, bestDist
+	if folder then
+		for _, part in ipairs(folder:GetChildren()) do
+			if part:IsA("BasePart") and not part:GetAttribute("TakenBy") and part:GetAttribute("Dig") ~= true then
+				local distance = (part.Position - origin).Magnitude
+				if not bestDist or distance < bestDist then
+					best, bestDist = part, distance
+				end
+			end
+		end
+	end
+	return best, bestDist
+end
+
+local function nearestTreasure(origin, data)
+	local best, bestDist
+	for _, row in pairs(type(data) == "table" and type(data.chests) == "table" and data.chests or {}) do
+		if type(row) == "table" and not row.open then
+			local position = vectorFromData(row)
+			if position then
+				local distance = (position - origin).Magnitude
+				if not bestDist or distance < bestDist then
+					best, bestDist = position, distance
+				end
+			end
+		end
+	end
+	return best, bestDist
+end
+
+local function dungeonPortalPosition()
+	local gameFolder = Workspace:FindFirstChild("Game")
+	local portal = gameFolder and gameFolder:FindFirstChild("DungeonPortal")
+	if portal and portal:IsA("Model") then
+		return portal:GetPivot().Position
+	end
+	if portal and portal:IsA("BasePart") then
+		return portal.Position
+	end
+	return type(Content.Dungeon) == "table" and type(Content.Dungeon.Portal) == "table" and Content.Dungeon.Portal.at or nil
+end
+
+local function stepSpecialTravel(character, root)
+	local inside, dungeon = inDungeon()
+	if inside then
+		STATE.dungeon = string.upper(tostring(dungeon.st or "ACTIVE"))
+		return false
+	end
+	STATE.dungeon = "Surface"
+	local eventKey, eventData = activeEvent()
+	if STATE.smartEvents == true and eventKey == "TreasureHunt" then
+		local position, distance = nearestTreasure(root.Position, eventData)
+		if position then
+			if distance <= 5 then
+				STATE.status = "Opening treasure"
+				STATE.detail = "Treasure Hunt chest"
+				return true
+			end
+			return stepToward(character, root, position, "Going to treasure", string.format("Treasure chest  %d away", math.floor(distance)))
+		end
+	end
+	if STATE.autoWorms == true and globalValue("WormRain") == "rain" then
+		local worm, distance = nearestWorm(root.Position)
+		if worm then
+			if distance <= 4 then
+				STATE.status = "Collecting worm"
+				STATE.detail = "Worm rain"
+				return true
+			end
+			return stepToward(character, root, worm.Position, "Going to worm", string.format("Worm  %d away", math.floor(distance)))
+		end
+	end
+	local wantsDungeon = STATE.autoDungeon == true or questNeeds("dungeon")
+	if wantsDungeon
+		and stateNumber("DungeonRuns") > 0
+		and stateNumber("Tutorial") >= (tonumber(Config.MaxTutorial) or 8)
+		and stateNumber("Rebirths") >= (tonumber(Content.Dungeon and Content.Dungeon.MinRebirths) or 1)
+		and stateNumber("Stage") >= (tonumber(Content.Dungeon and Content.Dungeon.MinStage) or 4) then
+		local position = dungeonPortalPosition()
+		if typeof(position) == "Vector3" then
+			local distance = (position - root.Position).Magnitude
+			if distance <= 6 then
+				STATE.status = "Entering dungeon"
+				STATE.detail = "Waiting for the portal"
+				return true
+			end
+			return stepToward(character, root, position, "Going to dungeon", string.format("Dungeon portal  %d away", math.floor(distance)))
+		end
+	end
+	return false
+end
+
+local nearestCritter, nearestAnt
 local function stepFarm()
-	if STATE.autoOrb ~= true then
+	if STATE.autoOrb ~= true
+		and STATE.autoDungeon ~= true
+		and STATE.autoWorms ~= true
+		and STATE.smartEvents ~= true
+		and STATE.questAssist ~= true
+		and STATE.chaseBugs ~= true then
 		STATE.detail = "Farm off"
 		return
 	end
@@ -1366,20 +1556,24 @@ local function stepFarm()
 		STATE.status = "Waiting to move"
 		return
 	end
-	if root.Position.Y < VOID_Y then
+	if root.Position.Y < voidY() then
 		putBack(root)
 		return
 	end
 	local under = groundAt(root.Position, character, root.Position.Y)
 	if under and math.abs(root.Position.Y - under.Y) < 12 then
-		lastSafe = root.Position
+		safeSpots[inDungeon() and "dungeon" or "surface"] = root.Position
+	end
+	if stepSpecialTravel(character, root) then
+		return
 	end
 	local cube = sugarCube()
 	if cube then
 		stepSugar(character, root, cube)
 		return
 	end
-	if STATE.chaseBugs == true then
+	local dungeonActive = inDungeon()
+	if STATE.chaseBugs == true or questNeeds("bugs") or dungeonActive then
 		local model, foeRoot, foeDist = nearestCritter(root.Position, 140)
 		if foeRoot then
 			local length = tonumber(character:GetAttribute("Length")) or 10
@@ -1399,6 +1593,28 @@ local function stepFarm()
 				return
 			end
 		end
+	end
+	if STATE.pvpQuest == true and questNeeds("ants") then
+		local model, foeRoot, foeDist = nearestAnt(root.Position, 140)
+		if foeRoot then
+			local length = tonumber(character:GetAttribute("Length")) or 10
+			local reach = 18
+			local reachOk, gotReach = pcall(Config.BiteRange, length)
+			if reachOk and type(gotReach) == "number" then
+				reach = gotReach + 6
+			end
+			if foeDist <= reach then
+				STATE.status = "Fighting " .. tostring(model:GetAttribute("DisplayName") or model.Name)
+				return
+			end
+			if stepToward(character, root, foeRoot.Position, "Chasing quest ant", string.format("Ant  %d away", math.floor(foeDist))) then
+				return
+			end
+		end
+	end
+	if STATE.autoOrb ~= true and not questNeeds("eat") then
+		STATE.detail = "Orb farm off"
+		return
 	end
 	local id, orb = liveTarget(root.Position)
 	if not orb then
@@ -1460,14 +1676,72 @@ function nearestCritter(origin, limit)
 	if not critters then
 		return nil
 	end
-	local bestModel, bestRoot, bestDist
+	local bestModel, bestRoot, bestDist, bestPriority
+	local eventKey, eventData = activeEvent()
+	local bossId = tonumber(globalValue("BossId"))
+	local wanted = {
+		MantisBoss = "mantis",
+		GoldenAphid = "goldenaphid",
+		AphidStampede = "aphid",
+		SpiderNest = "spider",
+		LadybugSwarm = "ladybug",
+		RedSwarm = "fireant",
+	}
 	for _, model in ipairs(critters:GetChildren()) do
 		if model:IsA("Model") and (tonumber(model:GetAttribute("HP")) or 0) > 0 then
 			local root = critterRoot(model)
 			if root then
 				local distance = (root.Position - origin).Magnitude
-				if distance <= limit and (not bestDist or distance < bestDist) then
-					bestModel, bestRoot, bestDist = model, root, distance
+				local priority = 1
+				if STATE.smartEvents == true and type(eventKey) == "string" then
+					local identity = string.lower(table.concat({
+						tostring(model.Name),
+						tostring(model:GetAttribute("Kind") or ""),
+						tostring(model:GetAttribute("Species") or ""),
+						tostring(model:GetAttribute("EventTag") or model:GetAttribute("Tag") or ""),
+					}, "")):gsub("[^%w]", "")
+					local eventWanted = wanted[eventKey]
+					if (bossId and bossId > 0 and model:GetAttribute("EntityId") == bossId)
+						or (eventWanted and string.find(identity, eventWanted, 1, true))
+						or (type(eventData) == "table" and tonumber(eventData.follow) == model:GetAttribute("EntityId")) then
+						priority = 4
+					end
+				end
+				if distance <= limit and (not bestPriority or priority > bestPriority or (priority == bestPriority and (not bestDist or distance < bestDist))) then
+					bestModel, bestRoot, bestDist, bestPriority = model, root, distance, priority
+				end
+			end
+		end
+	end
+	return bestModel, bestRoot, bestDist
+end
+
+local function antFolders()
+	local folders = { Workspace }
+	local ants = Workspace:FindFirstChild("Ants")
+	if ants then
+		local bots = ants:FindFirstChild("Bots")
+		if bots then
+			table.insert(folders, bots)
+		end
+	end
+	return folders
+end
+
+function nearestAnt(origin, limit)
+	local bestModel, bestRoot, bestDist
+	for _, folder in ipairs(antFolders()) do
+		for _, model in ipairs(folder:GetChildren()) do
+			if model:IsA("Model") and model ~= LocalPlayer.Character and model:GetAttribute("Kind") == "Ant" and model:GetAttribute("IsCritter") ~= true and model:GetAttribute("Dead") ~= true then
+				local hp = model:GetAttribute("HP")
+				if hp == nil or (tonumber(hp) or 0) > 0 then
+					local root = critterRoot(model)
+					if root then
+						local distance = (root.Position - origin).Magnitude
+						if distance <= limit and (not bestDist or distance < bestDist) then
+							bestModel, bestRoot, bestDist = model, root, distance
+						end
+					end
 				end
 			end
 		end
@@ -1476,7 +1750,9 @@ function nearestCritter(origin, limit)
 end
 
 local function stepBite()
-	if STATE.autoBite ~= true or os.clock() < farm.nextBite then
+	local dungeonActive = inDungeon()
+	local questCombat = questNeeds("bugs") or (STATE.pvpQuest == true and questNeeds("ants"))
+	if (STATE.autoBite ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextBite then
 		return
 	end
 	local character, root = living()
@@ -1492,6 +1768,9 @@ local function stepBite()
 		range = got + 4
 	end
 	local foe = nearestCritter(root.Position, range)
+	if not foe and STATE.pvpQuest == true and questNeeds("ants") then
+		foe = nearestAnt(root.Position, range)
+	end
 	local entityId = foe and foe:GetAttribute("EntityId")
 	if type(entityId) ~= "number" then
 		return
@@ -1528,7 +1807,9 @@ local function equippedAbility()
 end
 
 local function stepAbility()
-	if STATE.autoAbility ~= true or os.clock() < farm.nextAbility then
+	local dungeonActive = inDungeon()
+	local questCombat = questNeeds("bugs") or (STATE.pvpQuest == true and questNeeds("ants"))
+	if (STATE.autoAbility ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextAbility then
 		return
 	end
 	local character, root = living()
@@ -1548,6 +1829,10 @@ local function stepAbility()
 		reach = info.Radius * length + (tonumber(info.RadiusAdd) or 0)
 	end
 	local _, foeRoot = nearestCritter(root.Position, reach)
+	if not foeRoot and STATE.pvpQuest == true and questNeeds("ants") then
+		local _, antRoot = nearestAnt(root.Position, reach)
+		foeRoot = antRoot
+	end
 	if not foeRoot then
 		return
 	end
@@ -1587,26 +1872,36 @@ local function stepEvolve()
 		end
 		return
 	end
-	if STATE.autoEvolve == true then
+	if STATE.autoEvolve == true or questNeeds("evolve") then
 		invoke("Evolve")
 		STATE.status = "Evolving"
 	end
 end
 
 local function stepHatch()
-	if STATE.autoHatch ~= true or os.clock() < farm.nextHatch then
+	if (STATE.autoHatch ~= true and not questNeeds("pets")) or os.clock() < farm.nextHatch then
 		return
 	end
-	if STATE.egg ~= "Royal" and STATE.egg ~= "Colony" then
+	local owned = stateJson("PetsOwned") or {}
+	if type(STATE.petTarget) == "string" and STATE.petTarget ~= "Off" and (tonumber(owned[STATE.petTarget]) or 0) > 0 then
+		STATE.detail = "Pet target owned"
 		return
 	end
-	local egg = Config.PetEggByKey[STATE.egg]
+	local eggKey = STATE.egg
+	if eggKey == "Best Affordable" then
+		local royal = Config.PetEggByKey.Royal
+		eggKey = type(royal) == "table" and dnaAvailable() >= (tonumber(royal.cost) or math.huge) and "Royal" or "Colony"
+	end
+	if eggKey ~= "Royal" and eggKey ~= "Colony" then
+		return
+	end
+	local egg = Config.PetEggByKey[eggKey]
 	local cost = type(egg) == "table" and tonumber(egg.cost) or nil
-	if not cost or stateNumber("DNA") < cost then
+	if not cost or dnaAvailable() < cost then
 		return
 	end
 	farm.nextHatch = os.clock() + 2
-	invoke("HatchPet", STATE.egg)
+	invoke("HatchPet", eggKey)
 end
 
 local RARITY_RANK = {
@@ -1620,13 +1915,38 @@ local RARITY_RANK = {
 }
 
 local function stepRoll()
-	if STATE.autoRoll ~= true or os.clock() < farm.nextRoll then
+	if (STATE.autoRoll ~= true and not questNeeds("roll")) or os.clock() < farm.nextRoll then
 		return
+	end
+	local eventKey = activeEvent()
+	local luckActive = eventKey == "LuckyHour"
+		or (stateNumber("BoostMult_Luck") > 1 and stateNumber("BoostEnd_Luck") > Workspace:GetServerTimeNow())
+	if STATE.luckyRollsOnly == true and not luckActive then
+		STATE.detail = "Saving rolls for Lucky Hour"
+		return
+	end
+	local owned = stateJson("Mutations") or {}
+	if type(STATE.rollTargetMutation) == "string" and STATE.rollTargetMutation ~= "Off" and (tonumber(owned[STATE.rollTargetMutation]) or 0) > 0 then
+		STATE.detail = "Mutation target owned"
+		return
+	end
+	local rarityGoal = RARITY_RANK[STATE.rollTargetRarity]
+	if rarityGoal then
+		for key, amount in pairs(owned) do
+			local info = type(key) == "string" and Config.MutationByKey[key] or nil
+			if (tonumber(amount) or 0) > 0 and type(info) == "table" and (RARITY_RANK[info.rarity] or 0) >= rarityGoal then
+				STATE.detail = "Mutation rarity target owned"
+				return
+			end
+		end
 	end
 	local count = STATE.rollSize == "5" and 5 or 1
 	local tokens = math.max(0, math.floor(stateNumber("RollTokens")))
 	local cost = tonumber(Config.RollCostDna) or 120
-	local afford = tokens + math.floor(math.max(0, stateNumber("DNA")) / cost)
+	local afford = tokens + math.floor(dnaAvailable() / cost)
+	if count == 5 and afford < 5 and afford >= 1 then
+		count = 1
+	end
 	if afford < count then
 		farm.nextRoll = os.clock() + 5
 		return
@@ -1888,6 +2208,169 @@ local function stepEquip()
 	end
 	farm.nextEquip = os.clock() + 12
 	STATE.equipBestNow()
+end
+
+local function remoteAccepted(sent, result)
+	return sent and (type(result) ~= "table" or result.ok ~= false)
+end
+
+local UPGRADE_FLAGS = {
+	Jaws = "upgradeJaws",
+	Shell = "upgradeShell",
+	Legs = "upgradeLegs",
+	Magnet = "upgradeMagnet",
+	Appetite = "upgradeAppetite",
+	Regen = "upgradeRegen",
+}
+
+local function stepUpgrades()
+	if STATE.autoUpgrade ~= true or os.clock() < farm.nextUpgrade then
+		return
+	end
+	farm.nextUpgrade = os.clock() + 1.5
+	local available = dnaAvailable()
+	local best, bestCost
+	for _, info in ipairs(type(Config.Upgrades) == "table" and Config.Upgrades or {}) do
+		if type(info) == "table" and type(info.key) == "string" and STATE[UPGRADE_FLAGS[info.key]] == true then
+			local level = math.max(0, math.floor(stateNumber("Up_" .. info.key)))
+			local ok, cost = pcall(Config.UpgradeCost, info.key, level)
+			cost = ok and tonumber(cost) or nil
+			if cost and cost <= available and (not bestCost or cost < bestCost) then
+				best, bestCost = info, cost
+			end
+		end
+	end
+	if not best then
+		return
+	end
+	local sent, result = invokeResult("BuyUpgrade", best.key)
+	if remoteAccepted(sent, result) then
+		noteActivity("Upgraded " .. tostring(best.name or best.key))
+	end
+end
+
+local function stepPassClaims()
+	if STATE.autoBattlePass ~= true or os.clock() < farm.nextPass then
+		return
+	end
+	farm.nextPass = os.clock() + 25
+	local sent, result = invokeResult("PassAction", "claimAll")
+	if remoteAccepted(sent, result) and type(result) == "table" and result.ok == true then
+		noteActivity("Claimed battle pass rewards")
+	end
+	local bp = stateJson("BP")
+	local weekly = type(bp) == "table" and bp.w or nil
+	if type(weekly) == "table" and type(weekly.q) == "table" then
+		local complete = 0
+		for _, row in ipairs(weekly.q) do
+			if type(row) == "table" then
+				if row[4] == 1 then
+					complete += 1
+				elseif (tonumber(row[3]) or 0) >= (tonumber(row[2]) or math.huge) then
+					local okClaim, claimResult = invokeResult("PassAction", "weekly", row[1])
+					if remoteAccepted(okClaim, claimResult) then
+						complete += 1
+						noteActivity("Claimed a weekly quest")
+					end
+					task.wait(0.7)
+				end
+			end
+		end
+		if complete >= #weekly.q and weekly.b ~= 1 then
+			invokeResult("PassAction", "weeklyBonus")
+		end
+	end
+end
+
+local function stepKillClaims()
+	if STATE.autoKillRewards ~= true or os.clock() < farm.nextKillClaim then
+		return
+	end
+	farm.nextKillClaim = os.clock() + 30
+	local track = stateJson("KillTrack") or {}
+	local claimed = {}
+	for key, value in pairs(type(track.c) == "table" and track.c or {}) do
+		local index = tonumber(value) or tonumber(key)
+		if index then
+			claimed[index] = true
+		end
+	end
+	local kills = stateNumber("Kills")
+	for index, milestone in ipairs(type(Content.Kills) == "table" and type(Content.Kills.Milestones) == "table" and Content.Kills.Milestones or {}) do
+		if not claimed[index] and kills >= (tonumber(milestone.n) or math.huge) then
+			local sent, result = invokeResult("ClaimKill", index)
+			if remoteAccepted(sent, result) then
+				noteActivity("Claimed kill milestone " .. tostring(milestone.n))
+			end
+			task.wait(0.7)
+		end
+	end
+end
+
+local function stepMole()
+	if STATE.autoMole ~= true or os.clock() < farm.nextMole then
+		return
+	end
+	farm.nextMole = os.clock() + 4
+	local item = type(Content.MoleByKey) == "table" and Content.MoleByKey[STATE.moleItem] or nil
+	if type(item) ~= "table" then
+		return
+	end
+	local bought = stateJson("MoleBought") or {}
+	if item.once and bought[item.key] ~= nil then
+		return
+	end
+	if stateNumber("Worms") - (tonumber(STATE.wormReserve) or 0) < (tonumber(item.cost) or math.huge) then
+		return
+	end
+	local sent, result = invokeResult("MoleBuy", item.key)
+	if remoteAccepted(sent, result) then
+		noteActivity("Traded worms for " .. tostring(item.name or item.key))
+	end
+end
+
+local function stepCosmeticCrate()
+	if STATE.autoCosmeticCrates ~= true or os.clock() < farm.nextCosmetic then
+		return
+	end
+	farm.nextCosmetic = os.clock() + 4
+	if type(Cosmetics.SlotByKey) ~= "table" or not Cosmetics.SlotByKey[STATE.cosmeticSlot] then
+		return
+	end
+	local cost = type(Cosmetics.CrateCost) == "function" and Cosmetics.CrateCost(stateNumber("Rebirths")) or math.huge
+	if dnaAvailable() < cost then
+		return
+	end
+	local sent, result = invokeResult("CosmeticCrate", STATE.cosmeticSlot)
+	if remoteAccepted(sent, result) then
+		noteActivity("Opened " .. tostring(STATE.cosmeticSlot) .. " crate")
+	end
+end
+
+local function stepBestAura()
+	if STATE.autoBestAura ~= true or os.clock() < farm.nextAura then
+		return
+	end
+	farm.nextAura = os.clock() + 15
+	local ownedList = stateJson("CosOwned") or {}
+	local equipped = stateJson("Cosm") or {}
+	local bestKey, bestRank
+	for _, key in pairs(ownedList) do
+		local info = type(Cosmetics.ByKey) == "table" and Cosmetics.ByKey[key] or nil
+		if type(info) == "table" and info.slot == "Aura" then
+			local rarity = type(Cosmetics.RarityByKey) == "table" and Cosmetics.RarityByKey[info.rarity] or nil
+			local rank = type(rarity) == "table" and tonumber(rarity.order) or 0
+			if not bestRank or rank > bestRank then
+				bestKey, bestRank = key, rank
+			end
+		end
+	end
+	if bestKey and equipped.Aura ~= bestKey then
+		local sent, result = invokeResult("CosmeticEquip", "Aura", bestKey)
+		if remoteAccepted(sent, result) then
+			noteActivity("Equipped best aura")
+		end
+	end
 end
 
 local CODES = { "ANTS", "EVOLVE", "QUEEN", "RELEASE" }
@@ -2173,6 +2656,71 @@ local function restoreNoclip()
 		end
 	end
 	table.clear(noclipParts)
+end
+
+globalValue = function(name)
+	local ok, value = pcall(function()
+		return GameState.Global(name)
+	end)
+	return ok and value or nil
+end
+
+activeEvent = function()
+	local key = globalValue("Event")
+	if type(key) ~= "string" or key == "" then
+		STATE.eventKey = ""
+		STATE.eventName = "No live event"
+		return nil, nil
+	end
+	local data = readJson(globalValue("EventData")) or {}
+	local spec = type(EventsConfig.List) == "table" and EventsConfig.List[key] or nil
+	STATE.eventKey = key
+	STATE.eventName = (type(spec) == "table" and spec.name) or data.name or key
+	STATE.eventEnd = tonumber(data.ends) or tonumber(globalValue("EventEnd")) or 0
+	return key, data
+end
+
+dungeonState = function()
+	return stateJson("Dungeon")
+end
+
+inDungeon = function()
+	local data = dungeonState()
+	return type(data) == "table" and type(data.st) == "string", data
+end
+
+activeQuestKeys = function()
+	local keys = {}
+	local quests = stateJson("Quests")
+	if type(quests) == "table" and type(quests.q) == "table" then
+		for _, row in ipairs(quests.q) do
+			if type(row) == "table" and row[5] ~= 1 and (tonumber(row[4]) or 0) < (tonumber(row[3]) or 0) then
+				keys[tostring(row[1])] = true
+			end
+		end
+	end
+	local bp = stateJson("BP")
+	local weekly = type(bp) == "table" and bp.w or nil
+	if type(weekly) == "table" and type(weekly.q) == "table" then
+		for _, row in ipairs(weekly.q) do
+			if type(row) == "table" and row[4] ~= 1 and (tonumber(row[3]) or 0) < (tonumber(row[2]) or 0) then
+				keys[tostring(row[1])] = true
+			end
+		end
+	end
+	return keys
+end
+
+questNeeds = function(kind)
+	if STATE.questAssist ~= true then
+		return false
+	end
+	local keys = activeQuestKeys()
+	return keys[kind] == true or keys["w_" .. kind] == true
+end
+
+dnaAvailable = function()
+	return math.max(0, stateNumber("DNA") - (tonumber(STATE.dnaReserve) or 0))
 end
 hubCleanup(restoreNoclip)
 trackConnection(RunService.Stepped:Connect(function()
@@ -2914,13 +3462,22 @@ local function installHub()
 	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
 	local farmInfo
+	local eventInfo
 	do
 		local farmBox = section(farmTab, "Food", "apple")
 		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. During Sugar Rush it stays in the ring")
 		toggle(farmBox, "Auto Bite", "autoBite", "Bites a bug when it is already in reach")
 		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your mutation ability on a nearby bug")
 		toggle(farmBox, "Chase Bugs", "chaseBugs", "Walks up to a bug so bite and the ability can land")
+		toggle(farmBox, "Smart Event Priority", "smartEvents", "Prioritises bosses, event creatures, treasure chests and event drops")
 		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))
+
+		local eventBox = section(farmTab, "Events & Quests", "calendar-clock")
+		eventInfo = info(eventBox, "Live State", "Checking the current event and dungeon...")
+		toggle(eventBox, "Quest Objective Assist", "questAssist", "Uses the matching farm, evolve, roll, hatch, worm and dungeon actions for unfinished quests")
+		toggle(eventBox, "PvP Ant Quests", "pvpQuest", "Targets other ants only when an unfinished defeat-ants quest needs it")
+		toggle(eventBox, "Auto Collect Worms", "autoWorms", "Collects worms during the hourly worm rain")
+		toggle(eventBox, "Auto Dungeon", "autoDungeon", "Uses available daily runs and fights every dungeon wave")
 
 		local espBox = section(farmTab, "ESP", "eye")
 		toggle(espBox, "Critter ESP", "critterEsp", "Shows bug names and health")
@@ -2932,12 +3489,42 @@ local function installHub()
 		toggle(growBox, "Auto Evolve", "autoEvolve", "Evolves when you have the power")
 		toggle(growBox, "Auto Rebirth", "autoRebirth", "Rebirths only when you are at the top stage")
 
+		local upgradeBox = section(progressTab, "DNA Upgrades", "arrow-up-circle")
+		toggle(upgradeBox, "Auto Buy Upgrades", "autoUpgrade", "Buys the cheapest selected upgrade while keeping the DNA reserve")
+		choice(upgradeBox, "DNA Reserve", "Hatching, rolling, upgrades and cosmetic crates will keep this much DNA", RESERVE_OPTIONS, function()
+			return STATE.dnaReserve
+		end, function(option)
+			STATE.dnaReserve = option
+		end)
+		toggle(upgradeBox, "Jaws", "upgradeJaws", "Bite damage")
+		toggle(upgradeBox, "Shell", "upgradeShell", "Health")
+		toggle(upgradeBox, "Legs", "upgradeLegs", "Movement speed")
+		toggle(upgradeBox, "Antennae", "upgradeMagnet", "Orb magnet")
+		toggle(upgradeBox, "Appetite", "upgradeAppetite", "Power from everything")
+		toggle(upgradeBox, "Healing", "upgradeRegen", "Health regeneration")
+
 		local hatchBox = section(progressTab, "Pets", "egg")
 		toggle(hatchBox, "Auto Hatch", "autoHatch", "Hatches Royal or Colony when you can pay the DNA")
-		choice(hatchBox, "Egg", "Royal costs more and hatches better pets. Colony is cheaper", EGG_OPTIONS, function()
+		choice(hatchBox, "Egg", "Best Affordable prefers Royal and falls back to Colony", EGG_OPTIONS, function()
 			return STATE.egg
 		end, function(option)
 			STATE.egg = option
+		end)
+		local petTargets = { "Off" }
+		for key, pet in pairs(type(Config.PetByKey) == "table" and Config.PetByKey or {}) do
+			if type(key) == "string" and type(pet) == "table" and pet.egg ~= "Golden" then
+				table.insert(petTargets, key)
+			end
+		end
+		table.sort(petTargets, function(a, b)
+			if a == "Off" then return b ~= "Off" end
+			if b == "Off" then return false end
+			return a < b
+		end)
+		choice(hatchBox, "Stop At Pet", "Stops hatching after this pet is owned", petTargets, function()
+			return table.find(petTargets, STATE.petTarget) and STATE.petTarget or "Off"
+		end, function(option)
+			STATE.petTarget = option
 		end)
 		button(hatchBox, "Golden Egg", "Opens the Robux prompt. It does not buy on its own", "egg", function()
 			STATE.buyGoldenEgg()
@@ -2951,6 +3538,28 @@ local function installHub()
 			return STATE.rollSize
 		end, function(option)
 			STATE.rollSize = option
+		end)
+		toggle(mutateBox, "Roll Only With Luck", "luckyRollsOnly", "Saves rolls until Lucky Hour or a personal luck boost is active")
+		choice(mutateBox, "Stop At Rarity", "Stops rolling when you own this rarity or better", { "Off", "Legendary", "Mythic", "Secret" }, function()
+			return STATE.rollTargetRarity
+		end, function(option)
+			STATE.rollTargetRarity = option
+		end)
+		local mutationTargets = { "Off" }
+		for key in pairs(type(Config.MutationByKey) == "table" and Config.MutationByKey or {}) do
+			if type(key) == "string" then
+				table.insert(mutationTargets, key)
+			end
+		end
+		table.sort(mutationTargets, function(a, b)
+			if a == "Off" then return b ~= "Off" end
+			if b == "Off" then return false end
+			return a < b
+		end)
+		choice(mutateBox, "Stop At Mutation", "Stops rolling after this mutation is owned", mutationTargets, function()
+			return table.find(mutationTargets, STATE.rollTargetMutation) and STATE.rollTargetMutation or "Off"
+		end, function(option)
+			STATE.rollTargetMutation = option
 		end)
 		toggle(mutateBox, "Auto Equip Best Mutations", "autoMutations", "Fills your slots with the rarest mutations you own")
 		toggle(mutateBox, "Auto Best Breed", "autoBestBreed", "Wears the strongest breed you have unlocked")
@@ -2993,7 +3602,31 @@ local function installHub()
 
 		local claimBox = section(progressTab, "Rewards", "gift")
 		toggle(claimBox, "Auto Claim Rewards", "autoClaim", "Claims daily, playtime, quests and records")
+		toggle(claimBox, "Auto Battle Pass", "autoBattlePass", "Claims free and owned-premium pass rewards, weekly quests and the weekly bonus")
+		toggle(claimBox, "Auto Kill Rewards", "autoKillRewards", "Claims reached ant-kill milestones")
 		toggle(claimBox, "Redeem Codes", "autoCodes", "Redeems the known codes once")
+
+		local moleBox = section(progressTab, "Worms & Mole", "bug")
+		toggle(moleBox, "Auto Mole Trade", "autoMole", "Trades worms for the selected free reward")
+		choice(moleBox, "Mole Reward", nil, MOLE_OPTIONS, function()
+			return STATE.moleItem
+		end, function(option)
+			STATE.moleItem = option
+		end)
+		choice(moleBox, "Worm Reserve", "Keeps this many worms unspent", WORM_RESERVE_OPTIONS, function()
+			return STATE.wormReserve
+		end, function(option)
+			STATE.wormReserve = option
+		end)
+
+		local cosmeticBox = section(progressTab, "Wardrobe", "shirt")
+		toggle(cosmeticBox, "Auto Cosmetic Crates", "autoCosmeticCrates", "Opens the selected DNA crate while keeping the DNA reserve")
+		choice(cosmeticBox, "Crate Slot", nil, COSMETIC_SLOTS, function()
+			return STATE.cosmeticSlot
+		end, function(option)
+			STATE.cosmeticSlot = option
+		end)
+		toggle(cosmeticBox, "Auto Best Aura", "autoBestAura", "Equips your highest-rarity owned aura")
 	end
 
 	do
@@ -3133,6 +3766,15 @@ local function installHub()
 			and string.format("%d:%02d:%02d", elapsed // 3600, elapsed % 3600 // 60, elapsed % 60)
 			or string.format("%d:%02d", elapsed // 60, elapsed % 60)
 		elevate()
+		local eventKey = activeEvent()
+		local eventLeft = math.max(0, (tonumber(STATE.eventEnd) or 0) - Workspace:GetServerTimeNow())
+		local eventLine = eventKey and string.format("%s  ·  %ds left", tostring(STATE.eventName), math.floor(eventLeft)) or "No live event"
+		local questKeys = activeQuestKeys()
+		local questList = {}
+		for key in pairs(questKeys) do table.insert(questList, key) end
+		table.sort(questList)
+		local questLine = #questList > 0 and ("Open quests: " .. table.concat(questList, ", ")) or "All tracked quests complete"
+		setInfo(eventInfo, eventLine .. "\n" .. questLine .. "\nDungeon: " .. tostring(STATE.dungeon or "Surface") .. "  ·  Runs " .. tostring(math.floor(stateNumber("DungeonRuns"))))
 		setInfo(overview, string.format(
 			"%s\nPower %s  ·  %s  ·  Rebirth %s\nDNA %s  ·  Egg %s\nSession %s",
 			tostring(STATE.status or "Waiting"),
@@ -3176,7 +3818,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.0.8"
+STATE.version = "1.1.0"
 
 if running() then
 	elevate()
@@ -3213,6 +3855,12 @@ task.spawn(function()
 		pcall(stepEquip)
 		pcall(stepFuse)
 		pcall(stepClaims)
+		pcall(stepUpgrades)
+		pcall(stepPassClaims)
+		pcall(stepKillClaims)
+		pcall(stepMole)
+		pcall(stepCosmeticCrate)
+		pcall(stepBestAura)
 		pcall(stepEsp)
 		task.wait(0.35)
 	end
