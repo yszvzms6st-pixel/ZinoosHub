@@ -81,6 +81,7 @@ local STATE = {
 	autoCosmeticCrates = false,
 	cosmeticSlot = "Aura",
 	autoBestAura = false,
+	blockRobuxCapsule = true,
 	godMode = true,
 	walkSpeed = false,
 	speed = 32,
@@ -204,6 +205,7 @@ local FLAG_KEYS = {
 	AutoDungeon = "autoDungeon",
 	AutoCosmeticCrates = "autoCosmeticCrates",
 	AutoBestAura = "autoBestAura",
+	BlockRobuxCapsule = "blockRobuxCapsule",
 	GodMode = "godMode",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
@@ -1049,6 +1051,74 @@ local GameState = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Cl
 local Content = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Content"))
 local Cosmetics = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("Cosmetics"))
 local EventsConfig = require(ReplicatedStorage:WaitForChild("Ant"):WaitForChild("EventsConfig"))
+
+-- The game's EvoOrb client periodically spawns a local "+3 EVO" capsule near the
+-- player. Touching it opens a developer-product prompt without a button click, so
+-- an automated character can trigger it by simply farming nearby. Disable only
+-- that local capsule while the protection is on; normal DNA/worm purchases remain
+-- untouched because they never use MarketplaceService.
+local evoOrbState
+local evoOrbWasSuppressed = false
+local function findEvoOrbState()
+	if type(evoOrbState) == "table" then
+		return evoOrbState
+	end
+	local okModule, module = pcall(function()
+		return require(ReplicatedStorage.Ant.Client.EvoOrb)
+	end)
+	if not okModule or type(module) ~= "table" or typeof(module.Start) ~= "function" then
+		return nil
+	end
+	local okUpvalues, upvalues = pcall(debug.getupvalues, module.Start)
+	if not okUpvalues or type(upvalues) ~= "table" then
+		return nil
+	end
+	for _, value in pairs(upvalues) do
+		if type(value) == "table"
+			and type(value.nextAt) == "number"
+			and type(value.parts) == "table"
+			and (value.conn == nil or typeof(value.conn) == "RBXScriptConnection") then
+			evoOrbState = value
+			return value
+		end
+	end
+	return nil
+end
+
+local function suppressRobuxCapsule()
+	local capsule = findEvoOrbState()
+	if not capsule then
+		STATE.robuxCapsuleBlocked = false
+		return
+	end
+	if STATE.blockRobuxCapsule ~= true then
+		if evoOrbWasSuppressed then
+			capsule.prompted = false
+			capsule.nextAt = os.clock() + 5
+			evoOrbWasSuppressed = false
+		end
+		STATE.robuxCapsuleBlocked = false
+		return
+	end
+	local model = capsule.model
+	capsule.model = nil
+	capsule.parts = {}
+	capsule.at = nil
+	capsule.prompted = true
+	capsule.nextAt = math.huge
+	evoOrbWasSuppressed = true
+	STATE.robuxCapsuleBlocked = true
+	if typeof(model) == "Instance" and model.Parent then
+		model:Destroy()
+	end
+end
+
+hubCleanup(function()
+	if type(evoOrbState) == "table" and evoOrbWasSuppressed then
+		evoOrbState.prompted = false
+		evoOrbState.nextAt = os.clock() + 5
+	end
+end)
 
 local globalValue, activeEvent, dungeonState, inDungeon, activeQuestKeys, questNeeds, dnaAvailable
 
@@ -2216,12 +2286,6 @@ function STATE.wearBreed()
 	end
 	invoke("SetBreed", STATE.breed)
 	noteActivity("Wearing " .. tostring(info.name or STATE.breed))
-	return true
-end
-
-function STATE.buyGoldenEgg()
-	local theme = require(ReplicatedStorage.Ant.UI.Theme)
-	theme.Purchase("Product", "PetEggGolden")
 	return true
 end
 
@@ -3925,9 +3989,6 @@ local function installHub()
 		end, function(option)
 			STATE.petTarget = option
 		end)
-		button(hatchBox, "Golden Egg", "Opens the Robux prompt. It does not buy on its own", "egg", function()
-			STATE.buyGoldenEgg()
-		end)
 		toggle(hatchBox, "Auto Equip Best Pet", "autoEquip", "Equips your strongest pets")
 		toggle(hatchBox, "Auto Fuse Pets", "autoFuse", "Levels a pet when you own enough spare copies. It keeps one of each")
 
@@ -4031,6 +4092,7 @@ local function installHub()
 	do
 		local safetyBox = section(playerTab, "Survival", "shield-check")
 		toggle(safetyBox, "God Mode", "godMode", "Escapes at 72% HP, waits out combat while real HP regenerates, then returns safely")
+		toggle(safetyBox, "Block Robux Capsule", "blockRobuxCapsule", "Stops the game's +3 EVO capsule from opening purchase prompts while auto farming")
 
 		local moveBox = section(playerTab, "Movement", "footprints")
 		toggle(moveBox, "Custom Walk Speed", "walkSpeed")
@@ -4220,7 +4282,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.2.2"
+STATE.version = "1.3.0"
 
 if running() then
 	elevate()
@@ -4271,6 +4333,7 @@ end)
 task.spawn(function()
 	elevate()
 	while running() do
+		pcall(suppressRobuxCapsule)
 		pcall(stepSpeed)
 		pcall(fillStamina)
 		pcall(stepSprint)
