@@ -92,7 +92,8 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 
 - **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map. While Sugar Rush is up it goes to the sugar ring and stays there, because the top 3 prizes are worth more than the food.
 - **Auto Bite** bites a bug that is already in reach. **Auto Ability** uses your equipped mutation ability on a nearby bug. **Chase Bugs** walks into attack range.
-- **Smart Event Priority** targets event bosses and creatures, and handles Treasure Hunt chests. **Auto Collect Worms** collects Worm Rain drops.
+- **Smart Event Priority** actively chases event bosses and creatures, including the Red Swarm, and handles Treasure Hunt chests. **Auto Collect Worms** collects Worm Rain drops.
+- **Auto Power-Ups** collects nearby temporary Speed, Mega Bite, Magnet, x2 Power and Shield pickups before they expire. **Auto Lost Eggs** finds all 20 hidden eggs for their DNA, mutation rolls and completion reward.
 - **Quest Objective Assist** runs the matching food, bug, evolve, roll, pet, worm and dungeon objective. PvP ant quests are a separate opt-in.
 - **Auto Dungeon** enters when a run is available and fights the waves and boss. Dungeon movement uses the lower dungeon floor instead of treating it as the surface void.
 - **Critter ESP** shows bug names and health. **Player ESP** shows other players.

@@ -72,6 +72,8 @@ local STATE = {
 	autoBattlePass = true,
 	autoKillRewards = true,
 	autoWorms = true,
+	autoPowerUps = true,
+	autoLostEggs = true,
 	autoMole = false,
 	moleItem = "Roll",
 	wormReserve = "0",
@@ -195,6 +197,8 @@ local FLAG_KEYS = {
 	AutoBattlePass = "autoBattlePass",
 	AutoKillRewards = "autoKillRewards",
 	AutoWorms = "autoWorms",
+	AutoPowerUps = "autoPowerUps",
+	AutoLostEggs = "autoLostEggs",
 	AutoMole = "autoMole",
 	AutoDungeon = "autoDungeon",
 	AutoCosmeticCrates = "autoCosmeticCrates",
@@ -1462,6 +1466,64 @@ local function nearestWorm(origin)
 	return best, bestDist
 end
 
+local function nearestPowerUp(origin)
+	local folder = Workspace:FindFirstChild("AntPowerUps")
+	local best, bestDist
+	local configuredNear = type(Config.PowerUps) == "table" and type(Config.PowerUps.Near) == "table" and tonumber(Config.PowerUps.Near[2]) or 120
+	local maxDistance = configuredNear + 30
+	if folder then
+		local now = Workspace:GetServerTimeNow()
+		for _, part in ipairs(folder:GetChildren()) do
+			local ends = tonumber(part:GetAttribute("Ends"))
+			if part:IsA("BasePart")
+				and part:GetAttribute("TakenBy") == nil
+				and part:GetAttribute("Gone") ~= true
+				and (not ends or ends > now) then
+				local distance = (part.Position - origin).Magnitude
+				if distance <= maxDistance and (not bestDist or distance < bestDist) then
+					best, bestDist = part, distance
+				end
+			end
+		end
+	end
+	return best, bestDist
+end
+
+local function foundLostEggs()
+	local found = {}
+	for _, value in pairs(stateJson("LostEggs") or {}) do
+		local index = tonumber(value)
+		if index then
+			found[index] = true
+		end
+	end
+	return found
+end
+
+local function nearestLostEgg(origin)
+	local gameFolder = Workspace:FindFirstChild("Game")
+	local folder = gameFolder and gameFolder:FindFirstChild("LostEggs")
+	local found = foundLostEggs()
+	local best, bestDist, bestIndex
+	if folder then
+		for _, part in ipairs(folder:GetChildren()) do
+			local index = tonumber(part:GetAttribute("EggIndex")) or tonumber(string.match(part.Name, "%d+"))
+			if part:IsA("BasePart") and index and not found[index] then
+				local distance = (part.Position - origin).Magnitude
+				if not bestDist or distance < bestDist then
+					best, bestDist, bestIndex = part, distance, index
+				end
+			end
+		end
+	end
+	STATE.lostEggsFound = 0
+	for _ in pairs(found) do
+		STATE.lostEggsFound += 1
+	end
+	STATE.lostEggsTotal = type(Config.LostEggs) == "table" and type(Config.LostEggs.Spots) == "table" and #Config.LostEggs.Spots or 20
+	return best, bestDist, bestIndex
+end
+
 local function nearestTreasure(origin, data)
 	local best, bestDist
 	for _, row in pairs(type(data) == "table" and type(data.chests) == "table" and data.chests or {}) do
@@ -1520,6 +1582,50 @@ local function stepSpecialTravel(character, root)
 			return stepToward(character, root, worm.Position, "Going to worm", string.format("Worm  %d away", math.floor(distance)))
 		end
 	end
+	if STATE.autoPowerUps == true then
+		local powerUp, distance = nearestPowerUp(root.Position)
+		if powerUp then
+			local kind = tostring(powerUp:GetAttribute("Kind") or "Power-Up")
+			if distance <= 4 then
+				STATE.status = "Collecting " .. kind
+				STATE.detail = "Temporary power-up"
+				return true
+			end
+			if stepToward(character, root, powerUp.Position, "Going to " .. kind, string.format("Power-up  %d away", math.floor(distance))) then
+				return true
+			end
+		end
+	end
+	if STATE.autoLostEggs == true then
+		local egg, distance, index = nearestLostEgg(root.Position)
+		if egg then
+			local total = tonumber(STATE.lostEggsTotal) or 20
+			local found = tonumber(STATE.lostEggsFound) or 0
+			if distance <= 5.5 then
+				STATE.status = "Collecting lost egg " .. tostring(index)
+				STATE.detail = string.format("Lost Eggs  %d/%d", found, total)
+				return true
+			end
+			local flatDistance = (Vector2.new(egg.Position.X, egg.Position.Z) - Vector2.new(root.Position.X, root.Position.Z)).Magnitude
+			if flatDistance <= 5 and math.abs(egg.Position.Y - root.Position.Y) > 8 then
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.CFrame = CFrame.new(egg.Position + Vector3.new(0, 3, 0))
+				STATE.status = "Reaching lost egg " .. tostring(index)
+				STATE.detail = string.format("Lost Eggs  %d/%d", found, total)
+				return true
+			end
+			if stepToward(character, root, egg.Position, "Going to lost egg " .. tostring(index), string.format("Lost Eggs  %d/%d  ·  %d away", found, total, math.floor(distance))) then
+				return true
+			end
+			-- Several eggs sit on crags, cacti and the giant mushroom. Normal surface
+			-- stepping cannot climb those final vertical gaps, so finish at the pickup.
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.CFrame = CFrame.new(egg.Position + Vector3.new(0, 3, 0))
+			STATE.status = "Reaching lost egg " .. tostring(index)
+			STATE.detail = string.format("Lost Eggs  %d/%d", found, total)
+			return true
+		end
+	end
 	local wantsDungeon = STATE.autoDungeon == true or questNeeds("dungeon")
 	if wantsDungeon
 		and stateNumber("DungeonRuns") > 0
@@ -1547,6 +1653,8 @@ local function stepFarm()
 	if STATE.autoOrb ~= true
 		and STATE.autoDungeon ~= true
 		and STATE.autoWorms ~= true
+		and STATE.autoPowerUps ~= true
+		and STATE.autoLostEggs ~= true
 		and STATE.smartEvents ~= true
 		and STATE.questAssist ~= true
 		and STATE.chaseBugs ~= true then
@@ -1575,7 +1683,14 @@ local function stepFarm()
 		return
 	end
 	local dungeonActive = inDungeon()
-	if STATE.chaseBugs == true or questNeeds("bugs") or dungeonActive then
+	local eventKey = activeEvent()
+	local eventHasTarget = eventKey == "MantisBoss"
+		or eventKey == "GoldenAphid"
+		or eventKey == "AphidStampede"
+		or eventKey == "SpiderNest"
+		or eventKey == "LadybugSwarm"
+		or eventKey == "RedSwarm"
+	if STATE.chaseBugs == true or questNeeds("bugs") or dungeonActive or (STATE.smartEvents == true and eventHasTarget) then
 		local model, foeRoot, foeDist = nearestCritter(root.Position, 140)
 		if foeRoot then
 			local length = tonumber(character:GetAttribute("Length")) or 10
@@ -3624,6 +3739,8 @@ local function installHub()
 		toggle(eventBox, "Quest Objective Assist", "questAssist", "Uses the matching farm, evolve, roll, hatch, worm and dungeon actions for unfinished quests")
 		toggle(eventBox, "PvP Ant Quests", "pvpQuest", "Targets other ants only when an unfinished defeat-ants quest needs it")
 		toggle(eventBox, "Auto Collect Worms", "autoWorms", "Collects worms during the hourly worm rain")
+		toggle(eventBox, "Auto Power-Ups", "autoPowerUps", "Collects temporary Speed, Mega Bite, Magnet, x2 Power and Shield pickups")
+		toggle(eventBox, "Auto Lost Eggs", "autoLostEggs", "Finds all 20 hidden eggs for DNA, mutation rolls and the completion reward")
 		toggle(eventBox, "Auto Dungeon", "autoDungeon", "Uses available daily runs and fights every dungeon wave")
 
 		local espBox = section(farmTab, "ESP", "eye")
@@ -3965,7 +4082,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.1.2"
+STATE.version = "1.2.0"
 
 if running() then
 	elevate()
