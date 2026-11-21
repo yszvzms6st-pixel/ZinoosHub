@@ -2899,33 +2899,160 @@ hubCleanup(function()
 end)
 
 local graphicsBefore = nil
+
+local function lowGraphicsProperty(profile, instance, property, value, keepSuppressed)
+	if graphicsBefore ~= profile or STATE.fpsBoost ~= true or not instance then
+		return
+	end
+	local okRead, previous = pcall(function()
+		return instance[property]
+	end)
+	if not okRead then
+		return
+	end
+	if previous ~= value then
+		local okWrite = pcall(function()
+			instance[property] = value
+		end)
+		if not okWrite then
+			return
+		end
+		local saved = profile.instances[instance]
+		if not saved then
+			saved = {}
+			profile.instances[instance] = saved
+		end
+		if saved[property] == nil then
+			saved[property] = { value = previous }
+		end
+	end
+	if keepSuppressed then
+		local suppressed = profile.suppressed[instance]
+		if not suppressed then
+			suppressed = {}
+			profile.suppressed[instance] = suppressed
+		end
+		suppressed[property] = value
+	end
+end
+
+local function optimizeVisual(profile, instance)
+	if graphicsBefore ~= profile or STATE.fpsBoost ~= true or not instance then
+		return
+	end
+	if instance:IsA("ParticleEmitter") then
+		lowGraphicsProperty(profile, instance, "Enabled", false, true)
+		lowGraphicsProperty(profile, instance, "Rate", 0, true)
+		lowGraphicsProperty(profile, instance, "Lifetime", NumberRange.new(0), true)
+		pcall(function() instance:Clear() end)
+	elseif instance:IsA("Trail") or instance:IsA("Beam") or instance:IsA("Smoke")
+		or instance:IsA("Fire") or instance:IsA("Sparkles") or instance:IsA("Highlight")
+		or instance:IsA("PointLight") or instance:IsA("SpotLight") or instance:IsA("SurfaceLight") then
+		lowGraphicsProperty(profile, instance, "Enabled", false, true)
+	elseif instance:IsA("Decal") or instance:IsA("Texture") then
+		lowGraphicsProperty(profile, instance, "Transparency", 1, true)
+	elseif instance:IsA("PostEffect") then
+		lowGraphicsProperty(profile, instance, "Enabled", false, true)
+	elseif instance:IsA("Atmosphere") then
+		lowGraphicsProperty(profile, instance, "Density", 0, true)
+		lowGraphicsProperty(profile, instance, "Haze", 0, true)
+		lowGraphicsProperty(profile, instance, "Glare", 0, true)
+	elseif instance:IsA("Clouds") then
+		lowGraphicsProperty(profile, instance, "Enabled", false, true)
+	elseif instance:IsA("Sky") then
+		lowGraphicsProperty(profile, instance, "CelestialBodiesShown", false, true)
+		lowGraphicsProperty(profile, instance, "StarCount", 0, true)
+	end
+end
+
+local function restoreGraphics(profile)
+	for _, connection in ipairs(profile.connections) do
+		pcall(function() connection:Disconnect() end)
+	end
+	table.clear(profile.connections)
+	for instance, properties in pairs(profile.instances) do
+		if instance.Parent then
+			for property, record in pairs(properties) do
+				pcall(function()
+					instance[property] = record.value
+				end)
+			end
+		end
+	end
+	pcall(function()
+		if profile.quality then
+			settings().Rendering.QualityLevel = profile.quality
+		end
+	end)
+end
+
 function STATE.applyFpsBoost()
 	if STATE.fpsBoost == true then
-		graphicsBefore = graphicsBefore or { shadows = Lighting.GlobalShadows, effects = {} }
+		if graphicsBefore then
+			return
+		end
+		local profile = {
+			instances = setmetatable({}, { __mode = "k" }),
+			suppressed = setmetatable({}, { __mode = "k" }),
+			connections = {},
+		}
+		graphicsBefore = profile
 		pcall(function()
-			graphicsBefore.quality = graphicsBefore.quality or settings().Rendering.QualityLevel
+			profile.quality = settings().Rendering.QualityLevel
 			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 		end)
-		Lighting.GlobalShadows = false
-		for _, effect in ipairs(Lighting:GetChildren()) do
-			if effect:IsA("PostEffect") and effect.Enabled then
-				graphicsBefore.effects[effect] = true
-				effect.Enabled = false
-			end
+		lowGraphicsProperty(profile, Lighting, "GlobalShadows", false, false)
+		lowGraphicsProperty(profile, Lighting, "EnvironmentDiffuseScale", 0, false)
+		lowGraphicsProperty(profile, Lighting, "EnvironmentSpecularScale", 0, false)
+		lowGraphicsProperty(profile, Lighting, "ShadowSoftness", 0, false)
+		local terrain = Workspace:FindFirstChildOfClass("Terrain")
+		if terrain then
+			lowGraphicsProperty(profile, terrain, "Decoration", false, false)
+			lowGraphicsProperty(profile, terrain, "WaterWaveSize", 0, false)
+			lowGraphicsProperty(profile, terrain, "WaterWaveSpeed", 0, false)
+			lowGraphicsProperty(profile, terrain, "WaterReflectance", 0, false)
+			lowGraphicsProperty(profile, terrain, "WaterTransparency", 1, false)
 		end
-	elseif graphicsBefore then
-		Lighting.GlobalShadows = graphicsBefore.shadows
-		pcall(function()
-			if graphicsBefore.quality then
-				settings().Rendering.QualityLevel = graphicsBefore.quality
+		for _, effect in ipairs(Lighting:GetDescendants()) do
+			optimizeVisual(profile, effect)
+		end
+		table.insert(profile.connections, Workspace.DescendantAdded:Connect(function(instance)
+			task.defer(optimizeVisual, profile, instance)
+		end))
+		table.insert(profile.connections, Lighting.DescendantAdded:Connect(function(instance)
+			task.defer(optimizeVisual, profile, instance)
+		end))
+		task.spawn(function()
+			local descendants = Workspace:GetDescendants()
+			for index, instance in ipairs(descendants) do
+				if graphicsBefore ~= profile or STATE.fpsBoost ~= true then
+					return
+				end
+				optimizeVisual(profile, instance)
+				if index % 250 == 0 then
+					RunService.Heartbeat:Wait()
+				end
+			end
+			STATE.detail = "Potato Mode optimized " .. tostring(#descendants) .. " objects"
+			while running() and graphicsBefore == profile and STATE.fpsBoost == true do
+				for instance, properties in pairs(profile.suppressed) do
+					if instance.Parent then
+						for property, value in pairs(properties) do
+							pcall(function()
+								if instance[property] ~= value then
+									instance[property] = value
+								end
+							end)
+						end
+					end
+				end
+				task.wait(1.5)
 			end
 		end)
-		for effect in pairs(graphicsBefore.effects) do
-			if effect.Parent then
-				effect.Enabled = true
-			end
-		end
+	elseif graphicsBefore then
+		local profile = graphicsBefore
 		graphicsBefore = nil
+		restoreGraphics(profile)
 	end
 end
 hubCleanup(function()
@@ -3653,7 +3780,7 @@ local function installHub()
 		toggle(clientBox, "Anti AFK", "antiAfk")
 		toggle(clientBox, "Auto Reconnect on Kick", "autoReconnect")
 		toggle(clientBox, "Hide Roblox Pause Popup", "noPausePopup")
-		toggle(clientBox, "Potato Mode", "fpsBoost", "Lowest graphics, no shadows or effects")
+		toggle(clientBox, "Potato Mode", "fpsBoost", "Suppresses particles, trails, beams, lights, decals, water and post effects while keeping the game and hub visible")
 		toggle(clientBox, "AFK Black Screen", "disable3d", "Stops drawing the world")
 
 		local serverBox = section(playerTab, "Server", "server")
@@ -3818,7 +3945,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.1.0"
+STATE.version = "1.1.1"
 
 if running() then
 	elevate()

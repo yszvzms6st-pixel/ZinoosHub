@@ -110,7 +110,7 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 
 **Home** shows power, stage, rebirths and what the hub is doing, plus **Claim Now** and **Equip Best Now**.
 
-**Player** has Walk Speed, Infinite Jump, Noclip, Instant Interactions, Fly, Anti AFK, Auto Reconnect, Hide Roblox Pause Popup, Potato Mode, AFK Black Screen, and Rejoin, Server Hop, Lowest Player Server and Copy Job ID.
+**Player** has Walk Speed, Infinite Jump, Noclip, Instant Interactions, Fly, Anti AFK, Auto Reconnect, Hide Roblox Pause Popup, a reversible **Potato Mode** that suppresses particles, trails, beams, lights, decals, water and post effects while keeping the game and hub visible, AFK Black Screen, and Rejoin, Server Hop, Lowest Player Server and Copy Job ID.
 
 **Settings** has the theme, menu size, open key, and Unload. The Zinoos button opens the window. Right Control opens and closes it on PC.
 
