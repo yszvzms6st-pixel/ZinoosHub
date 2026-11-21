@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.4.1"
+local VERSION = "1.5.0"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -140,6 +140,14 @@ local STATE = {
 	autoOffline = true,
 	autoPotions = false,
 	useLuckyThrows = false,
+	-- Live events
+	autoAdminAbuse = true,
+	autoAbuseDrops = true,
+	autoAbuseCrown = true,
+	autoPieFight = true,
+	autoHarvestMoon = true,
+	autoHarvestBasket = true,
+	autoHarvestShop = true,
 	-- Alerts
 	notifications = true,
 	notifyMinRarity = "Epic",
@@ -165,6 +173,8 @@ local STATE = {
 	upgradeStatus = "Waiting",
 	gardenStatus = "Waiting",
 	rewardStatus = "Waiting",
+	abuseStatus = "Watching for admin events",
+	harvestStatus = "Checking event",
 	toggleControls = {},
 }
 genv.ZinoosSeedState = STATE
@@ -243,6 +253,7 @@ local SAVE_KEYS = {
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
 	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin", "indexHunt", "historyFilter",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
+	"autoAdminAbuse", "autoAbuseDrops", "autoAbuseCrown", "autoPieFight", "autoHarvestMoon", "autoHarvestBasket", "autoHarvestShop",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme", "redeemedCodes",
@@ -488,6 +499,202 @@ local function stopTraining()
 	end
 end
 
+-- Admin Abuse events -----------------------------------------------------------
+-- v342 added server-backed pickup and contest events. Keep one queue so event
+-- requests respect the same throttle as every other Request call.
+local function abuseOn(kind)
+	return workspace:GetServerTimeNow() < (tonumber(workspace:GetAttribute("Abuse" .. kind .. "Until")) or 0)
+end
+
+local abuse = {
+	active = {},
+	queue = {},
+	seen = {},
+	full = {},
+	collected = 0,
+	lastResult = "Watching for admin events",
+}
+STATE.abuse = abuse
+
+local function dropPosition(operation)
+	local drop = operation.drop
+	local position = Vector3.new(tonumber(drop[2]) or 0, tonumber(drop[3]) or 0, tonumber(drop[4]) or 0)
+	local path = drop[6]
+	if operation.kind == "turkeys" and type(path) == "table" and #path > 0 then
+		local progress = math.max(workspace:GetServerTimeNow() - (tonumber(drop[5]) or 0), 0) / 2.5
+		local index = math.min(math.floor(progress) + 1, #path)
+		local from = path[index]
+		local to = path[math.min(index + 1, #path)]
+		if type(from) == "table" and type(to) == "table" then
+			local alpha = math.clamp(progress - (index - 1), 0, 1)
+			position = Vector3.new(
+				(tonumber(from[1]) or 0) + ((tonumber(to[1]) or 0) - (tonumber(from[1]) or 0)) * alpha,
+				position.Y,
+				(tonumber(from[2]) or 0) + ((tonumber(to[2]) or 0) - (tonumber(from[2]) or 0)) * alpha
+			)
+		end
+	end
+	return position
+end
+
+local function queueAbuseDrops(data)
+	if STATE.autoAdminAbuse ~= true or STATE.autoAbuseDrops ~= true then
+		return
+	end
+	for _, drop in ipairs(type(data.drops) == "table" and data.drops or {}) do
+		if type(drop) == "table" then
+			local key = tostring(data.kind) .. ":" .. tostring(data.id) .. ":" .. tostring(drop[1])
+			if not abuse.seen[key] then
+				abuse.seen[key] = true
+				table.insert(abuse.queue, { key = key, kind = data.kind, id = data.id, drop = drop, ends = data.ends })
+			end
+		end
+	end
+	table.sort(abuse.queue, function(a, b)
+		return (tonumber(a.drop[5]) or 0) < (tonumber(b.drop[5]) or 0)
+	end)
+end
+
+local function abuseEventName(kind)
+	local config = Balance.AdminAbuse
+	for _, event in ipairs(config and config.Events or {}) do
+		if event.key == kind then
+			return event.name or event.short or kind
+		end
+	end
+	return tostring(kind)
+end
+
+local function abuseEventListener(message, data)
+	if type(data) ~= "table" then
+		return
+	end
+	if message == "AbuseEvent" and type(data.kind) == "string" then
+		abuse.active[data.kind] = data
+		queueAbuseDrops(data)
+		abuse.lastResult = abuseEventName(data.kind) .. " active"
+		noteActivity("Admin event: " .. abuseEventName(data.kind))
+	elseif message == "AbuseEnd" and type(data.kind) == "string" then
+		local current = abuse.active[data.kind]
+		if current == nil or current.id == data.id then
+			abuse.active[data.kind] = nil
+		end
+	elseif message == "AbuseTaken" and data.by == LocalPlayer.UserId then
+		abuse.collected += 1
+		abuse.lastResult = "Collected " .. abuseEventName(data.kind) .. " reward"
+	end
+end
+trackConnection(NotifyRemote.OnClientEvent:Connect(abuseEventListener))
+
+local function runAbuseOperation(operation)
+	if STATE.autoAdminAbuse ~= true then
+		return
+	end
+	local now = workspace:GetServerTimeNow()
+	if operation.ends and now >= operation.ends then
+		return
+	end
+	local landsAt = tonumber(operation.drop[5]) or now
+	while landsAt > workspace:GetServerTimeNow() and running() do
+		task.wait(math.min(landsAt - workspace:GetServerTimeNow(), 1))
+	end
+	if abuse.full[tostring(operation.kind) .. ":" .. tostring(operation.id)] then
+		return
+	end
+	STATE.onTrip = true
+	stopTraining()
+	local position = dropPosition(operation)
+	moveTo(CFrame.new(position + Vector3.new(0, 3, 0)), 5)
+	task.wait(0.12)
+	local ok, result = request("AbuseGrab", { kind = operation.kind, id = operation.id, drop = operation.drop[1] })
+	if ok then
+		abuse.lastResult = "Collected " .. abuseEventName(operation.kind) .. " reward"
+		noteActivity(abuse.lastResult)
+	elseif tostring(result) == "full" then
+		abuse.full[tostring(operation.kind) .. ":" .. tostring(operation.id)] = true
+		abuse.lastResult = abuseEventName(operation.kind) .. " reward cap reached"
+	else
+		abuse.lastResult = abuseEventName(operation.kind) .. ": " .. tostring(result or "missed")
+	end
+	STATE.onTrip = false
+end
+
+local function chaseCrown(data)
+	if STATE.autoAdminAbuse ~= true or STATE.autoAbuseCrown ~= true or data.holder == LocalPlayer.UserId then
+		return false
+	end
+	local position
+	local holder = tonumber(data.holder) and Players:GetPlayerByUserId(tonumber(data.holder))
+	local holderRoot = holder and holder.Character and holder.Character:FindFirstChild("HumanoidRootPart")
+	if holderRoot then
+		position = holderRoot.Position
+	elseif type(data.pos) == "table" then
+		position = Vector3.new(tonumber(data.pos[1]) or 0, tonumber(data.pos[2]) or 0, tonumber(data.pos[3]) or 0)
+	end
+	if not position then
+		return false
+	end
+	STATE.onTrip = true
+	stopTraining()
+	moveTo(CFrame.new(position + Vector3.new(0, 2, 0)), 5)
+	local ok, result = request("AbuseGrab", { kind = "crown", id = data.id })
+	abuse.lastResult = ok and "Took the event crown" or ("Crown: " .. tostring(result or "chasing"))
+	STATE.onTrip = false
+	return true
+end
+
+local function throwEventPie(data)
+	if STATE.autoAdminAbuse ~= true or STATE.autoPieFight ~= true then
+		return false
+	end
+	local target, targetRoot
+	for _, player in ipairs(Players:GetPlayers()) do
+		local root = player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if root and humanoid and humanoid.Health > 0 then
+			target, targetRoot = player, root
+			break
+		end
+	end
+	if not target then
+		abuse.lastResult = "Pie Fight: waiting for another player"
+		return false
+	end
+	STATE.onTrip = true
+	stopTraining()
+	moveTo(CFrame.new(targetRoot.Position + Vector3.new(0, 2, 8)), 70)
+	local ok, result = request("AbuseGrab", { kind = "pies", id = data.id, target = target.UserId })
+	abuse.lastResult = ok and ("Pie hit x" .. tostring(type(result) == "table" and result.hits or "?"))
+		or ("Pie Fight: " .. tostring(result or "missed"))
+	STATE.onTrip = false
+	return true
+end
+
+local function startAbuseAutomation()
+	task.defer(function()
+		request("AbuseSync")
+	end)
+	task.spawn(function()
+		while running() do
+			local operation = STATE.autoAdminAbuse == true and STATE.autoAbuseDrops == true and table.remove(abuse.queue, 1) or nil
+			if operation then
+				pcall(runAbuseOperation, operation)
+			else
+				local now = workspace:GetServerTimeNow()
+				local crown = abuse.active.crown
+				local pies = abuse.active.pies
+				if crown and (not crown.ends or now < crown.ends) then
+					pcall(chaseCrown, crown)
+				elseif pies and (not pies.ends or now < pies.ends) then
+					pcall(throwEventPie, pies)
+				end
+				task.wait(0.55)
+			end
+			STATE.onTrip = false
+		end
+	end)
+end
+
 -- Throwing -------------------------------------------------------------------
 -- The server only accepts a throw about 6.6 s after the last accepted one
 -- (measured live). The hub learns that gap: a refused throw makes it wait a
@@ -497,7 +704,7 @@ end
 -- from the game's own spot on the strip fixed it at once). So a refused run
 -- climbs a ladder: StopTrain once, then throw from on the strip, then StopTrain
 -- again now and then, and as a last resort respawn the character.
-local throwState = { lastOkSent = 0, sentAt = 0, learned = 6.9, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0 }
+local throwState = { lastOkSent = 0, sentAt = 0, learned = 6.9, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0, afterTrain = false, log = {} }
 
 -- Catch history -------------------------------------------------------------------
 -- Every plant you catch, saved per account so it survives reloads and server
@@ -1045,7 +1252,7 @@ end
 
 function indexHunt.makePlan()
 	local missing = indexHunt.missing()
-	local strength = tonumber(attr("Strength")) or 1
+	local strength = (tonumber(attr("Strength")) or 1) * (abuseOn("Throw") and (tonumber(Balance.AdminAbuse and Balance.AdminAbuse.ThrowStrength) or 25) or 1)
 	local key = table.concat(missing, ",") .. "|" .. math.floor(math.log10(math.max(1, strength)) * 20) .. "|" .. string.format("%.2f", indexHunt.extra)
 	if indexHunt.planKey == key and os.clock() - indexHunt.planAt < 60 then
 		return indexHunt.plan
@@ -1190,6 +1397,125 @@ function indexHunt.trackerText(found, total)
 	return table.concat(lines, "\n")
 end
 
+-- Harvest Moon and Admin Jackpot both need an exact landing zone. They take
+-- priority over the normal index hunter, then restore the player's power when
+-- the timed event ends.
+local eventAim = { active = false, kind = nil, target = nil, power = nil, originalPower = nil, touched = false }
+STATE.eventAim = eventAim
+
+local function zonePower(zoneName, strengthScale)
+	for _, zone in ipairs(ZoneConfig.List or {}) do
+		if zone.name == zoneName then
+			local strength = math.max(1, tonumber(attr("Strength")) or 1) * (strengthScale or 1)
+			local maxDistance = tonumber(Balance.DistanceMax(strength)) or 1
+			local center = ((tonumber(zone.start) or 0) + (tonumber(zone.finish) or tonumber(zone.start) or 0)) / 2
+			local raw = center / math.max(maxDistance, 1) * 100
+			if raw <= 100 then
+				return math.clamp(math.floor(raw + 0.5), 1, 100), zone
+			end
+			return nil, zone
+		end
+	end
+	return nil
+end
+
+local function bestEventSeed()
+	local best, bestLuck = nil, -math.huge
+	for _, owned in ipairs(type(ClientState.seeds) == "table" and ClientState.seeds or {}) do
+		local index = tonumber(owned)
+		local ok, luck = pcall(Balance.SeedLuck, index, ClientState.seeds)
+		luck = ok and tonumber(luck) or -math.huge
+		if index and luck > bestLuck then
+			best, bestLuck = index, luck
+		end
+	end
+	return best
+end
+
+local function harvestPlan()
+	if STATE.autoHarvestMoon ~= true or attr("HarvestOk") ~= true or type(Balance.HarvestMoon) ~= "function" then
+		return nil
+	end
+	local now = workspace:GetServerTimeNow()
+	local moon, startsAt, endsAt = Balance.HarvestMoon(now)
+	if not startsAt or not endsAt or now < startsAt or now >= endsAt then
+		return nil
+	end
+	local beams = Balance.HarvestBeams(moon)
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
+	local reach = tonumber(attr("ZoneReach")) or #ZoneConfig.List
+	local best
+	for index, zone in ipairs(ZoneConfig.List or {}) do
+		if index <= reach and beams[zone.name] then
+			local power = zonePower(zone.name, abuseOn("Throw") and (tonumber(Balance.AdminAbuse and Balance.AdminAbuse.ThrowStrength) or 25) or 1)
+			if power then
+				local missing = 0
+				for _, plant in ipairs(Balance.HarvestZone and Balance.HarvestZone[zone.name] or {}) do
+					if not have[plant.name] then
+						missing += 1
+					end
+				end
+				local score = missing * 1e12 + (tonumber(zone.finish) or tonumber(zone.start) or index)
+				if not best or score > best.score then
+					best = { kind = "Harvest Moon", zone = zone.name, power = power, score = score, endsAt = endsAt, missing = missing }
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function jackpotPlan()
+	if STATE.autoAdminAbuse ~= true or not abuseOn("Jackpot") then
+		return nil
+	end
+	local zone = workspace:GetAttribute("AbuseJackpotZone")
+	if type(zone) ~= "string" then
+		return nil
+	end
+	local scale = abuseOn("Throw") and (tonumber(Balance.AdminAbuse and Balance.AdminAbuse.ThrowStrength) or 25) or 1
+	local power = zonePower(zone, scale)
+	return power and { kind = "Jackpot", zone = zone, power = power, endsAt = tonumber(workspace:GetAttribute("AbuseJackpotUntil")) } or nil
+end
+
+function eventAim.plan()
+	return jackpotPlan() or harvestPlan()
+end
+
+function eventAim.restore()
+	if eventAim.touched and tonumber(attr("PowerPct")) ~= (eventAim.originalPower or 100) then
+		request("Settings", { power = eventAim.originalPower or 100 })
+	end
+	eventAim.active, eventAim.kind, eventAim.target, eventAim.power = false, nil, nil, nil
+	eventAim.originalPower, eventAim.touched = nil, false
+end
+
+function eventAim.apply()
+	local plan = eventAim.plan()
+	if not plan then
+		eventAim.restore()
+		return false
+	end
+	if not eventAim.touched then
+		eventAim.originalPower = tonumber(attr("PowerPct")) or 100
+	end
+	eventAim.active, eventAim.kind, eventAim.target, eventAim.power = true, plan.kind, plan.zone, plan.power
+	if tonumber(attr("PowerPct")) ~= plan.power and request("Settings", { power = plan.power }) then
+		eventAim.touched = true
+	end
+	local seed = bestEventSeed()
+	if seed and tonumber(attr("Seed")) ~= seed then
+		request("EquipSeed", { i = seed })
+	end
+	return true
+end
+
+hubCleanup(function()
+	if eventAim.touched then
+		pcall(RequestRemote.InvokeServer, RequestRemote, "Settings", { power = eventAim.originalPower or 100 })
+	end
+end)
+
 local function throwOnce()
 	local char = character()
 	if not char then
@@ -1201,7 +1527,9 @@ local function throwOnce()
 		request("StopTrain")
 		task.wait(1)
 	end
-	indexHunt.apply()
+	if not eventAim.apply() then
+		indexHunt.apply()
+	end
 	-- Right after pull-ups the server refuses throws from behind the strip
 	-- (seen every time live), so the first one goes from on the strip.
 	local fromStrip = throwState.refusedRow >= 3 or throwState.afterTrain == true
@@ -1469,7 +1797,33 @@ end
 
 local cycle = { phase = "throw", endsAt = 0 }
 
+local function eventPriorityMode()
+	local aim = eventAim.plan()
+	if aim then
+		STATE.priorityReason = aim.kind .. " · " .. aim.zone
+		return "throw"
+	end
+	if STATE.autoAdminAbuse == true then
+		local loadedLucky = (tonumber(attr("LuckyThrows")) or 0) + (tonumber(attr("LuckyThrows10")) or 0)
+		if abuseOn("Luck") or abuseOn("Mutation") or abuseOn("Throw") or loadedLucky > 0 then
+			STATE.priorityReason = loadedLucky > 0 and ("Admin Lucky Throws · " .. loadedLucky .. " left") or "Admin throw boost"
+			return "throw"
+		end
+		if abuseOn("Train") then
+			STATE.priorityReason = "Admin training boost"
+			return "train"
+		end
+	end
+	STATE.priorityReason = nil
+	return nil
+end
+
 local function wantedMode()
+	local priority = eventPriorityMode()
+	if priority then
+		STATE.cycleStatus = STATE.priorityReason
+		return priority
+	end
 	if STATE.cycleTrain == true then
 		local now = os.clock()
 		if cycle.endsAt == 0 then
@@ -1661,7 +2015,7 @@ local function stepUpgrades()
 	-- Keep the best owned seed equipped (also after buying one by hand),
 	-- except while Auto Complete Index has picked a weaker one for commons.
 	local best = bestOwnedSeed()
-	if best and tonumber(attr("Seed")) ~= best and not indexHunt.huntingLow() then
+	if best and tonumber(attr("Seed")) ~= best and not indexHunt.huntingLow() and not eventAim.active then
 		local ok, message = request("EquipSeed", { i = best })
 		if ok then
 			noteActivity("Equipped " .. tostring(Balance.Seeds[best].name))
@@ -2276,6 +2630,111 @@ local function stepRewards()
 	STATE.rewardStatus = #notes > 0 and table.concat(notes, " · ") or "On"
 end
 
+-- Harvest update ---------------------------------------------------------------
+local harvestWait = 0
+local function harvestCounts()
+	local found, zones, total = 0, {}, 0
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
+	for _, plant in ipairs(Balance.Harvest and Balance.Harvest.plants or {}) do
+		total += 1
+		if have[plant.name] then
+			found += 1
+			zones[plant.zone] = true
+		end
+	end
+	local zoneCount = 0
+	for _ in pairs(zones) do
+		zoneCount += 1
+	end
+	return found, total, zoneCount
+end
+
+local function stepHarvest()
+	if not Balance.Harvest or os.clock() < harvestWait then
+		return
+	end
+	harvestWait = os.clock() + 4
+	local now = workspace:GetServerTimeNow()
+	local eventUntil = tonumber(workspace:GetAttribute("HarvestUntil")) or 0
+	local standOpen = attr("HarvestStand") == true and now < eventUntil + (tonumber(Balance.Harvest.StandDays) or 3) * 86400
+	local notes = {}
+	local found, total, zones = harvestCounts()
+	local cranberries = tonumber(attr("Cranberries")) or 0
+	local step = tonumber(attr("HarvestStep")) or 0
+	table.insert(notes, string.format("Index %d/%d · zones %d/17 · %d Cranberries", found, total, zones, cranberries))
+
+	if STATE.autoHarvestBasket == true and attr("HarvestOk") == true and (tonumber(attr("Basket")) or 0) > 0 then
+		local before = tonumber(attr("Basket")) or 0
+		local ok, result = request("HarvestBasket")
+		if ok then
+			noteActivity("Collected Harvest basket (" .. before .. ")")
+			table.insert(notes, "Basket collected")
+		else
+			table.insert(notes, "Basket: " .. tostring(result or "not ready"))
+		end
+		harvestWait = os.clock() + 8
+	end
+
+	local nextReward = Balance.Harvest.Stand and Balance.Harvest.Stand[step + 1]
+	if STATE.autoHarvestShop == true and standOpen and nextReward and cranberries >= (tonumber(nextReward.price) or math.huge) then
+		local ok, result = request("HarvestBuy")
+		if ok then
+			noteActivity(nextReward.mutation and "Bought Harvest Mutation" or ("Bought Harvest reward " .. (step + 1)))
+			table.insert(notes, nextReward.mutation and "Harvest Mutation bought" or ("Stand reward " .. (step + 1) .. " bought"))
+		else
+			table.insert(notes, "Stand: " .. tostring(result or "not bought"))
+		end
+		harvestWait = os.clock() + 8
+	elseif nextReward then
+		table.insert(notes, string.format("Next stand reward %d/%d: %d Cranberries", step + 1, #Balance.Harvest.Stand, nextReward.price))
+	else
+		table.insert(notes, "Harvest Stand complete")
+	end
+
+	local moon, startsAt, endsAt = Balance.HarvestMoon(now)
+	if attr("HarvestOk") == true and startsAt and endsAt then
+		if startsAt <= now and now < endsAt then
+			table.insert(notes, string.format("Harvest Moon active · %d:%02d left%s", math.floor(endsAt - now) // 60, math.floor(endsAt - now) % 60,
+				eventAim.target and (" · targeting " .. eventAim.target .. " at " .. tostring(eventAim.power) .. "%") or ""))
+		else
+			table.insert(notes, string.format("Next moon in %d:%02d", math.max(0, math.floor(startsAt - now)) // 60, math.max(0, math.floor(startsAt - now)) % 60))
+		end
+	elseif standOpen then
+		table.insert(notes, "Harvest event ended · Stand still open")
+	else
+		table.insert(notes, "Harvest event is closed")
+	end
+	STATE.harvestMoon = moon
+	STATE.harvestStatus = table.concat(notes, "\n")
+end
+
+local function abuseStatusText()
+	local now = workspace:GetServerTimeNow()
+	local lines, boosts, events = {}, {}, {}
+	for _, kind in ipairs({ "Cash", "Luck", "Train", "Mutation", "Throw", "Jackpot", "AfterParty" }) do
+		local untilAt = tonumber(workspace:GetAttribute("Abuse" .. kind .. "Until")) or 0
+		if untilAt > now then
+			local mult = tonumber(workspace:GetAttribute("Abuse" .. kind .. "Mult"))
+			local left = math.max(0, math.floor(untilAt - now))
+			table.insert(boosts, string.format("%s%s %d:%02d", mult and ("x" .. tostring(mult) .. " ") or "", kind, left // 60, left % 60))
+		end
+	end
+	for kind, data in pairs(abuse.active) do
+		if not data.ends or now < data.ends then
+			local left = data.ends and math.max(0, math.floor(data.ends - now)) or 0
+			table.insert(events, abuseEventName(kind) .. (data.ends and string.format(" %d:%02d", left // 60, left % 60) or ""))
+		end
+	end
+	table.sort(events)
+	table.insert(lines, #boosts > 0 and ("Boosts: " .. table.concat(boosts, " · ")) or "No admin boost active")
+	table.insert(lines, #events > 0 and ("Events: " .. table.concat(events, " · ")) or "No admin event active")
+	table.insert(lines, string.format("Event rewards collected: %d · %s", abuse.collected, abuse.lastResult))
+	if STATE.priorityReason then
+		table.insert(lines, "Farm priority: " .. STATE.priorityReason)
+	end
+	return table.concat(lines, "\n")
+end
+
 -- XP offers (the purple "2x" bubble) pop up while training. Tap the bubble the
 -- way a player would, so the game claims it and clears it from the screen at
 -- once; if that doesn't land, claim it straight from the server. The server's
@@ -2873,6 +3332,7 @@ local function installHub()
 	-- Tabs -----------------------------------------------------------------
 	local homeTab = Window:Tab({ Title = "Home", Icon = "house" })
 	local farmTab = Window:Tab({ Title = "Farming", Icon = "target" })
+	local eventTab = Window:Tab({ Title = "Events", Icon = "sparkles" })
 	local upgradeTab = Window:Tab({ Title = "Upgrades", Icon = "trending-up" })
 	local gardenTab = Window:Tab({ Title = "Garden", Icon = "flower-2" })
 	local historyTab = Window:Tab({ Title = "History", Icon = "history" })
@@ -2918,6 +3378,20 @@ local function installHub()
 	slider(trainBox, "Throw For (minutes)", nil, "cycleThrowMinutes", 1, 30, 1)
 	toggle(trainBox, "Timer On Screen", "showCycleTimer", "Small Training / Throwing countdown (and the live index tracker) in the top-right of your game screen")
 	toggle(trainBox, "Auto Tap 2x XP Bubbles", "autoXpOffers", "Taps the purple 2x bubble the moment it pops up while training")
+
+	-- Events
+	local abuseBox = section(eventTab, "Admin Abuse", "zap")
+	local abuseInfo = info(abuseBox, "Live Status", "Watching for admin events...")
+	toggle(abuseBox, "Auto Admin Abuse", "autoAdminAbuse", "Uses active Luck, Mutation, Throw, Train and 25x Jackpot boosts in the best farming mode")
+	toggle(abuseBox, "Auto Collect Event Drops", "autoAbuseDrops", "Collects Lucky Dice, cash rain, storm potions, turkeys, treasure and Colossus drops up to each server cap")
+	toggle(abuseBox, "Auto King Of The Crown", "autoAbuseCrown", "Chases and takes the crown for the longest-hold reward")
+	toggle(abuseBox, "Auto Pie Fight", "autoPieFight", "Targets nearby players and throws pies for the hit reward")
+	info(abuseBox, "Automatic Events", "Cash Nuke, Giveaway and UFO rewards are server-awarded automatically. Fireworks, Big Tom Peek, Big Heads and Disco are visual events with nothing to claim.")
+	local harvestBox = section(eventTab, "Harvest Update", "moon-star")
+	local harvestInfo = info(harvestBox, "Live Status", "Checking Harvest...")
+	toggle(harvestBox, "Auto Harvest Moon", "autoHarvestMoon", "Forces throwing during each moon and targets an active beam, preferring zones missing from your Harvest Index")
+	toggle(harvestBox, "Auto Collect Cranberry Basket", "autoHarvestBasket", "Collects the basket on your plot whenever it has Cranberries")
+	toggle(harvestBox, "Auto Buy Harvest Stand", "autoHarvestShop", "Buys all seven limited rewards in order whenever you have enough Cranberries, including the final Harvest Mutation")
 
 	-- Upgrades
 	local upgradeBox = section(upgradeTab, "Auto Buy", "shopping-cart")
@@ -3069,6 +3543,8 @@ local function installHub()
 				cashReserve = "$0", autoPlace = true, autoFuse = false, fuseMaxRarity = "Uncommon",
 				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up", indexHunt = false, historyFilter = "All",
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
+				autoAdminAbuse = true, autoAbuseDrops = true, autoAbuseCrown = true, autoPieFight = true,
+				autoHarvestMoon = true, autoHarvestBasket = true, autoHarvestShop = true,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
 			}
@@ -3191,6 +3667,8 @@ local function installHub()
 		))
 		setInfo(gardenInfo, tostring(STATE.gardenStatus))
 		setInfo(indexInfo, indexHunt.trackerText(found, total))
+		setInfo(abuseInfo, abuseStatusText())
+		setInfo(harvestInfo, tostring(STATE.harvestStatus))
 		pcall(STATE.drawHistory)
 		setInfo(rewardInfo, tostring(STATE.rewardStatus) .. string.format("\nCodes used: %d of %d", #STATE.redeemedCodes, (function()
 			local n = 0
@@ -3217,6 +3695,7 @@ end
 
 -- Start ----------------------------------------------------------------------
 loadSaved()
+startAbuseAutomation()
 
 if running() then
 	local ok, err = xpcall(installHub, debug.traceback)
@@ -3252,6 +3731,8 @@ task.spawn(function()
 		pcall(stepGarden)
 		elevate()
 		pcall(stepRewards)
+		elevate()
+		pcall(stepHarvest)
 		elevate()
 		task.wait(1)
 	end
@@ -3374,7 +3855,7 @@ do
 	task.spawn(function()
 		local indexColor = Color3.fromHex("B05AFF")
 		while running() do
-			local showTimer = STATE.showCycleTimer ~= false and STATE.cycleTrain == true and cycle.endsAt > 0
+			local showTimer = STATE.showCycleTimer ~= false and ((STATE.cycleTrain == true and cycle.endsAt > 0) or STATE.priorityReason ~= nil)
 			-- The live index pill shows while Auto Complete Index is on.
 			local showIndex = STATE.showCycleTimer ~= false and STATE.indexHunt == true
 			if (showTimer or showIndex) and not gui then
@@ -3382,7 +3863,7 @@ do
 			end
 			if gui then
 				local left = math.max(0, math.ceil(cycle.endsAt - os.clock()))
-				local training = cycle.phase == "train"
+				local training = STATE.priorityReason and STATE.mode == "train" or cycle.phase == "train"
 				local color = training and Color3.fromHex("FF9A2A") or Color3.fromHex("6BE34A")
 				local indexText
 				if showIndex then
@@ -3400,7 +3881,8 @@ do
 					timerPill.frame.Visible = showTimer
 					indexPill.frame.Visible = showIndex
 					if showTimer then
-						timerPill.label.Text = string.format("%s  %d:%02d", training and "TRAINING" or "THROWING", left // 60, left % 60)
+						timerPill.label.Text = STATE.priorityReason and string.upper(STATE.priorityReason)
+							or string.format("%s  %d:%02d", training and "TRAINING" or "THROWING", left // 60, left % 60)
 						timerPill.dot.BackgroundColor3 = color
 						timerPill.stroke.Color = color
 					end
