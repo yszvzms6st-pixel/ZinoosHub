@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.0"
+local VERSION = "1.5.1"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -704,7 +704,8 @@ end
 -- from the game's own spot on the strip fixed it at once). So a refused run
 -- climbs a ladder: StopTrain once, then throw from on the strip, then StopTrain
 -- again now and then, and as a last resort respawn the character.
-local throwState = { lastOkSent = 0, sentAt = 0, learned = 6.9, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0, afterTrain = false, log = {} }
+-- Since place v342 the server wants ~9-10 s between throws (it was ~6.6 s).
+local throwState = { lastOkSent = 0, sentAt = 0, learned = 9.4, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0, afterTrain = false, log = {} }
 
 -- Catch history -------------------------------------------------------------------
 -- Every plant you catch, saved per account so it survives reloads and server
@@ -1897,9 +1898,9 @@ local function stepFarm()
 			-- try again shortly and learn a slightly longer gap.
 			throwState.refusedRow += 1
 			local row = throwState.refusedRow
-			if throwState.sentAt - throwState.lastOkSent < 10 then
+			if throwState.sentAt - throwState.lastOkSent < 15 then
 				-- Only a refusal close to the last throw says the wait is longer.
-				throwState.learned = math.min(9, throwState.learned + 0.3)
+				throwState.learned = math.min(14, throwState.learned + 0.3)
 			end
 			if row == 2 or (row >= 10 and os.clock() - throwState.lastStop > 30) then
 				-- The server may still think you are training.
@@ -1922,7 +1923,7 @@ local function stepFarm()
 			STATE.status = "Throwing"
 			STATE.throwStatus = row >= 3 and string.format("Server keeps saying wait (%d in a row), trying to unstick it", row)
 				or "Server said wait, trying again"
-			return row >= 6 and 3 or 1.5
+			return row >= 6 and 3 or 0.6
 		end
 		STATE.throwStatus = tostring(result)
 		return 0.5
@@ -2614,8 +2615,8 @@ local function stepRewards()
 						luck5Left = boostLeft("Luck5")
 					end
 					if luck5Left > 15 or not hasLuck5 then
-						-- One throw every ~8 s: load as many as fit in the boost (max 3).
-						local fit = luck5Left > 15 and math.clamp(math.floor((luck5Left - 10) / 8), 1, 3) or 1
+						-- One throw per server wait: load as many as fit in the boost (max 3).
+						local fit = luck5Left > 15 and math.clamp(math.floor((luck5Left - 10) / math.max(8, throwState.learned)), 1, 3) or 1
 						for _ = 1, fit do
 							lucky = (tonumber(items.Lucky) or 0) > 0 and "Lucky" or ((tonumber(items.Lucky10) or 0) > 0 and "Lucky10" or nil)
 							if not lucky or not use(lucky, lucky == "Lucky" and "Lucky Throw (50x luck)" or "Lucky Throw (10x luck)") then
@@ -2632,6 +2633,7 @@ end
 
 -- Harvest update ---------------------------------------------------------------
 local harvestWait = 0
+local harvestBasketTrip = -math.huge
 local function harvestCounts()
 	local found, zones, total = 0, {}, 0
 	local have = type(ClientState.index) == "table" and ClientState.index or {}
@@ -2663,29 +2665,87 @@ local function stepHarvest()
 	local step = tonumber(attr("HarvestStep")) or 0
 	table.insert(notes, string.format("Index %d/%d · zones %d/17 · %d Cranberries", found, total, zones, cranberries))
 
-	if STATE.autoHarvestBasket == true and attr("HarvestOk") == true and (tonumber(attr("Basket")) or 0) > 0 then
-		local before = tonumber(attr("Basket")) or 0
-		local ok, result = request("HarvestBasket")
-		if ok then
-			noteActivity("Collected Harvest basket (" .. before .. ")")
-			table.insert(notes, "Basket collected")
-		else
-			table.insert(notes, "Basket: " .. tostring(result or "not ready"))
+	-- The server only takes the basket next to it (it sits at your plot) and
+	-- only takes Cranberries in / sells rewards next to Farmer Hazel, so both
+	-- are short trips: basket -> Hazel (hand it in) -> buy what you can afford.
+	local stand = Balance.Harvest.Stand or {}
+	local function hazelCFrame()
+		local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("HarvestStand")
+		local hazel = folder and folder:FindFirstChild("FarmerHazel")
+		local root = hazel and (hazel:FindFirstChild("RootPart") or hazel.PrimaryPart)
+		local standAt = typeof(Balance.Harvest.StandAt) == "CFrame" and Balance.Harvest.StandAt.Position or nil
+		local at = root and root.Position or standAt
+		if root and standAt then
+			-- Stand between Hazel and the counter: buying checks the counter,
+			-- handing in checks Hazel (a buy from beside Hazel was refused once).
+			at = (root.Position + standAt) / 2
 		end
+		return at and CFrame.lookAt(at + Vector3.new(0, 3, 4), at + Vector3.new(0, 3, 0)) or nil
+	end
+	local function buyAtStand()
+		local bought = 0
+		while bought < #stand and running() do
+			local current = tonumber(attr("HarvestStep")) or 0
+			local reward = stand[current + 1]
+			if not reward or (tonumber(attr("Cranberries")) or 0) < (tonumber(reward.price) or math.huge) then
+				break
+			end
+			local ok, result = request("HarvestBuy")
+			if not ok then
+				table.insert(notes, "Stand: " .. tostring(result or "not bought"))
+				break
+			end
+			bought += 1
+			noteActivity(reward.mutation and "Bought Harvest Mutation" or ("Bought Harvest reward " .. (current + 1)))
+			table.insert(notes, reward.mutation and "Harvest Mutation bought" or ("Stand reward " .. (current + 1) .. " bought"))
+		end
+	end
+
+	local basket = tonumber(attr("Basket")) or 0
+	local held = tonumber(attr("BasketHeld")) or 0
+	local basketDue = STATE.autoHarvestBasket == true and attr("HarvestOk") == true
+		and (held > 0 or (basket > 0 and os.clock() - harvestBasketTrip > 300))
+	local nextReward = stand[step + 1]
+	local canBuy = STATE.autoHarvestShop == true and standOpen and nextReward ~= nil
+		and cranberries + basket >= (tonumber(nextReward.price) or math.huge)
+	if basketDue or (canBuy and cranberries >= (tonumber(nextReward.price) or math.huge)) then
+		harvestBasketTrip = os.clock()
+		local before = cranberries
+		if basketDue and held == 0 then
+			local basketPart = workspace:FindFirstChild("HarvestPlot")
+			basketPart = basketPart and basketPart:FindFirstChild("CranberryBasket")
+			basketPart = basketPart and (basketPart:FindFirstChild("Root") or basketPart.PrimaryPart)
+			if basketPart then
+				withTrip(CFrame.new(basketPart.Position + Vector3.new(0, 3, 4)), function()
+					local ok, result = request("HarvestBasket")
+					if not ok then
+						table.insert(notes, "Basket: " .. tostring(result or "not ready"))
+					end
+				end)
+			end
+		end
+		withTrip(hazelCFrame(), function()
+			if (tonumber(attr("BasketHeld")) or 0) > 0 then
+				local ok, result = request("HarvestHazel")
+				local deposited = ok and type(result) == "table" and tonumber(result.deposited) or 0
+				if deposited > 0 then
+					noteActivity("Handed in Harvest basket (+" .. deposited .. " Cranberries)")
+					table.insert(notes, "Basket handed in (+" .. deposited .. ")")
+				elseif not ok then
+					table.insert(notes, "Hazel: " .. tostring(result or "try again"))
+				end
+			end
+			if STATE.autoHarvestShop == true and standOpen then
+				buyAtStand()
+			end
+		end)
+		cranberries = tonumber(attr("Cranberries")) or before
+		step = tonumber(attr("HarvestStep")) or step
+		nextReward = stand[step + 1]
 		harvestWait = os.clock() + 8
 	end
 
-	local nextReward = Balance.Harvest.Stand and Balance.Harvest.Stand[step + 1]
-	if STATE.autoHarvestShop == true and standOpen and nextReward and cranberries >= (tonumber(nextReward.price) or math.huge) then
-		local ok, result = request("HarvestBuy")
-		if ok then
-			noteActivity(nextReward.mutation and "Bought Harvest Mutation" or ("Bought Harvest reward " .. (step + 1)))
-			table.insert(notes, nextReward.mutation and "Harvest Mutation bought" or ("Stand reward " .. (step + 1) .. " bought"))
-		else
-			table.insert(notes, "Stand: " .. tostring(result or "not bought"))
-		end
-		harvestWait = os.clock() + 8
-	elseif nextReward then
+	if nextReward then
 		table.insert(notes, string.format("Next stand reward %d/%d: %d Cranberries", step + 1, #Balance.Harvest.Stand, nextReward.price))
 	else
 		table.insert(notes, "Harvest Stand complete")
