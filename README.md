@@ -95,6 +95,7 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 - **Smart PvP / Kill Aura** is opt-in. It chases the lowest-health attackable real player whose maximum HP is not above yours, bites at the native accepted rate, uses an equipped combat ability, and makes God Mode retreat earlier. It ignores stronger players, bots, and players protected because they are more than the live game's `MercyGap` below your stage.
 - **Smart Event Priority** actively chases event bosses and creatures, including the Red Swarm, and handles Treasure Hunt chests. **Auto Collect Worms** collects Worm Rain drops.
 - **Auto Power-Ups** collects nearby temporary Speed, Mega Bite, Magnet, x2 Power and Shield pickups before they expire. **Auto Lost Eggs** finds all 20 hidden eggs for their DNA, mutation rolls and completion reward.
+- Blocked power-ups are automatically abandoned for 30 seconds when the ant makes no meaningful progress for 3.5 seconds, preventing the farm from getting trapped against cave walls or terrain.
 - **Quest Objective Assist** runs the matching food, bug, evolve, roll, pet, worm and dungeon objective. PvP ant quests are a separate opt-in.
 - **Auto Dungeon** enters when a run is available and fights the waves and boss. Dungeon movement uses the lower dungeon floor instead of treating it as the surface void.
 - **Critter ESP** shows bug names and health. **Player ESP** shows other players.

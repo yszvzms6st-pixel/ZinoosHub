@@ -1154,6 +1154,8 @@ local farm = {
 	nextRefresh = 0,
 	skip = {},
 	chase = nil,
+	powerUpSkip = {},
+	powerUpChase = nil,
 	esp = {},
 	codesDone = false,
 	communityDone = false,
@@ -1615,11 +1617,17 @@ local function nearestPowerUp(origin)
 	local maxDistance = configuredNear + 30
 	if folder then
 		local now = Workspace:GetServerTimeNow()
+		local clock = os.clock()
 		for _, part in ipairs(folder:GetChildren()) do
 			local ends = tonumber(part:GetAttribute("Ends"))
+			local skipUntil = tonumber(farm.powerUpSkip[part]) or 0
+			if skipUntil <= clock then
+				farm.powerUpSkip[part] = nil
+			end
 			if part:IsA("BasePart")
 				and part:GetAttribute("TakenBy") == nil
 				and part:GetAttribute("Gone") ~= true
+				and skipUntil <= clock
 				and (not ends or ends > now) then
 				local distance = (part.Position - origin).Magnitude
 				if distance <= maxDistance and (not bestDist or distance < bestDist) then
@@ -1729,13 +1737,30 @@ local function stepSpecialTravel(character, root)
 		if powerUp then
 			local kind = tostring(powerUp:GetAttribute("Kind") or "Power-Up")
 			if distance <= 4 then
+				farm.powerUpChase = nil
 				STATE.status = "Collecting " .. kind
 				STATE.detail = "Temporary power-up"
+				return true
+			end
+			local now = os.clock()
+			local chase = farm.powerUpChase
+			if not chase or chase.target ~= powerUp then
+				farm.powerUpChase = { target = powerUp, best = distance, at = now }
+			elseif distance < chase.best - 3 then
+				chase.best = distance
+				chase.at = now
+			elseif now - chase.at >= 3.5 then
+				farm.powerUpSkip[powerUp] = now + 30
+				farm.powerUpChase = nil
+				STATE.status = "Skipped unreachable " .. kind
+				STATE.detail = "Blocked power-up ignored for 30 seconds"
 				return true
 			end
 			if stepToward(character, root, powerUp.Position, "Going to " .. kind, string.format("Power-up  %d away", math.floor(distance))) then
 				return true
 			end
+		else
+			farm.powerUpChase = nil
 		end
 	end
 	if STATE.autoLostEggs == true then
@@ -4359,7 +4384,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.1"
+STATE.version = "1.4.2"
 
 if running() then
 	elevate()
