@@ -39,6 +39,7 @@ local STATE = {
 	autoOrb = true,
 	autoBite = true,
 	autoAbility = true,
+	autoPvp = false,
 	critterEsp = true,
 	playerEsp = true,
 	autoEvolve = true,
@@ -173,6 +174,7 @@ local FLAG_KEYS = {
 	AutoOrb = "autoOrb",
 	AutoBite = "autoBite",
 	AutoAbility = "autoAbility",
+	AutoPvp = "autoPvp",
 	CritterEsp = "critterEsp",
 	PlayerEsp = "playerEsp",
 	AutoEvolve = "autoEvolve",
@@ -1412,7 +1414,8 @@ local function stepGodMode(character, root)
 		STATE.detail = string.format("HP %d/%d  ·  %d%%", math.floor(hp or 0), math.floor(maxHp or 0), math.floor(ratio * 100))
 		return true
 	end
-	if ratio <= 0.72 then
+	local escapeAt = STATE.autoPvp == true and 0.82 or 0.72
+	if ratio <= escapeAt then
 		farm.godRecovering = true
 		farm.godEscapes += 1
 		farm.godReturn = spawnStand()
@@ -1787,7 +1790,7 @@ local function stepSpecialTravel(character, root)
 	return false
 end
 
-local nearestCritter, nearestAnt
+local nearestCritter, nearestAnt, nearestPvpTarget
 local function stepFarm()
 	if STATE.autoOrb ~= true
 		and STATE.autoDungeon ~= true
@@ -1796,7 +1799,8 @@ local function stepFarm()
 		and STATE.autoLostEggs ~= true
 		and STATE.smartEvents ~= true
 		and STATE.questAssist ~= true
-		and STATE.chaseBugs ~= true then
+		and STATE.chaseBugs ~= true
+		and STATE.autoPvp ~= true then
 		STATE.detail = "Farm off"
 		return
 	end
@@ -1815,6 +1819,29 @@ local function stepFarm()
 	local under = groundAt(root.Position, character, root.Position.Y)
 	if under and math.abs(root.Position.Y - under.Y) < 12 then
 		safeSpots[inDungeon() and "dungeon" or "surface"] = root.Position
+	end
+	if STATE.autoPvp == true then
+		local model, foeRoot, foeDist = nearestPvpTarget(root.Position, 450)
+		if foeRoot then
+			local targetName = tostring(model:GetAttribute("DisplayName") or model.Name)
+			STATE.pvpTarget = targetName
+			local length = tonumber(character:GetAttribute("Length")) or 10
+			local reach = 18
+			local reachOk, gotReach = pcall(Config.BiteRange, length)
+			if reachOk and type(gotReach) == "number" then
+				reach = gotReach + 6
+			end
+			if foeDist <= reach then
+				STATE.status = "PvP fighting " .. targetName
+				STATE.detail = string.format("Weakest safe target  ·  %d HP", math.floor(tonumber(model:GetAttribute("HP")) or 0))
+				return
+			end
+			if stepToward(character, root, foeRoot.Position, "PvP chasing " .. targetName, string.format("Weakest safe target  ·  %d away", math.floor(foeDist))) then
+				return
+			end
+		else
+			STATE.pvpTarget = ""
+		end
 	end
 	if stepSpecialTravel(character, root) then
 		return
@@ -2008,10 +2035,41 @@ function nearestAnt(origin, limit)
 	return bestModel, bestRoot, bestDist
 end
 
+-- PvP is opt-in and deliberately avoids bad fights. Target the lowest-current-HP
+-- real player whose maximum health is not above ours, then use distance as the
+-- tiebreaker. Bots remain available to the separate quest helper.
+function nearestPvpTarget(origin, limit)
+	local character = LocalPlayer.Character
+	local myMaxHp = character and tonumber(character:GetAttribute("MaxHP")) or 0
+	if myMaxHp <= 0 then
+		return nil
+	end
+	local bestModel, bestRoot, bestDist, bestHp
+	for _, model in ipairs(Workspace:GetChildren()) do
+		if model:IsA("Model")
+			and model ~= character
+			and model:GetAttribute("Kind") == "Ant"
+			and model:GetAttribute("IsBot") ~= true
+			and model:GetAttribute("Dead") ~= true
+			and tonumber(model:GetAttribute("OwnerId")) ~= LocalPlayer.UserId then
+			local hp = tonumber(model:GetAttribute("HP")) or 0
+			local maxHp = tonumber(model:GetAttribute("MaxHP")) or 0
+			local root = hp > 0 and maxHp > 0 and maxHp <= myMaxHp and critterRoot(model) or nil
+			if root then
+				local distance = (root.Position - origin).Magnitude
+				if distance <= limit and (not bestHp or hp < bestHp or (hp == bestHp and distance < bestDist)) then
+					bestModel, bestRoot, bestDist, bestHp = model, root, distance, hp
+				end
+			end
+		end
+	end
+	return bestModel, bestRoot, bestDist
+end
+
 local function stepBite()
 	local dungeonActive = inDungeon()
 	local questCombat = questNeeds("bugs") or (STATE.pvpQuest == true and questNeeds("ants"))
-	if (STATE.autoBite ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextBite then
+	if (STATE.autoBite ~= true and STATE.autoPvp ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextBite then
 		return
 	end
 	local character, root = living()
@@ -2026,7 +2084,10 @@ local function stepBite()
 	if ok and type(got) == "number" then
 		range = got + 4
 	end
-	local foe = nearestCritter(root.Position, range)
+	local foe = STATE.autoPvp == true and nearestPvpTarget(root.Position, range) or nil
+	if not foe then
+		foe = nearestCritter(root.Position, range)
+	end
 	if not foe and STATE.pvpQuest == true and questNeeds("ants") then
 		foe = nearestAnt(root.Position, range)
 	end
@@ -2034,7 +2095,9 @@ local function stepBite()
 	if type(entityId) ~= "number" then
 		return
 	end
-	farm.nextBite = os.clock() + 0.55
+	-- Match the native client's accepted cadence instead of firing exactly on the
+	-- server boundary, where normal network jitter can silently drop a bite.
+	farm.nextBite = os.clock() + (tonumber(Config.Combat and Config.Combat.BiteCooldown) or 0.55) + 0.03
 	pcall(function()
 		Net.Get("Bite"):FireServer(entityId)
 	end)
@@ -2068,7 +2131,7 @@ end
 local function stepAbility()
 	local dungeonActive = inDungeon()
 	local questCombat = questNeeds("bugs") or (STATE.pvpQuest == true and questNeeds("ants"))
-	if (STATE.autoAbility ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextAbility then
+	if (STATE.autoAbility ~= true and STATE.autoPvp ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextAbility then
 		return
 	end
 	local character, root = living()
@@ -2087,7 +2150,15 @@ local function stepAbility()
 	elseif type(info) == "table" and type(info.Radius) == "number" then
 		reach = info.Radius * length + (tonumber(info.RadiusAdd) or 0)
 	end
-	local _, foeRoot = nearestCritter(root.Position, reach)
+	local foeRoot
+	if STATE.autoPvp == true then
+		local _, pvpRoot = nearestPvpTarget(root.Position, reach)
+		foeRoot = pvpRoot
+	end
+	if not foeRoot then
+		local _, critterTarget = nearestCritter(root.Position, reach)
+		foeRoot = critterTarget
+	end
 	if not foeRoot and STATE.pvpQuest == true and questNeeds("ants") then
 		local _, antRoot = nearestAnt(root.Position, reach)
 		foeRoot = antRoot
@@ -3927,8 +3998,9 @@ local function installHub()
 	do
 		local farmBox = section(farmTab, "Food", "apple")
 		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. During Sugar Rush it stays in the ring")
-		toggle(farmBox, "Auto Bite", "autoBite", "Bites a bug when it is already in reach")
-		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your mutation ability on a nearby bug")
+		toggle(farmBox, "Auto Bite", "autoBite", "Bites an enemy in reach at the game's accepted maximum rate")
+		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your equipped mutation ability on a nearby enemy")
+		toggle(farmBox, "Smart PvP / Kill Aura", "autoPvp", "Chases the weakest real player whose maximum HP is not above yours; God Mode retreats earlier")
 		toggle(farmBox, "Chase Bugs", "chaseBugs", "Walks up to a bug so bite and the ability can land")
 		toggle(farmBox, "Smart Event Priority", "smartEvents", "Prioritises bosses, event creatures, treasure chests and event drops")
 		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))
@@ -4282,7 +4354,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.3.0"
+STATE.version = "1.4.0"
 
 if running() then
 	elevate()
