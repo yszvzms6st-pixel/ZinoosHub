@@ -2036,12 +2036,15 @@ function nearestAnt(origin, limit)
 end
 
 -- PvP is opt-in and deliberately avoids bad fights. Target the lowest-current-HP
--- real player whose maximum health is not above ours, then use distance as the
--- tiebreaker. Bots remain available to the separate quest helper.
+-- real player whose maximum health is not above ours and whose stage is inside
+-- the game's MercyGap protection, then use distance as the tiebreaker. Bots
+-- remain available to the separate quest helper.
 function nearestPvpTarget(origin, limit)
 	local character = LocalPlayer.Character
 	local myMaxHp = character and tonumber(character:GetAttribute("MaxHP")) or 0
-	if myMaxHp <= 0 then
+	local myStage = character and tonumber(character:GetAttribute("Stage")) or stateNumber("Stage")
+	local mercyGap = math.max(0, tonumber(Config.Combat and Config.Combat.MercyGap) or 2)
+	if myMaxHp <= 0 or myStage <= 0 then
 		return nil
 	end
 	local bestModel, bestRoot, bestDist, bestHp
@@ -2054,7 +2057,9 @@ function nearestPvpTarget(origin, limit)
 			and tonumber(model:GetAttribute("OwnerId")) ~= LocalPlayer.UserId then
 			local hp = tonumber(model:GetAttribute("HP")) or 0
 			local maxHp = tonumber(model:GetAttribute("MaxHP")) or 0
-			local root = hp > 0 and maxHp > 0 and maxHp <= myMaxHp and critterRoot(model) or nil
+			local stage = tonumber(model:GetAttribute("Stage")) or 0
+			local attackable = stage > 0 and stage >= myStage - mercyGap
+			local root = hp > 0 and maxHp > 0 and maxHp <= myMaxHp and attackable and critterRoot(model) or nil
 			if root then
 				local distance = (root.Position - origin).Magnitude
 				if distance <= limit and (not bestHp or hp < bestHp or (hp == bestHp and distance < bestDist)) then
@@ -4000,7 +4005,7 @@ local function installHub()
 		toggle(farmBox, "Auto Orb Farm", "autoOrb", "Steps you onto nearby food. During Sugar Rush it stays in the ring")
 		toggle(farmBox, "Auto Bite", "autoBite", "Bites an enemy in reach at the game's accepted maximum rate")
 		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your equipped mutation ability on a nearby enemy")
-		toggle(farmBox, "Smart PvP / Kill Aura", "autoPvp", "Chases the weakest real player whose maximum HP is not above yours; God Mode retreats earlier")
+		toggle(farmBox, "Smart PvP / Kill Aura", "autoPvp", "Chases the weakest attackable real player, skips stage-protected and stronger ants; God Mode retreats earlier")
 		toggle(farmBox, "Chase Bugs", "chaseBugs", "Walks up to a bug so bite and the ability can land")
 		toggle(farmBox, "Smart Event Priority", "smartEvents", "Prioritises bosses, event creatures, treasure chests and event drops")
 		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))
@@ -4354,7 +4359,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.0"
+STATE.version = "1.4.1"
 
 if running() then
 	elevate()

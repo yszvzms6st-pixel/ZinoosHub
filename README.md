@@ -92,7 +92,7 @@ Uses the same WindUI window as Throw Food For Animals. Pages: Home, Farm, Progre
 
 - **Auto Orb Farm** steps you onto nearby food. The game collects it once you are close enough. It does not grab food from across the map. While Sugar Rush is up it goes to the sugar ring and stays there, because the top 3 prizes are worth more than the food.
 - **Auto Bite** bites an enemy that is already in reach at the game's accepted maximum rate. **Auto Ability** uses your equipped mutation ability on a nearby enemy. **Chase Bugs** walks into range of bugs.
-- **Smart PvP / Kill Aura** is opt-in. It chases the lowest-health real player whose maximum HP is not above yours, bites at the native accepted rate, uses an equipped combat ability, and makes God Mode retreat earlier. It ignores stronger players and bots.
+- **Smart PvP / Kill Aura** is opt-in. It chases the lowest-health attackable real player whose maximum HP is not above yours, bites at the native accepted rate, uses an equipped combat ability, and makes God Mode retreat earlier. It ignores stronger players, bots, and players protected because they are more than the live game's `MercyGap` below your stage.
 - **Smart Event Priority** actively chases event bosses and creatures, including the Red Swarm, and handles Treasure Hunt chests. **Auto Collect Worms** collects Worm Rain drops.
 - **Auto Power-Ups** collects nearby temporary Speed, Mega Bite, Magnet, x2 Power and Shield pickups before they expire. **Auto Lost Eggs** finds all 20 hidden eggs for their DNA, mutation rolls and completion reward.
 - **Quest Objective Assist** runs the matching food, bug, evolve, roll, pet, worm and dungeon objective. PvP ant quests are a separate opt-in.
