@@ -415,13 +415,16 @@ local function plantIncome(plant)
 end
 
 local function indexCount()
+	-- Count like the game's INDEX button: Harvest and retired plants are
+	-- in your index list too but not in the main index.
 	local found, total = 0, 0
-	for _ in pairs(type(ClientState.index) == "table" and ClientState.index or {}) do
-		found += 1
-	end
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
 	for _, entry in ipairs(Balance.ByOdds or {}) do
 		if not (Balance.Retired and Balance.Retired[entry.name]) then
 			total += 1
+			if have[entry.name] then
+				found += 1
+			end
 		end
 	end
 	return found, total
@@ -3746,10 +3749,21 @@ local function installHub()
 	end)
 
 	if STATE.hideOnStart == true then
-		task.defer(function()
-			elevate()
-			pcall(Window.Close, Window)
-		end)
+		-- WindUI opens itself again just after it is made, so a deferred
+		-- Close alone left the menu open; close it again once it settles.
+		-- Only close while it is showing, so a close can never flip it open.
+		for _, delay in ipairs({ 0.8, 1.6, 3 }) do
+			task.delay(delay, function()
+				if not running() then
+					return
+				end
+				elevate()
+				local frame = Window.UIElements and Window.UIElements.Main
+				if typeof(frame) == "Instance" and frame.Parent and frame:IsA("GuiObject") and frame.Visible then
+					pcall(Window.Close, Window)
+				end
+			end)
+		end
 	end
 end
 
