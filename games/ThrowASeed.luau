@@ -100,7 +100,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.1"
+local VERSION = "1.5.2"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -148,6 +148,7 @@ local STATE = {
 	autoHarvestMoon = true,
 	autoHarvestBasket = true,
 	autoHarvestShop = true,
+	autoHarvestMutate = true,
 	-- Alerts
 	notifications = true,
 	notifyMinRarity = "Epic",
@@ -253,7 +254,7 @@ local SAVE_KEYS = {
 	"autoSeed", "autoBar", "autoCapacity", "cashReserve",
 	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin", "indexHunt", "historyFilter",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
-	"autoAdminAbuse", "autoAbuseDrops", "autoAbuseCrown", "autoPieFight", "autoHarvestMoon", "autoHarvestBasket", "autoHarvestShop",
+	"autoAdminAbuse", "autoAbuseDrops", "autoAbuseCrown", "autoPieFight", "autoHarvestMoon", "autoHarvestBasket", "autoHarvestShop", "autoHarvestMutate",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme", "redeemedCodes",
@@ -708,7 +709,7 @@ end
 -- climbs a ladder: StopTrain once, then throw from on the strip, then StopTrain
 -- again now and then, and as a last resort respawn the character.
 -- Since place v342 the server wants ~9-10 s between throws (it was ~6.6 s).
-local throwState = { lastOkSent = 0, sentAt = 0, learned = 9.4, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0, afterTrain = false, log = {} }
+local throwState = { lastOkSent = 0, sentAt = 0, learned = 10.2, floor = 0, floorUntil = 0, refusedRow = 0, needStop = true, lastStop = 0, lastRespawn = 0, afterTrain = false, log = {} }
 
 -- Catch history -------------------------------------------------------------------
 -- Every plant you catch, saved per account so it survives reloads and server
@@ -1890,7 +1891,11 @@ local function stepFarm()
 			throwState.lastOkSent = throwState.sentAt
 			throwState.refusedRow = 0
 			throwState.afterTrain = false
-			throwState.learned = math.max(6.2, throwState.learned - 0.05)
+			-- Creep back down slowly, but not below a wait the server just refused
+			-- (that cost one refused throw every ~6). The floor expires after
+			-- 20 min so a shorter server wait is still found.
+			local floor = os.clock() < throwState.floorUntil and throwState.floor or 6.2
+			throwState.learned = math.max(6.2, floor, throwState.learned - 0.05)
 			STATE.throwStatus = string.format("Threw %s · %d done", describePlant(result), stats.throws)
 			STATE.status = "Throwing"
 			return 0.1
@@ -1903,6 +1908,12 @@ local function stepFarm()
 			local row = throwState.refusedRow
 			if throwState.sentAt - throwState.lastOkSent < 15 then
 				-- Only a refusal close to the last throw says the wait is longer.
+				if row == 1 then
+					-- Only the first refusal of a run: later ones in a row can be
+					-- training or a stuck server, not the wait being too short.
+					throwState.floor = math.min(12, throwState.learned + 0.1)
+					throwState.floorUntil = os.clock() + 1200
+				end
 				throwState.learned = math.min(14, throwState.learned + 0.3)
 			end
 			if row == 2 or (row >= 10 and os.clock() - throwState.lastStop > 30) then
@@ -2748,6 +2759,45 @@ local function stepHarvest()
 		harvestWait = os.clock() + 8
 	end
 
+	-- Harvest Mutation (the last stand reward): x2 income on one placed plant,
+	-- for good. The game applies it with a prompt at the plant, so walk there
+	-- and put it on the plant earning the most that doesn't have one yet. The
+	-- plant records live on the plot even with Hide My Plants on.
+	if STATE.autoHarvestMutate == true then
+		local okItems, items = pcall(function()
+			return HttpService:JSONDecode(tostring(attr("Items") or "{}"))
+		end)
+		if okItems and type(items) == "table" and (tonumber(items.HarvestMutation) or 0) > 0 then
+			local plots = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Plots")
+			local plot = plots and plots:FindFirstChild(tostring(attr("Plot") or ""))
+			local plants = plot and plot:FindFirstChild("Plants")
+			local best
+			for _, record in ipairs(plants and plants:GetChildren() or {}) do
+				if record:IsA("Configuration") and record:GetAttribute("Owner") == LocalPlayer.UserId and record:GetAttribute("Harvest") ~= true
+					and (not best or (tonumber(record:GetAttribute("Income")) or 0) > (tonumber(best:GetAttribute("Income")) or 0)) then
+					best = record
+				end
+			end
+			if best then
+				local at = Vector3.new(tonumber(best:GetAttribute("PosX")) or 0, tonumber(best:GetAttribute("PosY")) or 0, tonumber(best:GetAttribute("PosZ")) or 0)
+				local name = tostring(best:GetAttribute("Plant") or "your best plant")
+				withTrip(CFrame.lookAt(at + Vector3.new(0, 3, 5), at + Vector3.new(0, 3, 0)), function()
+					local ok, result = request("HarvestMutate", { id = best.Name })
+					if ok then
+						noteActivity("Harvest Mutation put on " .. name .. " (x2 money)")
+						notify("Harvest Mutation", name .. " now makes double money")
+						table.insert(notes, "Harvest Mutation on " .. name)
+					else
+						table.insert(notes, "Harvest Mutation: " .. tostring(result or "try again"))
+					end
+				end)
+				harvestWait = os.clock() + 15
+			else
+				table.insert(notes, "Harvest Mutation ready: place a plant first")
+			end
+		end
+	end
+
 	if nextReward then
 		table.insert(notes, string.format("Next stand reward %d/%d: %d Cranberries", step + 1, #Balance.Harvest.Stand, nextReward.price))
 	else
@@ -3455,6 +3505,7 @@ local function installHub()
 	toggle(harvestBox, "Auto Harvest Moon", "autoHarvestMoon", "Forces throwing during each moon and targets an active beam, preferring zones missing from your Harvest Index")
 	toggle(harvestBox, "Auto Collect Cranberry Basket", "autoHarvestBasket", "Collects the basket on your plot whenever it has Cranberries")
 	toggle(harvestBox, "Auto Buy Harvest Stand", "autoHarvestShop", "Buys all seven limited rewards in order whenever you have enough Cranberries, including the final Harvest Mutation")
+	toggle(harvestBox, "Auto Use Harvest Mutation", "autoHarvestMutate", "Walks to your best placed plant and gives it the Harvest Mutation (x2 money for good)")
 
 	-- Upgrades
 	local upgradeBox = section(upgradeTab, "Auto Buy", "shopping-cart")
@@ -3607,7 +3658,7 @@ local function installHub()
 				autoSell = false, sellRarities = { "Common" }, keepMutations = true, keepBigSizes = true, smartStorage = false, keepTradeDupes = true, tradeSpares = 3, keepMutationMin = "Ruby and up", indexHunt = false, historyFilter = "All",
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				autoAdminAbuse = true, autoAbuseDrops = true, autoAbuseCrown = true, autoPieFight = true,
-				autoHarvestMoon = true, autoHarvestBasket = true, autoHarvestShop = true,
+				autoHarvestMoon = true, autoHarvestBasket = true, autoHarvestShop = true, autoHarvestMutate = true,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
 			}
