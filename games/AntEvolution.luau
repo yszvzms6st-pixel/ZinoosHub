@@ -1837,6 +1837,38 @@ local function stepFarm()
 	if stepGodMode(character, root) then
 		return
 	end
+	-- The Anteater locks its tongue onto one ant, then grabs whoever is still at
+	-- that spot. Step sideways out of the line while it is aiming at us.
+	local dodge = farm.anteaterDodge
+	if dodge and STATE.smartEvents == true and os.clock() < dodge.untilT then
+		local from = dodge.at
+		local bossRoot = nil
+		local critters = Workspace:FindFirstChild("Ants") and Workspace.Ants:FindFirstChild("Critters")
+		if critters and dodge.boss then
+			for _, model in ipairs(critters:GetChildren()) do
+				if model:GetAttribute("EntityId") == dodge.boss then
+					bossRoot = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+					break
+				end
+			end
+		end
+		local away
+		if bossRoot then
+			local line = Vector3.new(root.Position.X - bossRoot.Position.X, 0, root.Position.Z - bossRoot.Position.Z)
+			if line.Magnitude > 0.5 then
+				away = Vector3.new(-line.Z, 0, line.X).Unit * (dodge.side or 1)
+			end
+		end
+		if not away and typeof(from) == "Vector3" then
+			local off = Vector3.new(root.Position.X - from.X, 0, root.Position.Z - from.Z)
+			if off.Magnitude > 0.5 then
+				away = off.Unit
+			end
+		end
+		away = away or root.CFrame.RightVector
+		stepToward(character, root, root.Position + away * 30, "Dodging the Anteater", "It locked onto you")
+		return
+	end
 	if root.Position.Y < voidY() then
 		putBack(root)
 		return
@@ -1884,8 +1916,14 @@ local function stepFarm()
 		or eventKey == "SpiderNest"
 		or eventKey == "LadybugSwarm"
 		or eventKey == "RedSwarm"
+		or eventKey == "Anteater"
 	if STATE.chaseBugs == true or questNeeds("bugs") or dungeonActive or (STATE.smartEvents == true and eventHasTarget) then
 		local model, foeRoot, foeDist = nearestCritter(root.Position, 140)
+		if foeRoot and eventKey == "Anteater" and STATE.chaseBugs ~= true and not questNeeds("bugs") and not dungeonActive
+			and model:GetAttribute("EntityId") ~= tonumber(globalValue("BossId")) then
+			-- Only the Anteater itself is worth leaving the food for.
+			foeRoot = nil
+		end
 		if foeRoot then
 			local length = tonumber(character:GetAttribute("Length")) or 10
 			local reach = 18
@@ -1997,6 +2035,7 @@ function nearestCritter(origin, limit)
 		SpiderNest = "spider",
 		LadybugSwarm = "ladybug",
 		RedSwarm = "fireant",
+		Anteater = "anteater",
 	}
 	for _, model in ipairs(critters:GetChildren()) do
 		if model:IsA("Model") and (tonumber(model:GetAttribute("HP")) or 0) > 0 then
@@ -3011,6 +3050,44 @@ trackConnection(Net.Get("OrbTaken").OnClientEvent:Connect(function(payload)
 	end
 end))
 refreshOrbs()
+
+do
+	local ok, anteaterFx = pcall(Net.Get, "AnteaterFx")
+	if ok and anteaterFx then
+		trackConnection(anteaterFx.OnClientEvent:Connect(function(kind, data)
+			if not running() or type(data) ~= "table" then
+				return
+			end
+			local character = LocalPlayer.Character
+			local me = tonumber(character and character:GetAttribute("EntityId")) or LocalPlayer.UserId
+			if kind == "aim" then
+				if tonumber(data.v) == me then
+					farm.anteaterDodge = {
+						boss = tonumber(data.b),
+						untilT = os.clock() + (tonumber(data.s) or 1.2) + 0.6,
+						side = math.random() < 0.5 and -1 or 1,
+					}
+				end
+			elseif kind == "lock" then
+				if farm.anteaterDodge and typeof(data.at) == "Vector3" then
+					farm.anteaterDodge.at = data.at
+				end
+			elseif kind == "grab" then
+				-- Grabs of other ants must not end our own dodge.
+				if tonumber(data.v) == me then
+					farm.anteaterDodge = nil
+				end
+			elseif kind == "miss" then
+				local dodge = farm.anteaterDodge
+				if dodge and typeof(dodge.at) == "Vector3" and typeof(data.at) == "Vector3" and (dodge.at - data.at).Magnitude < 15 then
+					farm.anteaterDodge = nil
+				end
+			elseif kind == "down" or kind == "left" then
+				farm.anteaterDodge = nil
+			end
+		end))
+	end
+end
 
 -- Movement helpers.
 trackConnection(UserInputService.JumpRequest:Connect(function()
@@ -4032,7 +4109,7 @@ local function installHub()
 		toggle(farmBox, "Auto Ability", "autoAbility", "Uses your equipped mutation ability on a nearby enemy")
 		toggle(farmBox, "Smart PvP / Kill Aura", "autoPvp", "Chases the weakest attackable real player, skips stage-protected and stronger ants; God Mode retreats earlier")
 		toggle(farmBox, "Chase Bugs", "chaseBugs", "Walks up to a bug so bite and the ability can land")
-		toggle(farmBox, "Smart Event Priority", "smartEvents", "Prioritises bosses, event creatures, treasure chests and event drops")
+		toggle(farmBox, "Smart Event Priority", "smartEvents", "Prioritises bosses (Mantis, Anteater), event creatures, treasure chests and event drops, and dodges the Anteater's tongue")
 		farmInfo = info(farmBox, "Status", tostring(STATE.status or "Starting"))
 
 		local eventBox = section(farmTab, "Events & Quests", "calendar-clock")
@@ -4384,7 +4461,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.2"
+STATE.version = "1.4.3"
 
 if running() then
 	elevate()
