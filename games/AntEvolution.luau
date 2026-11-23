@@ -1029,8 +1029,35 @@ local pulseAntiAfk = function()
 		virtual:CaptureController()
 		virtual:ClickButton2(Vector2.new(-1, -1))
 	end)
-	STATE.antiAfkOperational = ok
-	return ok
+	-- The game has its own AFK check (Ant.Client.AfkRejoin: 19.5 minutes
+	-- with no UserInputService input, then it moves you to another server).
+	-- VirtualUser does not count for it, so also send a mouse move to where
+	-- the mouse already is, and reset the game's own timer as a backup.
+	local reset = pcall(function()
+		local mouse = UserInputService:GetMouseLocation()
+		game:GetService("VirtualInputManager"):SendMouseMoveEvent(mouse.X, mouse.Y, game)
+	end)
+	pcall(function()
+		local afk = ReplicatedStorage:FindFirstChild("Ant")
+		afk = afk and afk:FindFirstChild("Client")
+		afk = afk and afk:FindFirstChild("AfkRejoin")
+		if not afk or typeof(debug.getupvalues) ~= "function" then
+			return
+		end
+		local module = require(afk) :: any
+		if type(module) ~= "table" or type(module.Start) ~= "function" then
+			return
+		end
+		for _, value in pairs(debug.getupvalues(module.Start)) do
+			if type(value) == "table" and type(value.lastInput) == "number" then
+				value.lastInput = os.clock()
+				value.asked = false
+				reset = true
+			end
+		end
+	end)
+	STATE.antiAfkOperational = ok or reset
+	return ok or reset
 end
 
 local function shortNumber(value)
@@ -4461,7 +4488,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.3"
+STATE.version = "1.4.4"
 
 if running() then
 	elevate()
@@ -4525,6 +4552,8 @@ pcall(STATE.apply3d)
 pcall(STATE.applyFpsBoost)
 
 task.spawn(function()
+	task.wait(5)
+	pulseAntiAfk()
 	while running() do
 		task.wait(4 * 60)
 		pulseAntiAfk()
