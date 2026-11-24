@@ -1419,10 +1419,26 @@ local function stepGodMode(character, root)
 		return false
 	end
 	-- Since v1.5.0 God Mode never teleports (it used to park the ant 180 studs
-	-- up in the air). It stops fighting and runs away on foot from whatever is
-	-- near, so the game's own regeneration (after RegenDelay out of combat)
-	-- brings the health back, then it goes back to farming.
+	-- up in the air). v1.5.1: it sprints to the spawn safe zone
+	-- (Config.SafeZone, radius 80; no damage there once the 6 s CombatTag runs
+	-- out), heals with the game's own regen, then goes back to farming. Just
+	-- walking away was not enough: a chaser killed the ant 3 times, and every
+	-- death costs Combat.DeathLoss (25%).
+	local function inSafeZone(position)
+		local ok, safe = pcall(Config.InSafeZone, position)
+		return ok and safe == true
+	end
 	local function getAway()
+		if not inDungeon() and farm.walkTo then
+			local spot = spawnStand()
+			if not inSafeZone(root.Position) or Vector3.new(root.Position.X - spot.X, 0, root.Position.Z - spot.Z).Magnitude > 45 then
+				farm.walkTo(character, root, spot, 12)
+				farm.godSafe = false
+				return "God Mode: running to the safe zone"
+			end
+			farm.godSafe = true
+			return "God Mode: healing in the safe zone"
+		end
 		local threat = farm.threatPos
 		local away
 		if typeof(threat) == "Vector3" then
@@ -1433,9 +1449,9 @@ local function stepGodMode(character, root)
 		end
 		if away and farm.walkTo then
 			farm.walkTo(character, root, root.Position + away * 40, 3)
-			return true
+			return "God Mode: getting away"
 		end
-		return false
+		return "God Mode healing"
 	end
 	if farm.godRecovering == true then
 		if ratio >= 0.99 then
@@ -1446,18 +1462,19 @@ local function stepGodMode(character, root)
 			return true
 		end
 		STATE.godRecovering = true
-		STATE.status = getAway() and "God Mode: getting away" or "God Mode healing"
+		STATE.status = getAway()
 		STATE.detail = string.format("HP %d/%d  ·  %d%%", math.floor(hp or 0), math.floor(maxHp or 0), math.floor(ratio * 100))
 		return true
 	end
-	local escapeAt = STATE.autoPvp == true and 0.82 or 0.72
+	-- One hit can take up to Combat.MaxHitShare (34%) and the run to spawn
+	-- takes a few seconds, so leave earlier than the old teleport did.
+	local escapeAt = STATE.autoPvp == true and 0.88 or 0.78
 	if ratio <= escapeAt then
 		farm.godRecovering = true
 		farm.godEscapes += 1
 		STATE.godRecovering = true
 		STATE.godEscapes = farm.godEscapes
-		getAway()
-		STATE.status = "God Mode: getting away"
+		STATE.status = getAway()
 		STATE.detail = string.format("HP %d/%d  ·  healing safely", math.floor(hp or 0), math.floor(maxHp or 0))
 		return true
 	end
@@ -2321,6 +2338,10 @@ function nearestPvpTarget(origin, limit)
 			local stage = tonumber(model:GetAttribute("Stage")) or 0
 			local attackable = stage > 0 and stage >= myStage - mercyGap
 			local root = hp > 0 and maxHp > 0 and maxHp <= myMaxHp and attackable and critterRoot(model) or nil
+			if root and select(2, pcall(Config.InSafeZone, root.Position)) == true then
+				-- Nobody can be hurt inside the spawn safe zone.
+				root = nil
+			end
 			if root and farm.pvpSkip and (farm.pvpSkip[model] or 0) > os.clock() then
 				-- Our bites were not landing on this one (spawn safe bubble etc.).
 				root = nil
@@ -4536,7 +4557,7 @@ local function installHub()
 
 	do
 		local safetyBox = section(playerTab, "Survival", "shield-check")
-		toggle(safetyBox, "God Mode", "godMode", "At low HP it stops fighting and walks away from danger until the game's regen heals you, then carries on")
+		toggle(safetyBox, "God Mode", "godMode", "At low HP it stops fighting and runs to the spawn safe zone, heals there, then carries on")
 		toggle(safetyBox, "Block Robux Capsule", "blockRobuxCapsule", "Stops the game's +3 EVO capsule from opening purchase prompts while auto farming")
 
 		local moveBox = section(playerTab, "Movement", "footprints")
@@ -4728,7 +4749,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.5.0"
+STATE.version = "1.5.1"
 
 if running() then
 	elevate()
