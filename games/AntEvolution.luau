@@ -1486,14 +1486,14 @@ local function sugarCube()
 	return nil
 end
 
-local function stepOnto(character, root, aim, lookAt)
+local function stepOnto(character, root, aim, lookAt, allowDrop)
 	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
 	if flat.Magnitude < 1.5 then
 		return true
 	end
 	local point = root.Position + flat.Unit * math.min(flat.Magnitude, 14)
 	local ground = groundAt(point, character, root.Position.Y)
-	if not ground or math.abs(ground.Y - root.Position.Y) > 18 then
+	if not ground or (ground.Y - root.Position.Y > 18) or (not allowDrop and root.Position.Y - ground.Y > 18) then
 		return false
 	end
 	local goal = standOn(ground, character, root)
@@ -1516,7 +1516,62 @@ local function stepSugar(character, root, cube)
 		return
 	end
 	local stand = center + (flat.Magnitude > 1 and flat.Unit or Vector3.new(1, 0, 0)) * 8
+	-- A canyon wall or cliff between us and the cube used to park the ant on
+	-- "blocked" for the whole event. Once the straight line is blocked, walk a
+	-- PathfindingService route (worked out in the background) to the ring.
+	local route = farm.sugarRoute
+	if route and ((route.goal - stand).Magnitude > 20 or os.clock() - route.at > 12) then
+		route = nil
+		farm.sugarRoute = nil
+	end
+	if route and route.points then
+		local nextPoint = route.points[route.index]
+		while nextPoint and Vector3.new(nextPoint.X - root.Position.X, 0, nextPoint.Z - root.Position.Z).Magnitude < 3 do
+			route.index += 1
+			nextPoint = route.points[route.index]
+		end
+		if nextPoint and stepOnto(character, root, nextPoint, nextPoint, true) then
+			STATE.status = "Going around to the sugar ring"
+			STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
+			return
+		end
+		farm.sugarRoute = nil
+	end
 	if not stepOnto(character, root, stand, center) then
+		if not farm.sugarRoute and os.clock() >= (farm.sugarRouteRetry or 0) then
+			local pending = { goal = stand, at = os.clock() }
+			farm.sugarRoute = pending
+			farm.sugarRouteRetry = os.clock() + 3
+			local from = root.Position
+			task.spawn(function()
+				local ok, points = pcall(function()
+					local path = game:GetService("PathfindingService"):CreatePath({
+						AgentRadius = 2,
+						AgentHeight = 4,
+						AgentCanJump = true,
+						WaypointSpacing = 8,
+					})
+					path:ComputeAsync(from, stand)
+					if path.Status ~= Enum.PathStatus.Success then
+						return nil
+					end
+					local list = {}
+					for _, waypoint in ipairs(path:GetWaypoints()) do
+						list[#list + 1] = waypoint.Position
+					end
+					return list
+				end)
+				if farm.sugarRoute == pending then
+					if ok and type(points) == "table" and #points > 0 then
+						pending.points = points
+						pending.index = 1
+						pending.at = os.clock()
+					else
+						farm.sugarRoute = nil
+					end
+				end
+			end)
+		end
 		STATE.status = "Path to the sugar cube is blocked"
 		STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
 		return
@@ -2700,12 +2755,14 @@ local function stepPassClaims()
 	local weekly = type(bp) == "table" and bp.w or nil
 	if type(weekly) == "table" and type(weekly.q) == "table" then
 		local complete = 0
-		for _, row in ipairs(weekly.q) do
+		for index, row in ipairs(weekly.q) do
 			if type(row) == "table" then
 				if row[4] == 1 then
 					complete += 1
 				elseif (tonumber(row[3]) or 0) >= (tonumber(row[2]) or math.huge) then
-					local okClaim, claimResult = invokeResult("PassAction", "weekly", row[1])
+					-- The server takes the quest's slot number (1..n), not its key:
+					-- a key gets "Pick a quest!" (place v502).
+					local okClaim, claimResult = invokeResult("PassAction", "weekly", index)
 					if remoteAccepted(okClaim, claimResult) then
 						complete += 1
 						noteActivity("Claimed a weekly quest")
@@ -4488,7 +4545,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.4"
+STATE.version = "1.4.5"
 
 if running() then
 	elevate()
