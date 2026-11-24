@@ -2821,6 +2821,16 @@ local function stepMole()
 	if stateNumber("Worms") - (tonumber(STATE.wormReserve) or 0) < (tonumber(item.cost) or math.huge) then
 		return
 	end
+	-- Boosts stack their time on the server, so buying them all at once would
+	-- bank hours of boost that a cap could throw away. Buy the next one only
+	-- when the running boost is about to end, so it stays on without a gap.
+	local boost = type(item.reward) == "table" and item.reward.boost or nil
+	if type(boost) == "table" and boost.kind then
+		local left = (tonumber(LocalPlayer:GetAttribute("BoostEnd_" .. tostring(boost.kind))) or 0) - os.time()
+		if left > 45 then
+			return
+		end
+	end
 	local sent, result = invokeResult("MoleBuy", item.key)
 	if remoteAccepted(sent, result) then
 		noteActivity("Traded worms for " .. tostring(item.name or item.key))
@@ -4548,7 +4558,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.6"
+STATE.version = "1.4.7"
 
 if running() then
 	elevate()
