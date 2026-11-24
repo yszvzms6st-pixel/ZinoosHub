@@ -3742,31 +3742,43 @@ if chunk then chunk() end
 	end))
 end
 
-local reconnectPending = false
+-- Auto Reconnect on Kick. v1.5.5: it used to try ONE teleport, only when
+-- GuiService.ErrorMessageChanged fired; on 2026-11-24 05:58 a kick left the
+-- client on the home screen for 5 hours with no attempt at all. Now any sign
+-- of a disconnect (the error prompt, or the ClientReplicator going away) starts
+-- a loop that keeps trying every 10 s until the teleport takes us away.
+local reconnecting = false
+local function startReconnect()
+	if reconnecting or STATE.autoReconnect ~= true then
+		return
+	end
+	reconnecting = true
+	task.spawn(function()
+		task.wait(2)
+		for _ = 1, 90 do
+			if not running() or STATE.autoReconnect ~= true then
+				break
+			end
+			pcall(STATE.queueReload)
+			pcall(function()
+				TeleportService:Teleport(game.PlaceId, LocalPlayer)
+			end)
+			task.wait(10)
+		end
+		reconnecting = false
+	end)
+end
 pcall(function()
 	trackConnection(GuiService.ErrorMessageChanged:Connect(function(message)
-		if STATE.autoReconnect == true and reconnectPending ~= true and type(message) == "string" and message ~= "" then
-			reconnectPending = true
-			task.delay(2, function()
-				if not running() or STATE.autoReconnect ~= true then
-					reconnectPending = false
-					return
-				end
-				pcall(STATE.queueReload)
-				local ok = pcall(function()
-					TeleportService:Teleport(game.PlaceId, LocalPlayer)
-				end)
-				if not ok then
-					reconnectPending = false
-				else
-					task.delay(10, function()
-						if running() then
-							reconnectPending = false
-						end
-					end)
-				end
-			end)
+		if type(message) == "string" and message ~= "" then
+			startReconnect()
 		end
+	end))
+end)
+pcall(function()
+	local networkClient = game:GetService("NetworkClient")
+	trackConnection(networkClient.ChildRemoved:Connect(function()
+		startReconnect()
 	end))
 end)
 
@@ -4902,7 +4914,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.5.4"
+STATE.version = "1.5.5"
 
 if running() then
 	elevate()
