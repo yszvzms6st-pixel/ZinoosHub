@@ -2761,17 +2761,20 @@ local function stepPassClaims()
 					complete += 1
 				elseif (tonumber(row[3]) or 0) >= (tonumber(row[2]) or math.huge) then
 					-- The server takes the quest's slot number (1..n), not its key:
-					-- a key gets "Pick a quest!" (place v502).
+					-- a key gets "Pick a quest!" (place v502). PassAction also has a
+					-- short per-player cooldown: a call straight after claimAll gets
+					-- "Slow down!", so wait before every call.
+					task.wait(1.25)
 					local okClaim, claimResult = invokeResult("PassAction", "weekly", index)
 					if remoteAccepted(okClaim, claimResult) then
 						complete += 1
 						noteActivity("Claimed a weekly quest")
 					end
-					task.wait(0.7)
 				end
 			end
 		end
 		if complete >= #weekly.q and weekly.b ~= 1 then
+			task.wait(1.25)
 			invokeResult("PassAction", "weeklyBonus")
 		end
 	end
@@ -4545,7 +4548,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.5"
+STATE.version = "1.4.6"
 
 if running() then
 	elevate()
