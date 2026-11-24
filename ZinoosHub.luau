@@ -12,6 +12,7 @@ local GAMES = {
 	{ name = "Throw a Seed", file = "ThrowASeed.luau", gameId = 10775182046 },
 	{ name = "Volley Bomb", file = "VolleyBomb.luau", gameId = 10774204862 },
 	{ name = "Ant Evolution", file = "AntEvolution.luau", gameId = 10773487349 },
+	{ name = "Fish for Secret Animals", file = "FishSecretAnimals.luau", gameId = 10774303559 },
 }
 
 local entry = nil
