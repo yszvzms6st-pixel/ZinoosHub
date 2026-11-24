@@ -97,6 +97,7 @@ local STATE = {
 	flySpeed = 60,
 	noPausePopup = true,
 	autoReconnect = false,
+	autoReload = true,
 	disable3d = false,
 	fpsBoost = false,
 	hideOnStart = false,
@@ -220,6 +221,7 @@ local FLAG_KEYS = {
 	ChaseBugs = "chaseBugs",
 	NoPausePopup = "noPausePopup",
 	AutoReconnect = "autoReconnect",
+	AutoReload = "autoReload",
 	Disable3d = "disable3d",
 	FpsBoost = "fpsBoost",
 	HideOnStart = "hideOnStart",
@@ -1624,10 +1626,123 @@ local function liveTarget(origin)
 	return pickOrb(origin)
 end
 
+do
+	-- groundAt only looks straight down, so a wall in front (a leaderboard, a
+	-- building, a trunk, a cliff face) is invisible to it: the ant was CFramed
+	-- into the wall and physics pushed it straight back, forever (seen live
+	-- with a Treasure Hunt chest behind Board_Power). Spot the wall with a
+	-- forward ray and walk a PathfindingService route around it instead.
+	farm.wallAhead = function(character, root, point)
+		local from = root.Position
+		local flat = Vector3.new(point.X - from.X, 0, point.Z - from.Z)
+		local length = math.min(flat.Magnitude - 3, 16)
+		if length < 2 then
+			return false
+		end
+		local hit = Workspace:Raycast(from, flat.Unit * length, rayFilter(character))
+		if not hit or math.abs(hit.Normal.Y) >= 0.5 then
+			return false
+		end
+		local part = hit.Instance
+		if part:IsA("BasePart") and not part.CanCollide then
+			return false
+		end
+		local model = part:FindFirstAncestorOfClass("Model")
+		if model and model:FindFirstChildOfClass("Humanoid") then
+			return false
+		end
+		return true
+	end
+
+	farm.routeStep = function(character, root, point)
+		local now = os.clock()
+		local route = farm.route
+		if route and ((route.goal - point).Magnitude > 20 or now - route.at > 12) then
+			route = nil
+			farm.route = nil
+		end
+		if route and route.points then
+			local nextPoint = route.points[route.index]
+			while nextPoint and Vector3.new(nextPoint.X - root.Position.X, 0, nextPoint.Z - root.Position.Z).Magnitude < 3 do
+				route.index += 1
+				nextPoint = route.points[route.index]
+			end
+			if not nextPoint then
+				farm.route = nil
+				return false
+			end
+			local flat = Vector3.new(nextPoint.X - root.Position.X, 0, nextPoint.Z - root.Position.Z)
+			local stepTo = root.Position + flat.Unit * math.min(flat.Magnitude, 14)
+			local ground = groundAt(stepTo, character, math.max(root.Position.Y, nextPoint.Y))
+			if not ground or ground.Y - root.Position.Y > 18 then
+				farm.route = nil
+				return false
+			end
+			local goal = standOn(ground, character, root)
+			local look = Vector3.new(nextPoint.X, goal.Y, nextPoint.Z)
+			root.AssemblyLinearVelocity = Vector3.zero
+			if (look - goal).Magnitude < 1 then
+				root.CFrame = CFrame.new(goal)
+			else
+				root.CFrame = CFrame.lookAt(goal, look)
+			end
+			return true
+		end
+		if route then
+			-- Still working the route out: hold still rather than bump the wall.
+			return true
+		end
+		if now < (farm.routeRetry or 0) then
+			return false
+		end
+		local pending = { goal = point, at = now }
+		farm.route = pending
+		farm.routeRetry = now + 3
+		local from = root.Position
+		task.spawn(function()
+			local ok, points = pcall(function()
+				local path = game:GetService("PathfindingService"):CreatePath({
+					AgentRadius = 3,
+					AgentHeight = 5,
+					AgentCanJump = true,
+					WaypointSpacing = 8,
+				})
+				path:ComputeAsync(from, point)
+				if path.Status ~= Enum.PathStatus.Success then
+					return nil
+				end
+				local list = {}
+				for _, waypoint in ipairs(path:GetWaypoints()) do
+					list[#list + 1] = waypoint.Position
+				end
+				return list
+			end)
+			if farm.route == pending then
+				if ok and type(points) == "table" and #points > 0 then
+					pending.points = points
+					pending.index = 1
+					pending.at = os.clock()
+				else
+					farm.route = nil
+				end
+			end
+		end)
+		return true
+	end
+end
+
 local function stepToward(character, root, point, status, detail)
 	local offset = Vector3.new(point.X - root.Position.X, 0, point.Z - root.Position.Z)
 	if offset.Magnitude < 1 then
 		return true
+	end
+	local route = farm.route
+	if (route and (route.goal - point).Magnitude <= 20) or farm.wallAhead(character, root, point) then
+		if farm.routeStep(character, root, point) then
+			STATE.status = status
+			STATE.detail = detail
+			return true
+		end
 	end
 	local aim = point
 	if offset.Magnitude > 6 then
@@ -3406,6 +3521,48 @@ local function hidePausePopup()
 	end
 end
 
+-- Auto reload: when this client is teleported (Auto Reconnect, the game's own
+-- AFK rejoin, a server hop, an update shutdown), queue a small script that
+-- loads this hub again in the new server. Same as the Throw Food hub.
+do
+	local queueTeleport = queue_on_teleport
+		or (syn and syn.queue_on_teleport)
+		or (fluxus and fluxus.queue_on_teleport)
+	local RELOAD_BODY = [==[
+if not game:IsLoaded() then game.Loaded:Wait() end
+local env = getgenv()
+local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+if game.PlaceId ~= __PLACE__ then
+	if q and type(env.ZinoosReloadSrc) == "string" then
+		pcall(q, "getgenv().ZinoosReloadSrc = " .. string.format("%q", env.ZinoosReloadSrc) .. "\nloadstring(getgenv().ZinoosReloadSrc)()")
+	end
+	return
+end
+task.wait(4)
+if env.ZinoosAntGen ~= nil then return end
+local ok, source = pcall(function()
+	return game:HttpGet("https://raw.githubusercontent.com/yszvzms6st-pixel/ZinoosHub/refs/heads/main/games/AntEvolution.luau")
+end)
+if not ok or type(source) ~= "string" or #source < 1000 or env.ZinoosAntGen ~= nil then return end
+local chunk = loadstring(source, "=ZinoosHub/AntEvolution.luau")
+if chunk then chunk() end
+]==]
+	RELOAD_BODY = string.gsub(RELOAD_BODY, "__PLACE__", tostring(game.PlaceId))
+	STATE.autoReloadAvailable = typeof(queueTeleport) == "function"
+	local reloadQueued = false
+	STATE.queueReload = function()
+		if reloadQueued or not running() or STATE.autoReload ~= true or not STATE.autoReloadAvailable then
+			return
+		end
+		reloadQueued = pcall(queueTeleport, "getgenv().ZinoosReloadSrc = " .. string.format("%q", RELOAD_BODY) .. "\nloadstring(getgenv().ZinoosReloadSrc)()")
+	end
+	trackConnection(LocalPlayer.OnTeleport:Connect(function(teleportState)
+		if teleportState == Enum.TeleportState.Started or teleportState == Enum.TeleportState.InProgress then
+			STATE.queueReload()
+		end
+	end))
+end
+
 local reconnectPending = false
 pcall(function()
 	trackConnection(GuiService.ErrorMessageChanged:Connect(function(message)
@@ -3416,6 +3573,7 @@ pcall(function()
 					reconnectPending = false
 					return
 				end
+				pcall(STATE.queueReload)
 				local ok = pcall(function()
 					TeleportService:Teleport(game.PlaceId, LocalPlayer)
 				end)
@@ -4392,6 +4550,7 @@ local function installHub()
 		local clientBox = section(playerTab, "Performance & AFK", "cpu")
 		toggle(clientBox, "Anti AFK", "antiAfk")
 		toggle(clientBox, "Auto Reconnect on Kick", "autoReconnect")
+		toggle(clientBox, "Reload Hub After Server Change", "autoReload", "Loads the hub again by itself after a rejoin, server hop or reconnect")
 		toggle(clientBox, "Hide Roblox Pause Popup", "noPausePopup")
 		toggle(clientBox, "Potato Mode", "fpsBoost", "Suppresses particles, trails, beams, lights, decals, water and post effects while keeping the game and hub visible")
 		toggle(clientBox, "AFK Black Screen", "disable3d", "Stops drawing the world")
@@ -4558,7 +4717,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.7"
+STATE.version = "1.4.8"
 
 if running() then
 	elevate()
