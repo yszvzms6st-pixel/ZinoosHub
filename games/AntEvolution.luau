@@ -81,6 +81,7 @@ local STATE = {
 	autoDungeon = false,
 	autoCosmeticCrates = false,
 	cosmeticSlot = "Aura",
+	godStyle = "Sky",
 	autoBestAura = false,
 	blockRobuxCapsule = true,
 	godMode = true,
@@ -244,6 +245,7 @@ local CHOICES = {
 	WormReserve = { key = "wormReserve", options = WORM_RESERVE_OPTIONS },
 	MoleItem = { key = "moleItem", options = MOLE_OPTIONS },
 	CosmeticSlot = { key = "cosmeticSlot", options = COSMETIC_SLOTS },
+	GodStyle = { key = "godStyle", options = { "Sky", "Safe Zone" } },
 	RollTargetRarity = { key = "rollTargetRarity", options = { "Off", "Legendary", "Mythic", "Secret" } },
 	RollTargetMutation = { key = "rollTargetMutation" },
 	PetTarget = { key = "petTarget" },
@@ -1411,11 +1413,65 @@ end
 local function stepGodMode(character, root)
 	local ratio, hp, maxHp = healthRatio(character)
 	if STATE.godMode ~= true then
+		if farm.godHold then
+			-- Switched off while waiting up in the sky: come back down.
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.CFrame = CFrame.new(farm.godReturn or spawnStand())
+		end
 		farm.godRecovering = false
+		farm.godHold = nil
+		farm.godReturn = nil
 		STATE.godRecovering = false
 		return false
 	end
 	if not ratio then
+		return false
+	end
+	if STATE.godStyle ~= "Safe Zone" then
+		-- "Sky" escape (the original God Mode, brought back on 2026-11-24 at the
+		-- user's request after walking escapes still got caught): teleport 180
+		-- studs up out of reach, wait there while the game's regen heals, then
+		-- teleport back to spawn. It never dies, but these are big instant
+		-- teleports, the kind of movement the game's movement check can kick for.
+		if farm.godRecovering == true then
+			if ratio >= 0.99 then
+				if farm.godHold then
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.CFrame = CFrame.new(farm.godReturn or spawnStand())
+				end
+				farm.godRecovering = false
+				farm.godHold = nil
+				farm.godReturn = nil
+				STATE.godRecovering = false
+				STATE.status = "God Mode recovered"
+				STATE.detail = string.format("HP %d/%d", math.floor(hp or 0), math.floor(maxHp or 0))
+				return true
+			end
+			local hold = farm.godHold or Vector3.new(root.Position.X, math.max(root.Position.Y + 180, 180), root.Position.Z)
+			farm.godHold = hold
+			farm.godReturn = farm.godReturn or spawnStand()
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.CFrame = CFrame.new(hold)
+			STATE.godRecovering = true
+			STATE.status = "God Mode healing"
+			STATE.detail = string.format("HP %d/%d  ·  %d%%", math.floor(hp or 0), math.floor(maxHp or 0), math.floor(ratio * 100))
+			return true
+		end
+		local skyEscapeAt = STATE.autoPvp == true and 0.82 or 0.72
+		if ratio <= skyEscapeAt then
+			farm.godRecovering = true
+			farm.godEscapes += 1
+			farm.godReturn = spawnStand()
+			farm.godHold = Vector3.new(root.Position.X, math.max(root.Position.Y + 180, 180), root.Position.Z)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.CFrame = CFrame.new(farm.godHold)
+			STATE.godRecovering = true
+			STATE.godEscapes = farm.godEscapes
+			STATE.status = "God Mode escaped"
+			STATE.detail = string.format("HP %d/%d  ·  healing safely", math.floor(hp or 0), math.floor(maxHp or 0))
+			return true
+		end
+		STATE.godRecovering = false
 		return false
 	end
 	-- Since v1.5.0 God Mode never teleports (it used to park the ant 180 studs
@@ -4557,7 +4613,12 @@ local function installHub()
 
 	do
 		local safetyBox = section(playerTab, "Survival", "shield-check")
-		toggle(safetyBox, "God Mode", "godMode", "At low HP it stops fighting and runs to the spawn safe zone, heals there, then carries on")
+		toggle(safetyBox, "God Mode", "godMode", "At low HP it stops fighting, heals out of reach, then carries on")
+		choice(safetyBox, "God Mode Escape", "Sky: teleports up out of reach (never dies, but it is a big teleport). Safe Zone: runs to the spawn safe zone (no teleport)", { "Sky", "Safe Zone" }, function()
+			return STATE.godStyle
+		end, function(option)
+			STATE.godStyle = option
+		end)
 		toggle(safetyBox, "Block Robux Capsule", "blockRobuxCapsule", "Stops the game's +3 EVO capsule from opening purchase prompts while auto farming")
 
 		local moveBox = section(playerTab, "Movement", "footprints")
@@ -4749,7 +4810,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.5.1"
+STATE.version = "1.5.2"
 
 if running() then
 	elevate()
