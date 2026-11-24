@@ -1411,37 +1411,42 @@ end
 local function stepGodMode(character, root)
 	local ratio, hp, maxHp = healthRatio(character)
 	if STATE.godMode ~= true then
-		if farm.godRecovering == true then
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.CFrame = CFrame.new(farm.godReturn or spawnStand())
-		end
 		farm.godRecovering = false
-		farm.godHold = nil
-		farm.godReturn = nil
 		STATE.godRecovering = false
 		return false
 	end
 	if not ratio then
 		return false
 	end
+	-- Since v1.5.0 God Mode never teleports (it used to park the ant 180 studs
+	-- up in the air). It stops fighting and runs away on foot from whatever is
+	-- near, so the game's own regeneration (after RegenDelay out of combat)
+	-- brings the health back, then it goes back to farming.
+	local function getAway()
+		local threat = farm.threatPos
+		local away
+		if typeof(threat) == "Vector3" then
+			local off = Vector3.new(root.Position.X - threat.X, 0, root.Position.Z - threat.Z)
+			if off.Magnitude < 70 then
+				away = off.Magnitude > 0.5 and off.Unit or root.CFrame.LookVector
+			end
+		end
+		if away and farm.walkTo then
+			farm.walkTo(character, root, root.Position + away * 40, 3)
+			return true
+		end
+		return false
+	end
 	if farm.godRecovering == true then
 		if ratio >= 0.99 then
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.CFrame = CFrame.new(farm.godReturn or spawnStand())
 			farm.godRecovering = false
-			farm.godHold = nil
-			farm.godReturn = nil
 			STATE.godRecovering = false
 			STATE.status = "God Mode recovered"
 			STATE.detail = string.format("HP %d/%d", math.floor(hp or 0), math.floor(maxHp or 0))
 			return true
 		end
-		local hold = farm.godHold or (root.Position + Vector3.new(0, 180, 0))
-		farm.godHold = hold
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.CFrame = CFrame.new(hold)
 		STATE.godRecovering = true
-		STATE.status = "God Mode healing"
+		STATE.status = getAway() and "God Mode: getting away" or "God Mode healing"
 		STATE.detail = string.format("HP %d/%d  ·  %d%%", math.floor(hp or 0), math.floor(maxHp or 0), math.floor(ratio * 100))
 		return true
 	end
@@ -1449,13 +1454,10 @@ local function stepGodMode(character, root)
 	if ratio <= escapeAt then
 		farm.godRecovering = true
 		farm.godEscapes += 1
-		farm.godReturn = spawnStand()
-		farm.godHold = Vector3.new(root.Position.X, math.max(root.Position.Y + 180, 180), root.Position.Z)
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.CFrame = CFrame.new(farm.godHold)
 		STATE.godRecovering = true
 		STATE.godEscapes = farm.godEscapes
-		STATE.status = "God Mode escaped"
+		getAway()
+		STATE.status = "God Mode: getting away"
 		STATE.detail = string.format("HP %d/%d  ·  healing safely", math.floor(hp or 0), math.floor(maxHp or 0))
 		return true
 	end
@@ -1488,27 +1490,6 @@ local function sugarCube()
 	return nil
 end
 
-local function stepOnto(character, root, aim, lookAt, allowDrop)
-	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
-	if flat.Magnitude < 1.5 then
-		return true
-	end
-	local point = root.Position + flat.Unit * math.min(flat.Magnitude, 14)
-	local ground = groundAt(point, character, root.Position.Y)
-	if not ground or (ground.Y - root.Position.Y > 18) or (not allowDrop and root.Position.Y - ground.Y > 18) then
-		return false
-	end
-	local goal = standOn(ground, character, root)
-	local look = Vector3.new(lookAt.X, goal.Y, lookAt.Z)
-	root.AssemblyLinearVelocity = Vector3.zero
-	if (look - goal).Magnitude < 1 then
-		root.CFrame = CFrame.new(goal)
-	else
-		root.CFrame = CFrame.lookAt(goal, look)
-	end
-	return true
-end
-
 local function stepSugar(character, root, cube)
 	local center = cube.Position
 	local flat = Vector3.new(root.Position.X - center.X, 0, root.Position.Z - center.Z)
@@ -1518,62 +1499,7 @@ local function stepSugar(character, root, cube)
 		return
 	end
 	local stand = center + (flat.Magnitude > 1 and flat.Unit or Vector3.new(1, 0, 0)) * 8
-	-- A canyon wall or cliff between us and the cube used to park the ant on
-	-- "blocked" for the whole event. Once the straight line is blocked, walk a
-	-- PathfindingService route (worked out in the background) to the ring.
-	local route = farm.sugarRoute
-	if route and ((route.goal - stand).Magnitude > 20 or os.clock() - route.at > 12) then
-		route = nil
-		farm.sugarRoute = nil
-	end
-	if route and route.points then
-		local nextPoint = route.points[route.index]
-		while nextPoint and Vector3.new(nextPoint.X - root.Position.X, 0, nextPoint.Z - root.Position.Z).Magnitude < 3 do
-			route.index += 1
-			nextPoint = route.points[route.index]
-		end
-		if nextPoint and stepOnto(character, root, nextPoint, nextPoint, true) then
-			STATE.status = "Going around to the sugar ring"
-			STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
-			return
-		end
-		farm.sugarRoute = nil
-	end
-	if not stepOnto(character, root, stand, center) then
-		if not farm.sugarRoute and os.clock() >= (farm.sugarRouteRetry or 0) then
-			local pending = { goal = stand, at = os.clock() }
-			farm.sugarRoute = pending
-			farm.sugarRouteRetry = os.clock() + 3
-			local from = root.Position
-			task.spawn(function()
-				local ok, points = pcall(function()
-					local path = game:GetService("PathfindingService"):CreatePath({
-						AgentRadius = 2,
-						AgentHeight = 4,
-						AgentCanJump = true,
-						WaypointSpacing = 8,
-					})
-					path:ComputeAsync(from, stand)
-					if path.Status ~= Enum.PathStatus.Success then
-						return nil
-					end
-					local list = {}
-					for _, waypoint in ipairs(path:GetWaypoints()) do
-						list[#list + 1] = waypoint.Position
-					end
-					return list
-				end)
-				if farm.sugarRoute == pending then
-					if ok and type(points) == "table" and #points > 0 then
-						pending.points = points
-						pending.index = 1
-						pending.at = os.clock()
-					else
-						farm.sugarRoute = nil
-					end
-				end
-			end)
-		end
+	if not farm.walkTo(character, root, stand, 2) then
 		STATE.status = "Path to the sugar cube is blocked"
 		STATE.detail = string.format("Sugar Rush  ·  %d away", math.floor(flat.Magnitude))
 		return
@@ -1627,84 +1553,71 @@ local function liveTarget(origin)
 end
 
 do
-	-- groundAt only looks straight down, so a wall in front (a leaderboard, a
-	-- building, a trunk, a cliff face) is invisible to it: the ant was CFramed
-	-- into the wall and physics pushed it straight back, forever (seen live
-	-- with a Treasure Hunt chest behind Board_Power). Spot the wall with a
-	-- forward ray and walk a PathfindingService route around it instead.
-	farm.wallAhead = function(character, root, point)
-		local from = root.Position
-		local flat = Vector3.new(point.X - from.X, 0, point.Z - from.Z)
-		local length = math.min(flat.Magnitude - 3, 16)
-		if length < 2 then
-			return false
+	-- Move Like A Player (v1.5.0). The hub used to CFrame the ant 14 studs at a
+	-- time (about 70 studs/s), which is faster than any ant can walk, and the
+	-- game kicks for "moving in a way it can't". Now it only ever holds the
+	-- ant's movement input, exactly like a player holding a key: the input is
+	-- written right after Roblox's ControlModule (RenderPriority.Input), so the
+	-- game's own walk speed, sprint, wall climbing (WallWalk reads
+	-- MoveDirection), turning and animations do all of the moving.
+	local drive = { goal = nil, radius = 1.5, untilT = 0, moving = false }
+	farm.drive = drive
+	local function release()
+		drive.goal = nil
+		if drive.moving then
+			drive.moving = false
+			local hum = humanoid()
+			if hum then
+				pcall(hum.Move, hum, Vector3.zero, false)
+			end
 		end
-		local hit = Workspace:Raycast(from, flat.Unit * length, rayFilter(character))
-		if not hit or math.abs(hit.Normal.Y) >= 0.5 then
-			return false
-		end
-		local part = hit.Instance
-		if part:IsA("BasePart") and not part.CanCollide then
-			return false
-		end
-		local model = part:FindFirstAncestorOfClass("Model")
-		if model and model:FindFirstChildOfClass("Humanoid") then
-			return false
-		end
-		return true
 	end
+	farm.releaseWalk = release
+	pcall(function()
+		RunService:BindToRenderStep("ZinoosAntWalk", Enum.RenderPriority.Input.Value + 5, function()
+			local goal = drive.goal
+			if not goal then
+				return
+			end
+			if not running() or os.clock() > drive.untilT then
+				release()
+				return
+			end
+			local hum = humanoid()
+			local root = hum and hum.RootPart
+			if not root or hum.Health <= 0 then
+				return
+			end
+			local flat = Vector3.new(goal.X - root.Position.X, 0, goal.Z - root.Position.Z)
+			if flat.Magnitude < drive.radius then
+				hum:Move(Vector3.zero, false)
+				return
+			end
+			drive.moving = true
+			hum:Move(flat.Unit, false)
+		end)
+	end)
+	hubCleanup(function()
+		pcall(function()
+			RunService:UnbindFromRenderStep("ZinoosAntWalk")
+		end)
+		release()
+	end)
 
-	farm.routeStep = function(character, root, point)
-		local now = os.clock()
-		local route = farm.route
-		if route and ((route.goal - point).Magnitude > 20 or now - route.at > 12) then
-			route = nil
-			farm.route = nil
-		end
-		if route and route.points then
-			local nextPoint = route.points[route.index]
-			while nextPoint and Vector3.new(nextPoint.X - root.Position.X, 0, nextPoint.Z - root.Position.Z).Magnitude < 3 do
-				route.index += 1
-				nextPoint = route.points[route.index]
-			end
-			if not nextPoint then
-				farm.route = nil
-				return false
-			end
-			local flat = Vector3.new(nextPoint.X - root.Position.X, 0, nextPoint.Z - root.Position.Z)
-			local stepTo = root.Position + flat.Unit * math.min(flat.Magnitude, 14)
-			local ground = groundAt(stepTo, character, math.max(root.Position.Y, nextPoint.Y))
-			if not ground or ground.Y - root.Position.Y > 18 then
-				farm.route = nil
-				return false
-			end
-			local goal = standOn(ground, character, root)
-			local look = Vector3.new(nextPoint.X, goal.Y, nextPoint.Z)
-			root.AssemblyLinearVelocity = Vector3.zero
-			if (look - goal).Magnitude < 1 then
-				root.CFrame = CFrame.new(goal)
-			else
-				root.CFrame = CFrame.lookAt(goal, look)
-			end
-			return true
-		end
-		if route then
-			-- Still working the route out: hold still rather than bump the wall.
-			return true
-		end
-		if now < (farm.routeRetry or 0) then
-			return false
-		end
-		local pending = { goal = point, at = now }
+	-- Ask PathfindingService for a way round (worked out in the background)
+	-- once plain walking has stopped getting closer: a drop, a pit or a wall
+	-- the ant cannot climb.
+	local function startRoute(from, point)
+		local pending = { goal = point, at = os.clock() }
 		farm.route = pending
-		farm.routeRetry = now + 3
-		local from = root.Position
+		farm.routeRetry = os.clock() + 4
 		task.spawn(function()
 			local ok, points = pcall(function()
 				local path = game:GetService("PathfindingService"):CreatePath({
 					AgentRadius = 3,
 					AgentHeight = 5,
 					AgentCanJump = true,
+					AgentCanClimb = true,
 					WaypointSpacing = 8,
 				})
 				path:ComputeAsync(from, point)
@@ -1713,7 +1626,7 @@ do
 				end
 				local list = {}
 				for _, waypoint in ipairs(path:GetWaypoints()) do
-					list[#list + 1] = waypoint.Position
+					list[#list + 1] = { pos = waypoint.Position, jump = waypoint.Action == Enum.PathWaypointAction.Jump }
 				end
 				return list
 			end)
@@ -1727,50 +1640,110 @@ do
 				end
 			end
 		end)
+	end
+
+	-- Walk toward point. Returns false only once walking (with jumps and a
+	-- route) has made no progress for a while, so callers can skip the target.
+	farm.walkTo = function(character, root, point, radius)
+		local now = os.clock()
+		local hum = character:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then
+			return false
+		end
+		radius = radius or 1.5
+		local pos = root.Position
+		local distance = Vector3.new(point.X - pos.X, 0, point.Z - pos.Z).Magnitude
+		local track = farm.walkTrack
+		if not track or (track.goal - point).Magnitude > 12 then
+			track = { goal = point, best = distance, bestAt = now, nextJump = 0 }
+			farm.walkTrack = track
+		elseif distance < track.best - 1.5 or distance <= radius + 1 then
+			track.best = math.min(track.best, distance)
+			track.bestAt = now
+		end
+		track.goal = point
+		-- Stuck = the ant itself has not really moved, whatever the target is.
+		-- (Judging only by the current target reset the timer every time the
+		-- food changed, so the ant could stay wedged in a corner forever.)
+		local moved = farm.movedFrom
+		if not moved or (pos - moved).Magnitude > 3 or distance <= radius + 1 then
+			farm.movedFrom = pos
+			farm.movedAt = now
+		end
+		local stuckFor = math.max(now - track.bestAt, now - (farm.movedAt or now))
+		if now - (farm.movedAt or now) > 3.5 and now >= (farm.unstickUntil or 0) + 3 then
+			-- Back out of the corner the way a player would: a short walk in
+			-- another direction, then carry on.
+			local away = Vector3.new(pos.X - point.X, 0, pos.Z - point.Z)
+			away = away.Magnitude > 0.5 and away.Unit or root.CFrame.LookVector
+			local angle = math.rad(math.random(-70, 70))
+			away = Vector3.new(away.X * math.cos(angle) - away.Z * math.sin(angle), 0, away.X * math.sin(angle) + away.Z * math.cos(angle))
+			farm.unstickGoal = pos + away * 10
+			farm.unstickUntil = now + 1.2
+			farm.movedAt = now
+			farm.route = nil
+			farm.routeRetry = 0
+			hum.Jump = true
+		end
+		if now < (farm.unstickUntil or 0) and farm.unstickGoal then
+			drive.goal = farm.unstickGoal
+			drive.radius = 1.5
+			drive.untilT = now + 0.6
+			farm.walkWanted = true
+			return true
+		end
+		if stuckFor > 9 then
+			-- Nothing worked: give this target up for now.
+			farm.walkTrack = nil
+			farm.route = nil
+			release()
+			return false
+		end
+		local target = point
+		local route = farm.route
+		if route and ((route.goal - point).Magnitude > 20 or now - route.at > 15) then
+			farm.route = nil
+			route = nil
+		end
+		if not route and stuckFor > 2.5 and now >= (farm.routeRetry or 0) then
+			startRoute(pos, point)
+			route = farm.route
+		end
+		if route and route.points then
+			local step = route.points[route.index]
+			while step and Vector3.new(step.pos.X - pos.X, 0, step.pos.Z - pos.Z).Magnitude < 3 do
+				route.index += 1
+				step = route.points[route.index]
+			end
+			if step then
+				target = step.pos
+				if step.jump and Vector3.new(step.pos.X - pos.X, 0, step.pos.Z - pos.Z).Magnitude < 6 then
+					hum.Jump = true
+				end
+			else
+				farm.route = nil
+			end
+		end
+		-- A small step or ledge in the way: hop, like a player would.
+		if stuckFor > 1.2 and now >= track.nextJump then
+			hum.Jump = true
+			track.nextJump = now + 1.2
+		end
+		drive.goal = target
+		drive.radius = radius
+		drive.untilT = now + 0.6
+		farm.walkWanted = true
 		return true
 	end
 end
 
 local function stepToward(character, root, point, status, detail)
-	local offset = Vector3.new(point.X - root.Position.X, 0, point.Z - root.Position.Z)
-	if offset.Magnitude < 1 then
+	if farm.walkTo(character, root, point) then
+		STATE.status = status
+		STATE.detail = detail
 		return true
 	end
-	local route = farm.route
-	if (route and (route.goal - point).Magnitude <= 20) or farm.wallAhead(character, root, point) then
-		if farm.routeStep(character, root, point) then
-			STATE.status = status
-			STATE.detail = detail
-			return true
-		end
-	end
-	local aim = point
-	if offset.Magnitude > 6 then
-		aim = point - offset.Unit * 4
-	end
-	local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
-	if flat.Magnitude > 14 then
-		aim = root.Position + flat.Unit * 14
-		flat = flat.Unit * 14
-	end
-	local ground = groundAt(aim, character, root.Position.Y)
-	if (not ground or math.abs(ground.Y - root.Position.Y) > 22) and flat.Magnitude > 4 then
-		ground = groundAt(root.Position + flat.Unit * 4, character, root.Position.Y)
-	end
-	if not ground or ground.Y <= voidY() or math.abs(ground.Y - root.Position.Y) > 22 then
-		return false
-	end
-	local goal = standOn(ground, character, root)
-	local look = Vector3.new(point.X, goal.Y, point.Z)
-	root.AssemblyLinearVelocity = Vector3.zero
-	if (look - goal).Magnitude < 1 then
-		root.CFrame = CFrame.new(goal)
-	else
-		root.CFrame = CFrame.lookAt(goal, look)
-	end
-	STATE.status = status
-	STATE.detail = detail
-	return true
+	return false
 end
 
 local function vectorFromData(row)
@@ -1970,24 +1943,15 @@ local function stepSpecialTravel(character, root)
 				STATE.detail = string.format("Lost Eggs  %d/%d", found, total)
 				return true
 			end
-			local flatDistance = (Vector2.new(egg.Position.X, egg.Position.Z) - Vector2.new(root.Position.X, root.Position.Z)).Magnitude
-			if flatDistance <= 5 and math.abs(egg.Position.Y - root.Position.Y) > 8 then
-				root.AssemblyLinearVelocity = Vector3.zero
-				root.CFrame = CFrame.new(egg.Position + Vector3.new(0, 3, 0))
-				STATE.status = "Reaching lost egg " .. tostring(index)
-				STATE.detail = string.format("Lost Eggs  %d/%d", found, total)
-				return true
+			-- Several eggs sit on crags, cacti and the giant mushroom. Walking into
+			-- them lets the game's wall climbing carry the ant up (no teleport).
+			if (farm.eggSkip and farm.eggSkip[index] or 0) <= os.clock() then
+				if stepToward(character, root, egg.Position, "Going to lost egg " .. tostring(index), string.format("Lost Eggs  %d/%d  ·  %d away", found, total, math.floor(distance))) then
+					return true
+				end
+				farm.eggSkip = farm.eggSkip or {}
+				farm.eggSkip[index] = os.clock() + 120
 			end
-			if stepToward(character, root, egg.Position, "Going to lost egg " .. tostring(index), string.format("Lost Eggs  %d/%d  ·  %d away", found, total, math.floor(distance))) then
-				return true
-			end
-			-- Several eggs sit on crags, cacti and the giant mushroom. Normal surface
-			-- stepping cannot climb those final vertical gaps, so finish at the pickup.
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.CFrame = CFrame.new(egg.Position + Vector3.new(0, 3, 0))
-			STATE.status = "Reaching lost egg " .. tostring(index)
-			STATE.detail = string.format("Lost Eggs  %d/%d", found, total)
-			return true
 		end
 	end
 	local wantsDungeon = STATE.autoDungeon == true or questNeeds("dungeon")
@@ -2030,6 +1994,19 @@ local function stepFarm()
 	if not character then
 		STATE.status = "Waiting to move"
 		return
+	end
+	if STATE.godMode == true and (farm.godRecovering == true or (healthRatio(character) or 1) <= 0.85) then
+		-- Whatever is closest and can hurt us: God Mode walks away from it.
+		local _, antRoot, antDist = nearestAnt(root.Position, 70)
+		local _, bugRoot, bugDist = nearestCritter(root.Position, 50)
+		if bugRoot and bugDist and bugDist > 50 then
+			bugRoot = nil
+		end
+		if antRoot and (not bugRoot or antDist <= bugDist) then
+			farm.threatPos = antRoot.Position
+		else
+			farm.threatPos = bugRoot and bugRoot.Position or nil
+		end
 	end
 	if stepGodMode(character, root) then
 		return
@@ -2085,12 +2062,35 @@ local function stepFarm()
 			if reachOk and type(gotReach) == "number" then
 				reach = gotReach + 6
 			end
+			local giveUp = false
 			if foeDist <= reach then
-				STATE.status = "PvP fighting " .. targetName
-				STATE.detail = string.format("Weakest safe target  ·  %d HP", math.floor(tonumber(model:GetAttribute("HP")) or 0))
-				return
+				-- Bites that never take any health off (the spawn safe bubble, a
+				-- shield) used to keep the ant "fighting" one player forever.
+				local hpNow = tonumber(model:GetAttribute("HP")) or 0
+				local fight = farm.pvpFight
+				if not fight or fight.model ~= model then
+					farm.pvpFight = { model = model, hp = hpNow, at = os.clock() }
+				elseif hpNow < fight.hp - 0.5 then
+					fight.hp = hpNow
+					fight.at = os.clock()
+				elseif os.clock() - fight.at > 8 then
+					farm.pvpSkip = farm.pvpSkip or setmetatable({}, { __mode = "k" })
+					farm.pvpSkip[model] = os.clock() + 90
+					farm.pvpFight = nil
+					STATE.pvpTarget = ""
+					noteActivity("Left " .. targetName .. ": bites were not landing")
+					giveUp = true
+				end
+				if not giveUp then
+					STATE.status = "PvP fighting " .. targetName
+					STATE.detail = string.format("Weakest safe target  ·  %d HP", math.floor(hpNow))
+					return
+				end
 			end
-			if stepToward(character, root, foeRoot.Position, "PvP chasing " .. targetName, string.format("Weakest safe target  ·  %d away", math.floor(foeDist))) then
+			if foeDist > reach then
+				farm.pvpFight = nil
+			end
+			if not giveUp and stepToward(character, root, foeRoot.Position, "PvP chasing " .. targetName, string.format("Weakest safe target  ·  %d away", math.floor(foeDist))) then
 				return
 			end
 		else
@@ -2321,6 +2321,10 @@ function nearestPvpTarget(origin, limit)
 			local stage = tonumber(model:GetAttribute("Stage")) or 0
 			local attackable = stage > 0 and stage >= myStage - mercyGap
 			local root = hp > 0 and maxHp > 0 and maxHp <= myMaxHp and attackable and critterRoot(model) or nil
+			if root and farm.pvpSkip and (farm.pvpSkip[model] or 0) > os.clock() then
+				-- Our bites were not landing on this one (spawn safe bubble etc.).
+				root = nil
+			end
 			if root then
 				local distance = (root.Position - origin).Magnitude
 				if distance <= limit and (not bestHp or hp < bestHp or (hp == bestHp and distance < bestDist)) then
@@ -2336,6 +2340,10 @@ local function stepBite()
 	local dungeonActive = inDungeon()
 	local questCombat = questNeeds("bugs") or (STATE.pvpQuest == true and questNeeds("ants"))
 	if (STATE.autoBite ~= true and STATE.autoPvp ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextBite then
+		return
+	end
+	if farm.godRecovering == true and not dungeonActive then
+		-- God Mode is healing: biting keeps us in combat and stops the regen.
 		return
 	end
 	local character, root = living()
@@ -2398,6 +2406,9 @@ local function stepAbility()
 	local dungeonActive = inDungeon()
 	local questCombat = questNeeds("bugs") or (STATE.pvpQuest == true and questNeeds("ants"))
 	if (STATE.autoAbility ~= true and STATE.autoPvp ~= true and not dungeonActive and not questCombat) or os.clock() < farm.nextAbility then
+		return
+	end
+	if farm.godRecovering == true and not dungeonActive then
 		return
 	end
 	local character, root = living()
@@ -4525,7 +4536,7 @@ local function installHub()
 
 	do
 		local safetyBox = section(playerTab, "Survival", "shield-check")
-		toggle(safetyBox, "God Mode", "godMode", "Escapes at 72% HP, waits out combat while real HP regenerates, then returns safely")
+		toggle(safetyBox, "God Mode", "godMode", "At low HP it stops fighting and walks away from danger until the game's regen heals you, then carries on")
 		toggle(safetyBox, "Block Robux Capsule", "blockRobuxCapsule", "Stops the game's +3 EVO capsule from opening purchase prompts while auto farming")
 
 		local moveBox = section(playerTab, "Movement", "footprints")
@@ -4717,7 +4728,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.4.8"
+STATE.version = "1.5.0"
 
 if running() then
 	elevate()
@@ -4730,7 +4741,13 @@ end
 task.spawn(function()
 	elevate()
 	while running() do
+		farm.walkWanted = false
 		local ok, err = pcall(stepFarm)
+		if not farm.walkWanted and farm.releaseWalk then
+			-- This tick wants the ant standing still (eating, fighting, in the
+			-- ring, farm off): let go of the movement input.
+			farm.releaseWalk()
+		end
 		if not ok then
 			STATE.status = "Farm error"
 			warn("[Zinoos hub] " .. tostring(err))
