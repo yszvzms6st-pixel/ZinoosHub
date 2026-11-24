@@ -99,6 +99,7 @@ local STATE = {
 	noPausePopup = true,
 	autoReconnect = false,
 	autoReload = true,
+	ghostWhenStuck = false,
 	disable3d = false,
 	fpsBoost = false,
 	hideOnStart = false,
@@ -223,6 +224,7 @@ local FLAG_KEYS = {
 	NoPausePopup = "noPausePopup",
 	AutoReconnect = "autoReconnect",
 	AutoReload = "autoReload",
+	GhostWhenStuck = "ghostWhenStuck",
 	Disable3d = "disable3d",
 	FpsBoost = "fpsBoost",
 	HideOnStart = "hideOnStart",
@@ -1680,6 +1682,85 @@ do
 	-- Ask PathfindingService for a way round (worked out in the background)
 	-- once plain walking has stopped getting closer: a drop, a pit or a wall
 	-- the ant cannot climb.
+	local ghosted = {}
+	farm.ghostAhead = function(character, root, point)
+		local from = root.Position
+		local flat = Vector3.new(point.X - from.X, 0, point.Z - from.Z)
+		if flat.Magnitude < 2 then
+			return false
+		end
+		local params = rayFilter(character)
+		local hit
+		for _, lift in ipairs({ 0, 2, -1 }) do
+			hit = Workspace:Raycast(from + Vector3.new(0, lift, 0), flat.Unit * math.min(flat.Magnitude, 12), params)
+			if hit then
+				break
+			end
+		end
+		local part = hit and hit.Instance
+		if not part or not part:IsA("BasePart") or part:IsA("Terrain") or not part.CanCollide then
+			return false
+		end
+		if math.abs(hit.Normal.Y) >= 0.5 then
+			return false
+		end
+		-- Allow-list only: signs/shop/portal frame and the props inside a zone.
+		-- Never Map.Environment.Walls/Dividers/Edge/Boundary (the walls between
+		-- and around the zones), Game.Gates (locked zones), Map.Colliders.
+		local gameFolder = Workspace:FindFirstChild("Game")
+		local map = Workspace:FindFirstChild("Map")
+		local environment = map and map:FindFirstChild("Environment")
+		local allowed = false
+		for _, holder in ipairs({
+			gameFolder and gameFolder:FindFirstChild("Boards"),
+			gameFolder and gameFolder:FindFirstChild("MoleShop"),
+			gameFolder and gameFolder:FindFirstChild("DungeonPortal"),
+			environment and environment:FindFirstChild("Meadow"),
+			environment and environment:FindFirstChild("Picnic"),
+			environment and environment:FindFirstChild("Garden"),
+			environment and environment:FindFirstChild("Hollow"),
+		}) do
+			if holder and part:IsDescendantOf(holder) then
+				allowed = true
+				break
+			end
+		end
+		if not allowed then
+			return false
+		end
+		-- Too big to be a prop (a cliff or a floor slab): leave it solid.
+		if part.Size.Magnitude > 220 then
+			return false
+		end
+		part.CanCollide = false
+		ghosted[part] = os.clock() + 5
+		noteActivity("Walked through " .. part.Name)
+		return true
+	end
+	local function restoreGhosts(all)
+		local now = os.clock()
+		for part, untilT in pairs(ghosted) do
+			if all or now >= untilT then
+				ghosted[part] = nil
+				if part.Parent then
+					pcall(function()
+						part.CanCollide = true
+					end)
+				end
+			end
+		end
+	end
+	task.spawn(function()
+		while running() do
+			task.wait(0.5)
+			restoreGhosts(false)
+		end
+		restoreGhosts(true)
+	end)
+	hubCleanup(function()
+		restoreGhosts(true)
+	end)
+
 	local function startRoute(from, point)
 		local pending = { goal = point, at = os.clock() }
 		farm.route = pending
@@ -1744,6 +1825,16 @@ do
 			farm.movedAt = now
 		end
 		local stuckFor = math.max(now - track.bestAt, now - (farm.movedAt or now))
+		if STATE.ghostWhenStuck == true and now - (farm.movedAt or now) > 1.5 and now >= (farm.nextGhost or 0) then
+			-- Walk Through When Stuck: only the one solid thing right in front
+			-- (a leaderboard, the shop, a rock) stops colliding, on this client
+			-- only, for 5 s. Never the ground, the zone gates or the map's
+			-- invisible edge walls.
+			farm.nextGhost = now + 1
+			if farm.ghostAhead(character, root, point) then
+				farm.movedAt = now
+			end
+		end
 		if now - (farm.movedAt or now) > 3.5 and now >= (farm.unstickUntil or 0) + 3 then
 			-- Back out of the corner the way a player would: a short walk in
 			-- another direction, then carry on.
@@ -4630,6 +4721,7 @@ local function installHub()
 		end)
 		toggle(moveBox, "Infinite Jump", "infiniteJump")
 		toggle(moveBox, "Infinite Stamina", "infiniteStamina", "Sprint and wing fly do not run out")
+		toggle(moveBox, "Walk Through When Stuck", "ghostWhenStuck", "Only the sign, shop or rock you are stuck on stops being solid for 5 s, on your screen only. Never the ground, zone gates or map edges")
 		toggle(moveBox, "Noclip", "noclip")
 		toggle(moveBox, "Instant Interactions", "instantPrompts", "No hold time on prompts")
 		toggle(moveBox, "Fly", "fly", "PC: WASD, Space up, Left Ctrl down")
@@ -4810,7 +4902,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.5.2"
+STATE.version = "1.5.4"
 
 if running() then
 	elevate()
