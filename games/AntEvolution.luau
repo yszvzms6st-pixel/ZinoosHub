@@ -1910,6 +1910,111 @@ local function stepToward(character, root, point, status, detail)
 	return false
 end
 
+-- Out Of Sealed Holes (v1.5.6). There are pockets under the rocks (the
+-- terrain) with no way out on foot, and food still spawns inside them, so an
+-- ant that ends up in one walks around in there forever. Food buried under
+-- the rocks is skipped, and an ant that has been under the rocks for 15 s
+-- walks out if PathfindingService finds a way; if not, it hops once onto the
+-- nearest open ground right above (at most once a minute).
+local function buriedAt(pos, character)
+	local params = rayFilter(character)
+	local up = Workspace:Raycast(pos + Vector3.new(0, 1, 0), Vector3.new(0, 60, 0), params)
+	if not up or up.Instance ~= Workspace.Terrain then
+		return false
+	end
+	local top = Workspace:Raycast(Vector3.new(pos.X, pos.Y + 200, pos.Z), Vector3.new(0, -200, 0), params)
+	return top ~= nil and top.Instance == Workspace.Terrain and top.Position.Y > pos.Y + 8
+end
+farm.buriedAt = buriedAt
+
+local function openGroundNear(pos, character)
+	local params = rayFilter(character)
+	local best, bestGap
+	for _, dist in ipairs({ 14, 20, 26, 32 }) do
+		for step = 0, 15 do
+			local angle = step * math.pi / 8
+			local spot = pos + Vector3.new(math.cos(angle), 0, math.sin(angle)) * dist
+			local hit = Workspace:Raycast(Vector3.new(spot.X, pos.Y + 200, spot.Z), Vector3.new(0, -260, 0), params)
+			if hit and hit.Normal.Y > 0.7 and hit.Position.Y > voidY() and hit.Position.Y > pos.Y + 4 then
+				local gap = (hit.Position - pos).Magnitude
+				if gap <= 55 and (not bestGap or gap < bestGap) then
+					best, bestGap = hit.Position, gap
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function stepOutOfHole(character, root)
+	if inDungeon() then
+		farm.buried = nil
+		return false
+	end
+	local now = os.clock()
+	local hole = farm.buried
+	if not hole or now >= hole.nextCheck then
+		if not buriedAt(root.Position, character) then
+			farm.buried = nil
+			return false
+		end
+		hole = hole or { since = now }
+		hole.nextCheck = now + 2
+		farm.buried = hole
+	end
+	if now - hole.since < 15 or now < (farm.nextHop or 0) then
+		return false
+	end
+	hole.exit = hole.exit or openGroundNear(root.Position, character)
+	local exit = hole.exit
+	if not exit then
+		return false
+	end
+	if hole.way == nil then
+		hole.way = "checking"
+		local from = root.Position
+		task.spawn(function()
+			local ok, status = pcall(function()
+				local path = game:GetService("PathfindingService"):CreatePath({
+					AgentRadius = 1.5,
+					AgentHeight = 3,
+					AgentCanJump = true,
+					AgentCanClimb = true,
+					WaypointSpacing = 6,
+				})
+				path:ComputeAsync(from, exit + Vector3.new(0, 2, 0))
+				return path.Status
+			end)
+			if farm.buried == hole then
+				hole.way = (ok and status == Enum.PathStatus.Success) and "walk" or "hop"
+				hole.wayAt = os.clock()
+			end
+		end)
+		return false
+	end
+	if hole.way == "walk" then
+		if now - (hole.wayAt or now) < 45 and stepToward(character, root, exit, "Climbing out", "Under the rocks  ·  walking out") then
+			return true
+		end
+		hole.way = "hop"
+	end
+	if hole.way == "hop" then
+		farm.nextHop = now + 60
+		farm.buried = nil
+		farm.walkTrack = nil
+		farm.route = nil
+		if farm.releaseWalk then
+			farm.releaseWalk()
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = CFrame.new(exit + Vector3.new(0, 3, 0)) * root.CFrame.Rotation
+		STATE.status = "Got out of a sealed hole"
+		STATE.detail = "Hopped onto the ground above"
+		return true
+	end
+	return false
+end
+
 local function vectorFromData(row)
 	if typeof(row) == "Vector3" then
 		return row
@@ -2175,6 +2280,9 @@ local function stepFarm()
 	if stepGodMode(character, root) then
 		return
 	end
+	if stepOutOfHole(character, root) then
+		return
+	end
 	-- The Anteater locks its tongue onto one ant, then grabs whoever is still at
 	-- that spot. Step sideways out of the line while it is aiming at us.
 	local dodge = farm.anteaterDodge
@@ -2331,6 +2439,21 @@ local function stepFarm()
 		STATE.status = "No food nearby"
 		refreshOrbs()
 		return
+	end
+	if not farm.buried then
+		-- Food sealed under the rocks: walking to it is how ants get trapped.
+		farm.buriedFood = farm.buriedFood or {}
+		local seen = farm.buriedFood[id]
+		if not seen or (seen.pos - orb.pos).Magnitude > 2 then
+			seen = { pos = orb.pos, buried = buriedAt(orb.pos, character) }
+			farm.buriedFood[id] = seen
+		end
+		if seen.buried then
+			farm.skip[id] = os.clock() + 120
+			farm.chase = nil
+			STATE.status = "Skipped food inside the rocks"
+			return
+		end
 	end
 	local _, foodName = orbValue(orb.tier)
 	local offset = Vector3.new(orb.pos.X - root.Position.X, 0, orb.pos.Z - root.Position.Z)
@@ -4914,7 +5037,7 @@ loadSaved()
 if STATE.notifications == nil then
 	STATE.notifications = true
 end
-STATE.version = "1.5.5"
+STATE.version = "1.5.6"
 
 if running() then
 	elevate()
