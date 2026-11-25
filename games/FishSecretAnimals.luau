@@ -68,6 +68,7 @@ local STATE = {
 	lairRisk = "Smart",
 	lairTime = "60s",
 	autoDoubloons = true,
+	rodSkin = "Best I own",
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -170,6 +171,7 @@ local LAIR_RISK_OPTIONS = { "Safe", "Smart", "Greedy" }
 local LAIR_RISKS = { Safe = 0.6, Smart = 1, Greedy = 1.4 }
 local LAIR_TIME_OPTIONS = { "30s", "60s", "120s", "240s" }
 local LAIR_SPOT_OPTIONS = { "Hot Spring", "Ice Hole", "Pearl Pool", "Abyss Hole" }
+local SKIN_OPTIONS = { "Best I own", "Don't change", "No skin", "Coral Reef", "Frostbite", "Abyssal", "Neptune's Gold", "Sunken Treasure", "Golden Whale" }
 local SPEED_OPTIONS = { "16", "24", "32", "50", "75", "100" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
 local CHOICES = {
@@ -179,6 +181,7 @@ local CHOICES = {
 	LairSpot = { key = "lairSpot", options = LAIR_SPOT_OPTIONS },
 	LairRisk = { key = "lairRisk", options = LAIR_RISK_OPTIONS },
 	LairTime = { key = "lairTime", options = LAIR_TIME_OPTIONS },
+	RodSkin = { key = "rodSkin", options = SKIN_OPTIONS },
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	WindTheme = { key = "windTheme" },
 	HubSize = { key = "hubSize", options = { "Compact", "Normal", "Large" } },
@@ -537,6 +540,7 @@ local fish = {
 	claimBlock = {},
 	nextPets = 0,
 	nextAquarium = 0,
+	nextSkin = 0,
 	hatchBlock = {},
 	favoriteTried = false,
 }
@@ -1443,6 +1447,66 @@ STATE.claimNow = function()
 end
 
 -- Eggs and pets.
+-- Rod skins only change how the rod looks. Pack and pool-only skins rank
+-- above the doubloon ones, then the pricier one wins.
+local SKIN_RANK = { Whale = 1e9, SunkenTreasure = 1e8 }
+local function skinRank(skin)
+	return SKIN_RANK[skin.Id] or tonumber(skin.Price) or 1
+end
+
+local function ownedSkins()
+	local owned = {}
+	for id in string.gmatch(tostring(attr("RodSkins") or ""), "[^,%s]+") do
+		owned[id] = true
+	end
+	return owned
+end
+
+local function stepSkin()
+	if STATE.rodSkin == "Don't change" or os.clock() < fish.nextSkin then
+		return
+	end
+	fish.nextSkin = os.clock() + 10
+	local skins = type(Config.RodSkins) == "table" and Config.RodSkins or {}
+	local owned = ownedSkins()
+	local want, wantName
+	if STATE.rodSkin == "No skin" then
+		want = ""
+	elseif STATE.rodSkin == "Best I own" then
+		local best
+		for _, skin in ipairs(skins) do
+			if owned[skin.Id] and (not best or skinRank(skin) > skinRank(best)) then
+				best = skin
+			end
+		end
+		if not best then
+			return
+		end
+		want, wantName = best.Id, best.Name
+	else
+		for _, skin in ipairs(skins) do
+			if skin.Name == STATE.rodSkin and owned[skin.Id] then
+				want, wantName = skin.Id, skin.Name
+			end
+		end
+		if not want then
+			return
+		end
+	end
+	if (attr("RodSkin") or "") == want then
+		return
+	end
+	local ok, message = call("Lair", "skin", want)
+	if ok == true then
+		notify("Rod skin", want == "" and "Back to your rod's own look" or (tostring(wantName) .. " is on your rod"))
+	else
+		fish.nextSkin = os.clock() + 60
+		if type(message) == "string" and message ~= "stopped" then
+			noteActivity("Rod skin: " .. message)
+		end
+	end
+end
+
 local function stepPets()
 	if os.clock() < fish.nextPets then
 		return
@@ -2183,6 +2247,14 @@ local function installHub()
 		toggle(baitBox, "Use Best Bait", "autoBestBait", "Equips the luckiest bait you own")
 		toggle(baitBox, "Use Special Baits", "useSpecialBait", "Always-Divine, Always-Secret and Mythic Magnet baits go first. Turn off to save them")
 		toggle(baitBox, "Auto Buy Bait", "autoBuyBait", "Buys the luckiest cash bait that costs under 1% of your money")
+
+		local skinBox = section(shopTab, "Rod Skin", "sparkles")
+		choice(skinBox, "Rod Skin", "Only changes how your rod looks. Best I own wears your rarest skin and switches when you get a better one", SKIN_OPTIONS, function()
+			return STATE.rodSkin
+		end, function(option)
+			STATE.rodSkin = option
+			fish.nextSkin = 0
+		end)
 	end
 
 	do
@@ -2399,7 +2471,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.1.1"
+STATE.version = "1.2.0"
 
 if running() then
 	elevate()
@@ -2435,6 +2507,7 @@ task.spawn(function()
 		pcall(stepBuy)
 		pcall(stepBait)
 		pcall(stepDoubloons)
+		pcall(stepSkin)
 		pcall(stepClaims)
 		pcall(stepPets)
 		elevate()
