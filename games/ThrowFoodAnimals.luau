@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.6.0",
+	version = "3.6.1",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
@@ -2303,7 +2303,7 @@ end
 do
 	local Thanksgiving = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "Thanksgiving")
 	local config = Thanksgiving and type(Thanksgiving.Config) == "table" and Thanksgiving.Config or nil
-	local feast = { nextStep = 0, armKind = nil, target = nil, cooked = 0, thrown = 0, claimed = 0, status = nil }
+	local feast = { nextStep = 0, blockUntil = 0, armKind = nil, target = nil, cooked = 0, thrown = 0, claimed = 0, status = nil }
 	STATE.feast = feast
 
 	local function helper(name, ...)
@@ -2471,30 +2471,62 @@ do
 	end
 
 	function feast.onThrown(kind, animal)
-		noteActivity(string.format("%s sandwich into %s%s", tostring(kind), tostring(feast.target or "a zone"), animal and (": " .. tostring(animal)) or ""))
+		if animal then
+			noteActivity(string.format("%s sandwich caught %s", tostring(kind), tostring(animal)))
+		else
+			noteActivity(string.format("%s sandwich thrown for %s", tostring(kind), tostring(feast.target or "a Thanksgiving animal")))
+		end
 	end
 
-	-- Cooking and the chef's treats, near the picnic table.
-	function feast.step()
-		if STATE.autoFeast ~= true or not config or os.clock() < feast.nextStep then
-			return
+	-- Something to do at the chef: a treat to claim or enough ingredients.
+	function feast.needsChef(force)
+		if STATE.autoFeast ~= true or not config or os.clock() < feast.blockUntil then
+			return false
+		end
+		if not force and os.clock() < feast.nextStep then
+			return false
+		end
+		if not feast.available() then
+			return false
+		end
+		local data = eventData()
+		if (tonumber(helper("RewardsPending", data)) or 0) > 0 then
+			return true
+		end
+		local order = orderFor(STATE.feastOrder) or orderFor("Regular")
+		return order ~= nil and (tonumber(helper("TotalIngredients", data)) or 0) >= (tonumber(order.Ingredients) or math.huge)
+	end
+
+	-- Cooking and the chef's treats, near the picnic table. The throw loop
+	-- calls this between throws (the game is only free then); the errand
+	-- loop is a fallback for when Auto Throw is off.
+	function feast.step(force)
+		if STATE.autoFeast ~= true or not config or os.clock() < feast.blockUntil then
+			return false
+		end
+		if not force and os.clock() < feast.nextStep then
+			return false
 		end
 		feast.nextStep = os.clock() + 5
 		if not feast.available() then
-			return
+			return false
 		end
 		local data = eventData()
 		if (tonumber(helper("RewardsPending", data)) or 0) > 0 then
 			local result = invokeNear("Thanksgiving", chefTarget(), "Thanksgiving_Action", "Claim")
 			if result.Ok then
 				feast.claimed += 1
+				feast.status = nil
 				noteActivity("Thanksgiving: claimed the chef's treat")
 				feast.nextStep = os.clock() + 1
+				return true
+			elseif tostring(result.Reason or ""):find("^Busy") then
+				feast.nextStep = os.clock() + 2
 			else
 				feast.status = "Treat: " .. tostring(result.Reason or "rejected")
-				feast.nextStep = os.clock() + 20
+				feast.blockUntil = os.clock() + 20
 			end
-			return
+			return false
 		end
 		local order = orderFor(STATE.feastOrder) or orderFor("Regular")
 		local have = tonumber(helper("TotalIngredients", data)) or 0
@@ -2505,13 +2537,15 @@ do
 				feast.status = nil
 				noteActivity("Thanksgiving: cooked a " .. tostring(order.Name or order.Key) .. " sandwich")
 				feast.nextStep = os.clock() + 1.5
+				return true
 			elseif tostring(result.Reason or ""):find("^Busy") then
 				feast.nextStep = os.clock() + 2
 			else
 				feast.status = "Cook: " .. tostring(result.Reason or "rejected")
-				feast.nextStep = os.clock() + 20
+				feast.blockUntil = os.clock() + 20
 			end
 		end
+		return false
 	end
 
 	local function clock(seconds)
@@ -2642,6 +2676,22 @@ local function stepThrow()
 	end
 	if os.clock() < nextThrowTrigger then
 		return 0.25
+	end
+	-- Thanksgiving: cook or claim the chef's treat now, while nothing else
+	-- holds the game (the other loop almost never finds it free).
+	if not ringPlay and STATE.feast then
+		-- Everything waiting at the chef in one go (cook several, claim treats).
+		for _ = 1, 6 do
+			if not STATE.feast.needsChef(true) then
+				break
+			end
+			local ok, did = pcall(STATE.feast.step, true)
+			elevate()
+			if not ok or did ~= true then
+				break
+			end
+			task.wait(0.4)
+		end
 	end
 	-- Point this throw at a Dreamland habitat or an unfinished index area when
 	-- those options are on; otherwise keep (or restore) maximum distance.
