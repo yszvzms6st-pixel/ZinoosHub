@@ -109,10 +109,13 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.5.1",
+	version = "3.6.0",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
+	autoFeast = true,
+	feastOrder = "Regular",
+	feastGoal = "Animals first",
 	dreamBuy = false,
 	dreamPotionBuy = false,
 	dreamInfuse = false,
@@ -280,6 +283,7 @@ local FLAG_KEYS = {
 	HideOnStart = "hideOnStart",
 	TrainOnBoost = "trainOnBoost",
 	AutoRingRush = "autoRingRush",
+	AutoFeast = "autoFeast",
 	DreamBuy = "dreamBuy",
 	DreamPotionBuy = "dreamPotionBuy",
 	DreamInfuse = "dreamInfuse",
@@ -296,8 +300,12 @@ local boostTraining = { active = false, resumeThrow = false, declined = false }
 
 local FLY_SPEED_OPTIONS = { "30", "60", "100", "150", "200" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
+local FEAST_ORDER_OPTIONS = { "Regular", "Big", "Mega" }
+local FEAST_GOAL_OPTIONS = { "Animals first", "Grand Gobbler first" }
 local CHOICES = {
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
+	FeastOrder = { key = "feastOrder", options = FEAST_ORDER_OPTIONS },
+	FeastGoal = { key = "feastGoal", options = FEAST_GOAL_OPTIONS },
 	NotifyMinRarity = { key = "notifyMinRarity", options = NOTIFY_RARITY_OPTIONS },
 	EspMaxDistance = { key = "espMaxDistance", options = ESP_DISTANCE_OPTIONS },
 	StopTargetRarity = { key = "stopTargetRarity", options = RARITY_OPTIONS },
@@ -2286,6 +2294,276 @@ function STATE.applyAim()
 	end
 end
 
+-- Thanksgiving event. Every half hour the Feast runs for five minutes and any
+-- catch can bring back an ingredient. The Turkey Chef cooks ingredients into
+-- sandwiches; a sandwich thrown into a zone attracts that zone's Thanksgiving
+-- animal (21 in all), and sandwiches landing in Starfall Heights fill the
+-- Grand Gobbler bar. Everything here switches itself off when the game's
+-- Thanksgiving module is gone.
+do
+	local Thanksgiving = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "Thanksgiving")
+	local config = Thanksgiving and type(Thanksgiving.Config) == "table" and Thanksgiving.Config or nil
+	local feast = { nextStep = 0, armKind = nil, target = nil, cooked = 0, thrown = 0, claimed = 0, status = nil }
+	STATE.feast = feast
+
+	local function helper(name, ...)
+		local fn = Thanksgiving and Thanksgiving[name]
+		if type(fn) ~= "function" then
+			return nil
+		end
+		local ok, value = pcall(fn, ...)
+		elevate()
+		if ok then
+			return value
+		end
+		return nil
+	end
+
+	local function eventData()
+		local value = getData("Thanksgiving")
+		return type(value) == "table" and value or {}
+	end
+
+	-- Open and this player may join: returns true plus the game's state.
+	function feast.available()
+		if not config then
+			return false, nil
+		end
+		local state = helper("State")
+		if type(state) ~= "table" or state.Open ~= true then
+			return false, state
+		end
+		local attributes = type(Thanksgiving.Attributes) == "table" and Thanksgiving.Attributes or {}
+		return LocalPlayer:GetAttribute(attributes.Eligible or "Thanksgiving") == true, state
+	end
+
+	local function chefTarget()
+		local picnic = workspace:FindFirstChild("ThanksgivingPicnic")
+		return picnic and (picnic:FindFirstChild("TurkeyChef") or picnic:FindFirstChild("PicnicTable") or picnic)
+	end
+
+	local function orderFor(key)
+		for _, order in ipairs(type(config) == "table" and config.Orders or {}) do
+			if order.Key == key then
+				return order
+			end
+		end
+		return nil
+	end
+
+	-- The biggest sandwich you have.
+	function feast.sandwichKind()
+		local data = eventData()
+		local orders = type(config) == "table" and config.Orders or {}
+		for index = #orders, 1, -1 do
+			local key = orders[index].Key
+			if (tonumber(helper("SandwichCount", data, key)) or 0) > 0 then
+				return key
+			end
+		end
+		return nil
+	end
+
+	local function aimAtAnimal(animal, depths)
+		for _, depth in ipairs(depths) do
+			local at = helper("AnimalAt", animal.Zone, depth)
+			if type(at) == "table" and at.ModelName == animal.ModelName then
+				local power = aimPowerFor(animal.Zone, depth)
+				if power then
+					return power
+				end
+			end
+		end
+		return nil
+	end
+
+	-- Where the next sandwich goes: a Thanksgiving animal you are missing,
+	-- then the Grand Gobbler (or the other way round), then the best one.
+	function feast.plan()
+		local data = eventData()
+		local index = getData("Index")
+		index = type(index) == "table" and index or {}
+		local gobbler = type(config.Gobbler) == "table" and config.Gobbler or nil
+		local wantGobbler = gobbler ~= nil and data.GobblerCaught ~= true
+		local function missing()
+			for _, animal in ipairs(config.Animals or {}) do
+				if not index[animal.ModelName] then
+					local power = aimAtAnimal(animal, { 0.2, 0.55, 0.85 })
+					if power then
+						return power, tostring(animal.Name)
+					end
+				end
+			end
+			return nil
+		end
+		local function gobblerAim()
+			local power = aimPowerFor(gobbler.Zone or "StarfallHeights", 0.55)
+			if power then
+				local have = tonumber(helper("GobblerProgress", data)) or 0
+				return power, string.format("Grand Gobbler %d/%d", have, tonumber(gobbler.Goal) or 100)
+			end
+			return nil
+		end
+		local power, label
+		if wantGobbler and STATE.feastGoal == "Grand Gobbler first" then
+			power, label = gobblerAim()
+		end
+		if not power then
+			power, label = missing()
+		end
+		if not power and wantGobbler then
+			power, label = gobblerAim()
+		end
+		if not power then
+			local best
+			for _, animal in ipairs(config.Animals or {}) do
+				if not best or (tonumber(animal.Income) or 0) > (tonumber(best.Income) or 0) then
+					best = animal
+				end
+			end
+			if best then
+				power = aimAtAnimal(best, { 0.85, 0.55, 0.2 })
+				label = power and tostring(best.Name) or nil
+			end
+		end
+		return power, label
+	end
+
+	-- Sandwich throws take the aim first; otherwise Auto Collect decides.
+	local collectAim = STATE.aimTarget
+	function STATE.aimTarget()
+		feast.armKind = nil
+		if STATE.autoFeast == true and config and feast.available() then
+			local kind = feast.sandwichKind()
+			if kind then
+				local ok, power, label = pcall(feast.plan)
+				elevate()
+				if ok and type(power) == "number" then
+					feast.armKind = kind
+					feast.target = label
+					return power, "Sandwich: " .. tostring(label), nil
+				end
+			end
+		end
+		return collectAim()
+	end
+
+	-- The server only takes a sandwich once the throw has started
+	-- (Throw_Start), like a Super Throw. keepTrying: a "NoSession" answer
+	-- means the throw has not started yet, so the caller asks again.
+	function feast.arm(keepTrying)
+		local kind = feast.armKind
+		if not kind then
+			return nil
+		end
+		local result = invoke("Throw_UseSandwich", kind)
+		if result.Ok then
+			feast.status = nil
+			feast.thrown += 1
+			return kind
+		end
+		if keepTrying and result.Reason == "NoSession" then
+			return nil
+		end
+		feast.status = "Sandwich refused: " .. tostring(result.Reason or "rejected")
+		feast.armKind = nil
+		return nil
+	end
+
+	function feast.onThrown(kind, animal)
+		noteActivity(string.format("%s sandwich into %s%s", tostring(kind), tostring(feast.target or "a zone"), animal and (": " .. tostring(animal)) or ""))
+	end
+
+	-- Cooking and the chef's treats, near the picnic table.
+	function feast.step()
+		if STATE.autoFeast ~= true or not config or os.clock() < feast.nextStep then
+			return
+		end
+		feast.nextStep = os.clock() + 5
+		if not feast.available() then
+			return
+		end
+		local data = eventData()
+		if (tonumber(helper("RewardsPending", data)) or 0) > 0 then
+			local result = invokeNear("Thanksgiving", chefTarget(), "Thanksgiving_Action", "Claim")
+			if result.Ok then
+				feast.claimed += 1
+				noteActivity("Thanksgiving: claimed the chef's treat")
+				feast.nextStep = os.clock() + 1
+			else
+				feast.status = "Treat: " .. tostring(result.Reason or "rejected")
+				feast.nextStep = os.clock() + 20
+			end
+			return
+		end
+		local order = orderFor(STATE.feastOrder) or orderFor("Regular")
+		local have = tonumber(helper("TotalIngredients", data)) or 0
+		if order and have >= (tonumber(order.Ingredients) or math.huge) then
+			local result = invokeNear("Thanksgiving", chefTarget(), "Thanksgiving_Action", "Cook", order.Key)
+			if result.Ok then
+				feast.cooked += 1
+				feast.status = nil
+				noteActivity("Thanksgiving: cooked a " .. tostring(order.Name or order.Key) .. " sandwich")
+				feast.nextStep = os.clock() + 1.5
+			elseif tostring(result.Reason or ""):find("^Busy") then
+				feast.nextStep = os.clock() + 2
+			else
+				feast.status = "Cook: " .. tostring(result.Reason or "rejected")
+				feast.nextStep = os.clock() + 20
+			end
+		end
+	end
+
+	local function clock(seconds)
+		seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+		if seconds >= 3600 then
+			return string.format("%dh %02dm", seconds // 3600, seconds % 3600 // 60)
+		end
+		return string.format("%d:%02d", seconds // 60, seconds % 60)
+	end
+
+	function feast.text()
+		if not config then
+			return "Thanksgiving isn't in this server"
+		end
+		local eligible, state = feast.available()
+		if type(state) ~= "table" or state.Open ~= true then
+			return state and state.Ended and "The Thanksgiving event has ended" or "Thanksgiving isn't open right now"
+		end
+		if not eligible then
+			return "The game hasn't opened Thanksgiving for you yet"
+		end
+		local now = workspace:GetServerTimeNow()
+		local data = eventData()
+		local index = getData("Index")
+		local found = tonumber(helper("UniqueCount", type(index) == "table" and index or {})) or 0
+		local gobbler = type(config.Gobbler) == "table" and config.Gobbler or {}
+		local lines = {}
+		if state.Active and state.RunEnd then
+			lines[1] = "FEAST IS ON: " .. clock(state.RunEnd - now) .. " left, every catch can bring an ingredient"
+		elseif state.NextStart then
+			lines[1] = "Next Feast in " .. clock(state.NextStart - now)
+		else
+			lines[1] = "No more Feasts"
+		end
+		lines[2] = string.format("Ingredients %d · Sandwiches %d · Treat in %d",
+			tonumber(helper("TotalIngredients", data)) or 0,
+			tonumber(helper("TotalSandwiches", data)) or 0,
+			tonumber(helper("UntilReward", data)) or 0)
+		lines[3] = string.format("Animals %d/%d · Grand Gobbler %s",
+			found, #(config.Animals or {}),
+			data.GobblerCaught == true and "caught!" or string.format("%d/%d", tonumber(helper("GobblerProgress", data)) or 0, tonumber(gobbler.Goal) or 100))
+		lines[4] = string.format("This session: cooked %d, thrown %d, treats %d", feast.cooked, feast.thrown, feast.claimed)
+		if state.EndsAt then
+			lines[5] = "Event ends in " .. clock(state.EndsAt - now)
+		end
+		if feast.status then
+			lines[#lines + 1] = tostring(feast.status)
+		end
+		return table.concat(lines, "\n")
+	end
+end
+
 local lastObservedThrows = tonumber(getData("Throws")) or 0
 local nextThrowTrigger = 0
 local function shouldUseSuperThrow()
@@ -2442,7 +2720,22 @@ local function stepThrow()
 		else
 			STATE.throwMeter.TestAutoTap = 0.9
 		end
-		local wantsSuper = shouldUseSuperThrow()
+		local sandwich = nil
+		local sandwichWanted = STATE.feast and STATE.feast.armKind or nil
+		if sandwichWanted then
+			-- The game's own throw starts the session; pick the sandwich as
+			-- soon as it is running.
+			task.spawn(function()
+				local deadline = os.clock() + 5
+				while running() and not sandwich and os.clock() < deadline do
+					if ClientState.Busy == "Throw" then
+						sandwich = STATE.feast.arm(true)
+					end
+					task.wait(0.15)
+				end
+			end)
+		end
+		local wantsSuper = not sandwichWanted and shouldUseSuperThrow()
 		local superBefore = tonumber(getData("SuperThrows")) or 0
 		local previousSuperBegin = STATE.superThrowController.Begin
 		local requestedSuper = false
@@ -2479,10 +2772,14 @@ local function stepThrow()
 			stats.throws += after - lastObservedThrows
 			STATE.throwStatus = "Completed visible throw " .. tostring(after)
 			noteActivity("Completed catch animation " .. tostring(after))
+
 		elseif not sequenceOk then
 			STATE.throwStatus = "Throw animation error: " .. tostring(sequenceError)
 		else
 			STATE.throwStatus = "Visible throw ended without a catch"
+		end
+		if sandwich then
+			STATE.feast.onThrown(sandwich, nil)
 		end
 		if requestedSuper then
 			local superAfter = tonumber(getData("SuperThrows")) or superBefore
@@ -2500,13 +2797,17 @@ local function stepThrow()
 		nextThrowTrigger = os.clock() + 0.35
 		return 0.25
 	end
+	local sandwich = nil
 	local started = invoke("Throw_Start")
 	local result = nil
 	local superResult = nil
 	if started.Ok then
+		if STATE.feast and STATE.feast.armKind then
+			sandwich = STATE.feast.arm(false)
+		end
 		-- The skipped path has no native meter offer, but the server still
 		-- requires an active throw before it accepts Throw_UseSuper.
-		if shouldUseSuperThrow() then
+		if not sandwich and shouldUseSuperThrow() then
 			if started.SuperOffer == true then
 				superResult = useSuperThrow()
 			else
@@ -2514,6 +2815,9 @@ local function stepThrow()
 			end
 		end
 		result = invoke("Throw_Resolve", STATE.perfectMeter == true and 1 or 0.75)
+		if result.Ok and sandwich then
+			STATE.feast.onThrown(sandwich, result.DisplayName or result.ModelName)
+		end
 		if result.Ok then
 			invoke("Throw_Complete")
 			if superResult and superResult.Ok then
@@ -2532,7 +2836,9 @@ local function stepThrow()
 		stats.throws += after - lastObservedThrows
 		local animal = result and (result.DisplayName or result.ModelName)
 		STATE.throwStatus = "Completed throw " .. tostring(after)
-		noteActivity(animal and ("Caught " .. tostring(animal)) or ("Completed throw " .. tostring(after)))
+		if not sandwich then
+			noteActivity(animal and ("Caught " .. tostring(animal)) or ("Completed throw " .. tostring(after)))
+		end
 	elseif not started.Ok then
 		STATE.throwStatus = "Waiting: " .. tostring(started.Reason or "rejected")
 	elseif result and not result.Ok then
@@ -5596,12 +5902,25 @@ local function installHub()
 	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
 	-- Farming --------------------------------------------------------------
-	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo
+	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo, feastInfo
 	-- Admin Abuse ----------------------------------------------------------
 	do
 		local ringBox = section(abuseTab, "Ring Rush", "orbit")
 		toggle(ringBox, "Auto Ring Rush", "autoRingRush", "When Ring Rush is live: throws, steers through every ring and gets past the imps. Works even with Auto Throw off")
 		ringInfo = info(ringBox, "Ring Rush", tostring(STATE.ringRushText and STATE.ringRushText() or "Checking Ring Rush..."))
+		local feastBox = section(abuseTab, "Thanksgiving", "drumstick")
+		toggle(feastBox, "Auto Thanksgiving", "autoFeast", "Cooks your Feast ingredients at the Turkey Chef, claims his treats and throws the sandwiches: missing Thanksgiving animals first, then the Grand Gobbler")
+		choice(feastBox, "Sandwich Size", "Regular = 3 ingredients (more sandwiches and treats). Mega = 9 (bigger animals, +3 Gobbler)", FEAST_ORDER_OPTIONS, function()
+			return STATE.feastOrder
+		end, function(option)
+			STATE.feastOrder = option
+		end)
+		choice(feastBox, "Sandwich Goal", "Which comes first: the 21 Thanksgiving animals or the Grand Gobbler", FEAST_GOAL_OPTIONS, function()
+			return STATE.feastGoal
+		end, function(option)
+			STATE.feastGoal = option
+		end)
+		feastInfo = info(feastBox, "Thanksgiving", "Checking...")
 		local liveBox = section(abuseTab, "Live Boosts", "sparkles")
 		toggle(liveBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level and during Ring Rush")
 		boostInfo = info(liveBox, "Boosts", tostring(STATE.boostStatus))
@@ -6120,6 +6439,11 @@ local function installHub()
 			elevate()
 			setInfo(ringInfo, ok and tostring(text) or "Checking Ring Rush...")
 		end
+		if STATE.feast then
+			local ok, text = pcall(STATE.feast.text)
+			elevate()
+			setInfo(feastInfo, ok and tostring(text) or "Checking...")
+		end
 		setInfo(aimInfo, tostring(STATE.aimStatus))
 		setInfo(upgradeInfo, string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(food), tostring(stand), tostring(fence)))
 		setInfo(rewardInfo, publicStatus(STATE.rewardStatus))
@@ -6161,10 +6485,21 @@ local function installHub()
 	end)
 
 	if STATE.hideOnStart == true then
-		task.defer(function()
-			elevate()
-			pcall(Window.Close, Window)
-		end)
+		-- WindUI opens itself again just after it is made (with an animation),
+		-- so an immediate Close left the menu open. Close it once it settles,
+		-- and only while it is showing, so a close can never flip it open.
+		for _, delay in ipairs({ 0.8, 1.6, 3 }) do
+			task.delay(delay, function()
+				if windowGone or not running() then
+					return
+				end
+				elevate()
+				local frame = Window.UIElements and Window.UIElements.Main
+				if typeof(frame) == "Instance" and frame.Parent and frame:IsA("GuiObject") and frame.Visible then
+					pcall(Window.Close, Window)
+				end
+			end)
+		end
 	end
 
 	STATE.hubWindow = {
@@ -6213,6 +6548,9 @@ task.spawn(function()
 		pcall(stepTraining)
 		pcall(stepUpgrades)
 		pcall(stepRewards)
+		if STATE.feast then
+			pcall(STATE.feast.step)
+		end
 		if STATE.equipBest == true and os.clock() >= nextEquip then
 			nextEquip = os.clock() + 8
 			pcall(STATE.equipBestNow)
