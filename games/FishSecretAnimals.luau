@@ -2537,15 +2537,26 @@ local function installHub()
 	end)
 
 	if STATE.hideOnStart == true then
-		task.defer(function()
-			elevate()
-			pcall(Window.Close, Window)
-		end)
+		-- WindUI opens itself again just after it is made (with an animation),
+		-- so an immediate Close left the menu open. Close it once it settles,
+		-- and only while it is showing, so a close can never flip it open.
+		for _, delay in ipairs({ 0.8, 1.6, 3 }) do
+			task.delay(delay, function()
+				if windowGone or not running() then
+					return
+				end
+				elevate()
+				local frame = Window.UIElements and Window.UIElements.Main
+				if typeof(frame) == "Instance" and frame.Parent and frame:IsA("GuiObject") and frame.Visible then
+					pcall(Window.Close, Window)
+				end
+			end)
+		end
 	end
 end
 
 loadSaved()
-STATE.version = "1.3.0"
+STATE.version = "1.3.1"
 
 if running() then
 	elevate()
