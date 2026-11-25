@@ -58,8 +58,10 @@ local STATE = {
 	autoClaim = true,
 	autoCodes = true,
 	autoIndex = true,
+	autoAquarium = true,
 	autoHatch = true,
 	autoEquipPets = true,
+	blockOffers = true,
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -133,8 +135,10 @@ local FLAG_KEYS = {
 	AutoClaim = "autoClaim",
 	AutoCodes = "autoCodes",
 	AutoIndex = "autoIndex",
+	AutoAquarium = "autoAquarium",
 	AutoHatch = "autoHatch",
 	AutoEquipPets = "autoEquipPets",
+	BlockOffers = "blockOffers",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	AutoReconnect = "autoReconnect",
@@ -428,6 +432,74 @@ local function tap()
 	end)
 end
 
+-- The game's Robux offer popups (pen full, cash packs, Legend Lure...) stop the
+-- next cast until someone closes them, so a full pen froze Auto Fish after one
+-- catch. Every offer goes through the Offers module's show(), so the hub skips
+-- it while Block Offer Popups is on and hides one that is already open.
+local offers = { hooked = false, nextClose = 0 }
+do
+	local module = Client:FindFirstChild("Offers")
+	if module then
+		local ok, result = pcall(require, module)
+		if ok and type(result) == "table" and type(result.show) == "function" then
+			offers.module = result
+			offers.show = result.show
+		end
+	end
+	elevate()
+
+	function offers.apply()
+		local module = offers.module
+		if not module then
+			return
+		end
+		local want = running() and STATE.blockOffers == true
+		if want and not offers.hooked then
+			offers.hooked = true
+			local original = offers.show
+			module.show = function(...)
+				if running() and STATE.blockOffers == true then
+					return nil
+				end
+				return original(...)
+			end
+		elseif not want and offers.hooked then
+			offers.hooked = false
+			module.show = offers.show
+		end
+	end
+
+	function offers.close()
+		if STATE.blockOffers ~= true or os.clock() < offers.nextClose then
+			return false
+		end
+		local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local gui = playerGui and playerGui:FindFirstChild("OfferGui")
+		if not (gui and gui:IsA("ScreenGui") and gui.Enabled) then
+			return false
+		end
+		offers.nextClose = os.clock() + 1
+		gui.Enabled = false
+		noteActivity("Closed a Robux offer popup")
+		return true
+	end
+
+	-- What the game is waiting on before it will cast, for the status line.
+	function offers.holding()
+		local ok, held = pcall(function()
+			return type(Cast.hold) == "function" and Cast.hold() == true
+		end)
+		elevate()
+		return ok and held
+	end
+end
+hubCleanup(function()
+	if offers.hooked and offers.module then
+		offers.hooked = false
+		offers.module.show = offers.show
+	end
+end)
+
 local fish = {
 	aimSince = nil,
 	aimDelay = 0.6,
@@ -448,6 +520,7 @@ local fish = {
 	nextClaim = 0,
 	claimBlock = {},
 	nextPets = 0,
+	nextAquarium = 0,
 	hatchBlock = {},
 	favoriteTried = false,
 }
@@ -598,6 +671,14 @@ local function stepFish()
 	if isTraining() then
 		send("StopTraining")
 		fish.nextCast = os.clock() + 0.8
+		return
+	end
+	if offers.holding() then
+		-- The game will not start a cast while one of its popups is open.
+		offers.close()
+		fish.nextCast = os.clock() + 0.5
+		STATE.status = "Fishing"
+		STATE.detail = STATE.blockOffers and "Waiting for a game popup to close" or "Close the game's popup to keep fishing"
 		return
 	end
 	local ok, started = pcall(Cast.goFish)
@@ -955,6 +1036,31 @@ local function stepClaims(force)
 				if complete and claim("Index" .. tostring(biome.Id), "Index", biome.Id) then
 					count += 1
 					notify("Index reward", tostring(biome.Name or biome.Id))
+				end
+			end
+		end
+	end
+	if (STATE.autoAquarium or force) and (force or os.clock() >= fish.nextAquarium) then
+		-- Aquarium milestones: every new species + mutation you catch fills it up,
+		-- and each milestone (5%, 10%, 20%...) has a reward to claim.
+		fish.nextAquarium = os.clock() + 60
+		local aquarium = type(Config.Aquarium) == "table" and Config.Aquarium or {}
+		local ok, data = call("Aquarium", "Get", LocalPlayer.UserId)
+		if ok == true and type(data) == "table" and data.Mine == true and type(Config.AquariumDone) == "function" then
+			local okDone, done = pcall(Config.AquariumDone, data.Record)
+			done = okDone and tonumber(done) or 0
+			local claimed = type(data.Claimed) == "table" and data.Claimed or {}
+			for _, milestone in ipairs(type(aquarium.Milestones) == "table" and aquarium.Milestones or {}) do
+				local at = tonumber(milestone.At)
+				if at and at <= done + 1e-6 and claimed[tostring(milestone.At)] ~= true then
+					local good, message = call("Aquarium", "Claim", milestone.At)
+					if not good then
+						break
+					end
+					count += 1
+					stats.claimed += 1
+					notify("Aquarium " .. tostring(milestone.At) .. "% reward", type(message) == "string" and message or "")
+					task.wait(0.5)
 				end
 			end
 		end
@@ -1633,7 +1739,7 @@ local function installHub()
 		syncToggle("autoFish")
 		notify(on and "Fishing started" or "Fishing stopped", "")
 	end)
-	button(homeTab, "Claim Now", "Daily, timed gifts, offline cash, Index rewards and codes", "gift", function()
+	button(homeTab, "Claim Now", "Daily, timed gifts, offline cash, Index and Aquarium rewards and codes", "gift", function()
 		task.spawn(function()
 			local count = STATE.claimNow()
 			notify(count > 0 and ("Claimed " .. count) or "Nothing ready", "")
@@ -1646,6 +1752,7 @@ local function installHub()
 		local castBox = section(fishTab, "Casting", "fish")
 		toggle(castBox, "Auto Fish", "autoFish", "Casts, lands the catch and casts again")
 		toggle(castBox, "Perfect Cast", "perfectCast", "Locks the power bar at the top every time")
+		toggle(castBox, "Block Offer Popups", "blockOffers", "Keeps the game's Robux offers closed. They stop fishing until closed")
 		fishInfo = info(castBox, "Status", "Starting")
 
 		local catchBox = section(fishTab, "Your Catch", "package")
@@ -1691,6 +1798,7 @@ local function installHub()
 		local claimBox = section(rewardTab, "Free Rewards", "gift")
 		toggle(claimBox, "Auto Claim", "autoClaim", "Daily reward, timed gifts, offline cash, group and favorite rewards")
 		toggle(claimBox, "Auto Index Rewards", "autoIndex", "Claims each area once you have caught every Sea Beast in it")
+		toggle(claimBox, "Auto Aquarium Rewards", "autoAquarium", "Claims the Aquarium milestones (5%, 10%, 20%...): cash, worms and luck")
 		toggle(claimBox, "Redeem Codes", "autoCodes", "Redeems the free codes once: " .. table.concat(PUBLIC_CODES, ", "))
 		button(claimBox, "Redeem Codes Now", nil, "ticket", function()
 			table.clear(STATE.redeemed)
@@ -1886,7 +1994,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.0.0"
+STATE.version = "1.0.1"
 
 if running() then
 	elevate()
@@ -1934,6 +2042,8 @@ task.spawn(function()
 		pcall(stepDoubleRep)
 		pcall(stepSpeed)
 		pcall(hidePausePopup)
+		pcall(offers.apply)
+		pcall(offers.close)
 		task.wait(0.15)
 	end
 end)
