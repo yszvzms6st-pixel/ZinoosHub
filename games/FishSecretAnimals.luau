@@ -1134,8 +1134,14 @@ local function rodPrice(index)
 	if type(rod.FixedPrice) == "number" then
 		return rod.FixedPrice
 	end
+	-- The late rods (Rocket and up) cost their listed Price, far above the curve.
 	local ok, price = pcall(Config.RodPrice, index)
-	return ok and tonumber(price) or tonumber(rod.Price)
+	local curve = ok and tonumber(price) or nil
+	local listed = tonumber(rod.Price)
+	if curve and listed then
+		return math.max(curve, listed)
+	end
+	return curve or listed
 end
 
 local function nextRod()
@@ -2393,7 +2399,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.1.0"
+STATE.version = "1.1.1"
 
 if running() then
 	elevate()
