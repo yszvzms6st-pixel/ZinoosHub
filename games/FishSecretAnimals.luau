@@ -1,7 +1,7 @@
 -- Zinoos hub for Fish for Secret Animals!
 -- Same WindUI window as the other Zinoos games. It casts for you (every cast is a
 -- perfect cast), puts the best Sea Beasts in your pen, sells the rest, trains at
--- the gym, buys upgrades and claims the free rewards.
+-- the gym, dives in the Sunken Treasury, buys upgrades and claims the free rewards.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -53,8 +53,9 @@ local STATE = {
 	autoBuyRod = true,
 	autoBuyPen = true,
 	autoBuyBar = true,
-	autoBuyBait = false,
+	autoBuyBait = true,
 	autoBestBait = true,
+	useSpecialBait = true,
 	autoClaim = true,
 	autoCodes = true,
 	autoIndex = true,
@@ -62,6 +63,11 @@ local STATE = {
 	autoHatch = true,
 	autoEquipPets = true,
 	blockOffers = true,
+	autoLair = true,
+	lairSpot = "Hot Spring",
+	lairRisk = "Smart",
+	lairTime = "60s",
+	autoDoubloons = true,
 	walkSpeed = false,
 	speed = 32,
 	antiAfk = true,
@@ -132,6 +138,7 @@ local FLAG_KEYS = {
 	AutoBuyBar = "autoBuyBar",
 	AutoBuyBait = "autoBuyBait",
 	AutoBestBait = "autoBestBait",
+	UseSpecialBait = "useSpecialBait",
 	AutoClaim = "autoClaim",
 	AutoCodes = "autoCodes",
 	AutoIndex = "autoIndex",
@@ -139,6 +146,8 @@ local FLAG_KEYS = {
 	AutoHatch = "autoHatch",
 	AutoEquipPets = "autoEquipPets",
 	BlockOffers = "blockOffers",
+	AutoLair = "autoLair",
+	AutoDoubloons = "autoDoubloons",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
 	AutoReconnect = "autoReconnect",
@@ -157,12 +166,19 @@ local SPLITS = {
 	["Even"] = { 90, 90 },
 	["Mostly train"] = { 45, 150 },
 }
+local LAIR_RISK_OPTIONS = { "Safe", "Smart", "Greedy" }
+local LAIR_RISKS = { Safe = 0.6, Smart = 1, Greedy = 1.4 }
+local LAIR_TIME_OPTIONS = { "30s", "60s", "120s", "240s" }
+local LAIR_SPOT_OPTIONS = { "Hot Spring", "Ice Hole", "Pearl Pool", "Abyss Hole" }
 local SPEED_OPTIONS = { "16", "24", "32", "50", "75", "100" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
 local CHOICES = {
 	CatchMode = { key = "catchMode", options = CATCH_OPTIONS },
 	KeepRarity = { key = "keepRarity", options = KEEP_OPTIONS },
 	Split = { key = "split", options = SPLIT_OPTIONS },
+	LairSpot = { key = "lairSpot", options = LAIR_SPOT_OPTIONS },
+	LairRisk = { key = "lairRisk", options = LAIR_RISK_OPTIONS },
+	LairTime = { key = "lairTime", options = LAIR_TIME_OPTIONS },
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	WindTheme = { key = "windTheme" },
 	HubSize = { key = "hubSize", options = { "Compact", "Normal", "Large" } },
@@ -753,20 +769,340 @@ local function stepDoubleRep()
 	end
 end
 
--- Fish and train take turns when both are on.
+-- Sunken Treasury: doubloon dives. It opens once your power reaches the
+-- Prehistoric sea. Each dive goes deeper for bigger chests while the snap
+-- chance is worth it, then keeps the haul.
+local LAIR = type(Config.Lair) == "table" and Config.Lair or {}
+local LAIR_DEPTHS = type(LAIR.Depths) == "table" and LAIR.Depths or {}
+local LAIR_LOOT_VALUE = { NeptunePearl = 3000, DivineBait = 90000, Egg = 1500, Skin = 25000, Beast = 25000 }
+local lair = {
+	nextDive = 0,
+	nextEnter = 0,
+	nextLeave = 0,
+	nextShop = 0,
+	dives = 0,
+	snaps = 0,
+	doubloons = 0,
+	deepest = 0,
+	fails = 0,
+	token = nil,
+}
+STATE.lair = lair
+-- Unloading mid-dive keeps what that dive already found.
+hubCleanup(function()
+	local open = lair.token
+	lair.token = nil
+	if open ~= nil then
+		task.spawn(pcall, Net.invoke, "Lair", "keep", open)
+	end
+end)
+
+local function lairOpen()
+	local ok, open = pcall(Config.LairOpen, tonumber(attr("Power")) or 0)
+	elevate()
+	return ok and open == true
+end
+STATE.lairOpen = lairOpen
+
+local function inLair()
+	local _, root = character()
+	local origin = LAIR.Origin
+	return root ~= nil and typeof(origin) == "Vector3" and (root.Position - origin).Magnitude < 400
+end
+
+local function lairSpotId()
+	for _, spot in ipairs(type(LAIR.Spots) == "table" and LAIR.Spots or {}) do
+		if spot.Name == STATE.lairSpot then
+			return spot.Id
+		end
+	end
+	return "HotSpring"
+end
+
+local function chestAverage(depth)
+	local row = LAIR_DEPTHS[depth]
+	if type(row) ~= "table" then
+		return 0
+	end
+	for _, chest in ipairs(type(LAIR.Chests) == "table" and LAIR.Chests or {}) do
+		if chest.Id == row.Chest then
+			return ((tonumber(chest.Min) or 0) + (tonumber(chest.Max) or 0)) / 2
+		end
+	end
+	return 0
+end
+
+local function lootValue(got)
+	if type(got) ~= "table" then
+		return 0
+	end
+	if got.Kind == "Chest" then
+		return tonumber(got.Doubloons) or 0
+	end
+	if got.SeaKing or got.Kind == "SeaKing" then
+		return math.huge
+	end
+	local each = LAIR_LOOT_VALUE[got.Bait or ""] or LAIR_LOOT_VALUE[got.Kind or ""] or 3000
+	return each * (tonumber(got.Count) or 1)
+end
+
+local function lootWords(got)
+	if type(got) ~= "table" or got.Kind == "Chest" then
+		return nil
+	end
+	if got.SeaKing or got.Kind == "SeaKing" then
+		return "the SEA KING"
+	end
+	if got.Kind == "Bait" then
+		local bait = Config.BaitById and Config.BaitById[got.Bait or ""]
+		return tostring(got.Count or 1) .. "x " .. tostring(bait and bait.Name or got.Bait or "bait")
+	end
+	if got.Kind == "Beast" then
+		return "a Sea Beast"
+	end
+	local word = string.lower(tostring(got.Kind or "prize"))
+	return (string.find(word, "^[aeiou]") and "an " or "a ") .. word
+end
+
+local function stepLeaveLair()
+	if not inLair() or os.clock() < lair.nextLeave then
+		return false
+	end
+	lair.nextLeave = os.clock() + 3
+	STATE.status = "Leaving the Treasury"
+	STATE.detail = ""
+	call("Lair", "leave")
+	return true
+end
+
+-- One dive: go down while the snap chance is lower than what the next chest adds.
+local function lairDive()
+	local spotId = lairSpotId()
+	local map = Workspace:FindFirstChild("Map")
+	local lairMap = map and map:FindFirstChild("Lair")
+	local spots = lairMap and lairMap:FindFirstChild("Spots")
+	local spot = spots and spots:FindFirstChild(spotId)
+	local _, root = character()
+	if not spot or not root then
+		STATE.detail = "Looking for the dive spot"
+		lair.nextDive = os.clock() + 2
+		return
+	end
+	local pos = spot:GetPivot().Position
+	if (root.Position - pos).Magnitude > 6 then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
+		task.wait(0.4)
+	end
+	local result, message = call("Lair", "dive", spotId, "Strong")
+	if type(result) ~= "table" or result.Token == nil then
+		lair.nextDive = os.clock() + 2
+		if type(message) == "string" and message ~= "stopped" then
+			STATE.detail = message
+		end
+		-- The server can forget you are down here (after a reload or a lag spike):
+		-- going in again fixes it.
+		lair.fails += 1
+		if lair.fails >= 2 and running() then
+			lair.fails = 0
+			call("Lair", "stop")
+			call("Lair", "enter")
+			lair.nextDive = os.clock() + 1.5
+		end
+		return
+	end
+	lair.fails = 0
+	local diveToken = result.Token
+	lair.token = diveToken
+	local depth = tonumber(result.Depth) or 1
+	local snap = tonumber(result.Snap) or 1
+	local haul = lootValue(result.Got)
+	local found = {}
+	local scale = 1
+	local function learn(got, at)
+		local average = chestAverage(at)
+		if type(got) == "table" and got.Kind == "Chest" and average > 0 then
+			scale = math.clamp((tonumber(got.Doubloons) or average) / average, 0.5, 3)
+		end
+		local words = lootWords(got)
+		if words then
+			table.insert(found, words)
+		end
+	end
+	learn(result.Got, depth)
+	local risk = LAIR_RISKS[STATE.lairRisk] or 1
+	while running() and STATE.autoLair == true and depth < #LAIR_DEPTHS and haul ~= math.huge do
+		local gain = chestAverage(depth + 1) * scale
+		if gain <= 0 or snap >= gain / (haul + gain) * risk then
+			break
+		end
+		STATE.status = "Sunken Treasury"
+		STATE.detail = string.format("Depth %d · %s doubloons so far · %d%% snap risk", depth, shortNumber(haul), math.floor(snap * 100 + 0.5))
+		local step
+		local started = os.clock()
+		repeat
+			task.wait(0.3)
+			step = call("Lair", "deeper", diveToken)
+		until type(step) == "table" or os.clock() - started > 6 or not running()
+		if type(step) ~= "table" then
+			break
+		end
+		if step.Snapped then
+			lair.token = nil
+			lair.snaps += 1
+			if #found > 0 then
+				noteActivity("Line snapped at depth " .. tostring(depth + 1) .. ", lost " .. table.concat(found, ", "))
+			end
+			lair.nextDive = os.clock() + 1
+			return
+		end
+		depth = tonumber(step.Depth) or depth + 1
+		snap = tonumber(step.Snap) or 1
+		haul += lootValue(step.Got)
+		learn(step.Got, depth)
+	end
+	local kept
+	for _ = 1, 20 do
+		task.wait(0.3)
+		kept = call("Lair", "keep", diveToken)
+		if type(kept) == "table" or not running() then
+			break
+		end
+	end
+	lair.token = nil
+	if type(kept) ~= "table" then
+		call("Lair", "stop")
+		lair.nextDive = os.clock() + 2
+		return
+	end
+	local coins = tonumber(kept.Doubloons) or tonumber(kept.Total) or 0
+	lair.dives += 1
+	lair.doubloons += coins
+	lair.deepest = math.max(lair.deepest, depth)
+	-- Every dive is in the Treasury line on Home; only the good ones go in the log.
+	if #found > 0 then
+		notify("Treasury loot", table.concat(found, ", ") .. " · +" .. shortNumber(coins) .. " doubloons")
+	elseif depth >= 7 then
+		noteActivity("Treasury dive to depth " .. tostring(depth) .. ": +" .. shortNumber(coins) .. " doubloons")
+	end
+	lair.nextDive = os.clock() + 0.5
+end
+
+local function stepLair()
+	if Cast.busy() then
+		stepFish()
+		return
+	end
+	if not inLair() then
+		if handleCatch() then
+			return
+		end
+		if isTraining() then
+			send("StopTraining")
+			return
+		end
+		if os.clock() < lair.nextEnter then
+			return
+		end
+		lair.nextEnter = os.clock() + 4
+		STATE.status = "Sunken Treasury"
+		STATE.detail = "Diving down to the Treasury"
+		local ok, message = call("Lair", "enter")
+		if ok ~= true and type(message) == "string" and message ~= "stopped" then
+			STATE.detail = message
+			lair.nextEnter = os.clock() + 15
+		end
+		return
+	end
+	if os.clock() < lair.nextDive then
+		return
+	end
+	STATE.status = "Sunken Treasury"
+	STATE.detail = "Diving at the " .. tostring(STATE.lairSpot)
+	lairDive()
+end
+
+-- Doubloon shop: Line Strength first (fewer snaps), then Luck, then keep a Luck Potion going.
+local function stepDoubloons()
+	if STATE.autoDoubloons ~= true or os.clock() < lair.nextShop then
+		return
+	end
+	lair.nextShop = os.clock() + 5
+	local coins = tonumber(attr("Doubloons")) or 0
+	for _, id in ipairs({ "Line", "Luck" }) do
+		local skill = Config.LairSkillById and Config.LairSkillById[id]
+		if type(skill) == "table" and type(skill.Levels) == "table" then
+			local level = math.clamp(math.floor(tonumber(attr("Lair" .. id)) or 0), 0, #skill.Levels)
+			local row = skill.Levels[level + 1]
+			if row then
+				if coins >= (tonumber(row.Price) or math.huge) then
+					local ok, message = call("Lair", "upgrade", id)
+					if ok == true then
+						stats.bought += 1
+						notify(tostring(skill.Name) .. " upgraded", "Level " .. tostring(level + 1))
+					elseif type(message) == "string" then
+						noteActivity(tostring(skill.Name) .. ": " .. message)
+						lair.nextShop = os.clock() + 30
+					end
+				end
+				return
+			end
+		end
+	end
+	local potion = Config.LairShopById and Config.LairShopById.Luck
+	local ends = tonumber(attr("LuckBoostEnds")) or 0
+	if type(potion) == "table" and coins >= (tonumber(potion.Price) or math.huge) and ends < Workspace:GetServerTimeNow() then
+		local ok, message = call("Lair", "buy", "Luck", nil, false)
+		if ok == true then
+			stats.bought += 1
+			notify("Luck Potion", "x2 luck for " .. tostring(potion.Minutes or 15) .. " min")
+		else
+			if type(message) == "string" then
+				noteActivity("Luck Potion: " .. message)
+			end
+			lair.nextShop = os.clock() + 60
+		end
+	end
+end
+
+-- Fishing, training and the Treasury take turns when more than one is on.
+local function phaseList()
+	local list = {}
+	if STATE.autoFish == true then
+		table.insert(list, "fish")
+	end
+	if STATE.autoTrain == true then
+		table.insert(list, "train")
+	end
+	if STATE.autoLair == true and lairOpen() then
+		table.insert(list, "dive")
+	end
+	return list
+end
+
+local function phaseLength(phase)
+	local split = SPLITS[STATE.split] or SPLITS["Mostly fish"]
+	if phase == "fish" then
+		return split[1]
+	elseif phase == "train" then
+		return split[2]
+	end
+	return tonumber(string.match(tostring(STATE.lairTime), "%d+")) or 60
+end
+
 local function currentPhase()
-	local fishing, training = STATE.autoFish == true, STATE.autoTrain == true
-	if fishing and not training then
-		return "fish"
-	elseif training and not fishing then
-		return "train"
-	elseif not fishing and not training then
+	local list = phaseList()
+	if #list == 0 then
 		return "none"
 	end
-	local split = SPLITS[STATE.split] or SPLITS["Mostly fish"]
-	if os.clock() >= fish.phaseUntil and not Cast.busy() then
-		fish.phase = fish.phase == "fish" and "train" or "fish"
-		fish.phaseUntil = os.clock() + (fish.phase == "fish" and split[1] or split[2])
+	if #list == 1 then
+		fish.phase = list[1]
+		return fish.phase
+	end
+	local index = table.find(list, fish.phase)
+	if (not index or os.clock() >= fish.phaseUntil) and not Cast.busy() then
+		fish.phase = list[(index or 0) % #list + 1]
+		fish.phaseUntil = os.clock() + phaseLength(fish.phase)
 	end
 	return fish.phase
 end
@@ -774,13 +1110,18 @@ end
 local function stepMain()
 	applyPerfect()
 	local phase = currentPhase()
+	if phase ~= "dive" and stepLeaveLair() then
+		return
+	end
 	if phase == "fish" then
 		stepFish()
 	elseif phase == "train" then
 		stepTrain()
+	elseif phase == "dive" then
+		stepLair()
 	else
 		STATE.status = "Idle"
-		STATE.detail = "Auto Fish and Auto Train are off"
+		STATE.detail = "Auto Fish, Auto Train and Auto Treasury are off"
 	end
 end
 
@@ -893,16 +1234,37 @@ local function baitCount(id)
 	return type(owned) == "table" and (tonumber(owned[id]) or 0) or 0
 end
 
+-- Guaranteed-rarity baits beat luck baits; then the luckiest one wins.
+-- Jackpot Bait is left alone: its "Secret Cast" is a slot spin that mostly
+-- lands Rare or Epic, worse than a normal cast later in the game.
+local function baitScore(bait)
+	if bait.SecretCast == true then
+		return 0
+	end
+	local luck = tonumber(bait.Luck) or 1
+	if STATE.useSpecialBait == true then
+		local effect = tostring(bait.Effect or "")
+		if bait.Id == "DivineBait" or string.find(effect, "Always a Divine", 1, true) then
+			return 1e6
+		elseif string.find(effect, "Always a Secret", 1, true) then
+			return 1e5
+		elseif string.find(effect, "Mythic or rarer", 1, true) then
+			return 1e4
+		end
+	end
+	return luck
+end
+
 local function stepBait()
 	if os.clock() < fish.nextBait or Cast.busy() then
 		return
 	end
 	fish.nextBait = os.clock() + 5
 	if STATE.autoBuyBait then
-		-- Best cash bait you can afford five packs of, when you have none left.
+		-- Best cash bait that costs under 1% of your cash, when you have none left.
 		local best
 		for _, bait in ipairs(Config.Baits) do
-			if (tonumber(bait.Price) or 0) > 0 and (tonumber(bait.Robux) or 0) == 0 and cash() >= bait.Price * 5 then
+			if (tonumber(bait.Price) or 0) > 0 and (tonumber(bait.Robux) or 0) == 0 and cash() >= bait.Price * 100 then
 				if not best or (bait.Luck or 1) > (best.Luck or 1) then
 					best = bait
 				end
@@ -920,7 +1282,7 @@ local function stepBait()
 	if STATE.autoBestBait then
 		local best = Config.BaitById.Worm
 		for _, bait in ipairs(Config.Baits) do
-			if baitCount(bait.Id) > 0 and (bait.Luck or 1) > (best and best.Luck or 1) then
+			if baitCount(bait.Id) > 0 and baitScore(bait) > (best and baitScore(best) or 1) then
 				best = bait
 			end
 		end
@@ -1748,6 +2110,7 @@ local function installHub()
 	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
 	local fishInfo
+	local lairInfo
 	do
 		local castBox = section(fishTab, "Casting", "fish")
 		toggle(castBox, "Auto Fish", "autoFish", "Casts, lands the catch and casts again")
@@ -1781,6 +2144,27 @@ local function installHub()
 			fish.phaseUntil = 0
 		end)
 		toggle(trainBox, "Auto Double Rep", "autoDoubleRep", "Hits the 2x button every time it pops up")
+
+		local lairBox = section(fishTab, "Sunken Treasury", "gem")
+		toggle(lairBox, "Auto Treasury", "autoLair", "Dives for doubloon chests. Takes turns with fishing and training")
+		choice(lairBox, "Dive Spot", "Hot Spring: more doubloons. Ice Hole: bigger chests. Pearl Pool: eggs and pearls. Abyss Hole: Sea Beasts", LAIR_SPOT_OPTIONS, function()
+			return STATE.lairSpot
+		end, function(option)
+			STATE.lairSpot = option
+		end)
+		choice(lairBox, "Dive Risk", "Smart goes deeper only while the next chest is worth the snap chance", LAIR_RISK_OPTIONS, function()
+			return STATE.lairRisk
+		end, function(option)
+			STATE.lairRisk = option
+		end)
+		choice(lairBox, "Treasury Time", "How long each Treasury turn lasts", LAIR_TIME_OPTIONS, function()
+			return STATE.lairTime
+		end, function(option)
+			STATE.lairTime = option
+			fish.phaseUntil = 0
+		end)
+		toggle(lairBox, "Auto Spend Doubloons", "autoDoubloons", "Line Strength, then Luck upgrades, then keeps a Luck Potion going")
+		lairInfo = info(lairBox, "Treasury", "Waiting")
 	end
 
 	do
@@ -1791,7 +2175,8 @@ local function installHub()
 
 		local baitBox = section(shopTab, "Bait", "bug")
 		toggle(baitBox, "Use Best Bait", "autoBestBait", "Equips the luckiest bait you own")
-		toggle(baitBox, "Auto Buy Bait", "autoBuyBait", "Buys the best cash bait when you can afford five packs")
+		toggle(baitBox, "Use Special Baits", "useSpecialBait", "Always-Divine, Always-Secret and Mythic Magnet baits go first. Turn off to save them")
+		toggle(baitBox, "Auto Buy Bait", "autoBuyBait", "Buys the luckiest cash bait that costs under 1% of your money")
 	end
 
 	do
@@ -1948,7 +2333,7 @@ local function installHub()
 		local bait = Config.BaitById and Config.BaitById[attr("Bait") or ""]
 		local baitLeft = baitCount(attr("Bait") or "Worm")
 		setInfo(overview, string.format(
-			"%s\n$%s  ·  $%s/s\nLevel %s  ·  Power %s\n%s  ·  %s%s\nPen %s/%s  ·  Session %s",
+			"%s\n$%s  ·  $%s/s\nLevel %s  ·  Power %s\n%s  ·  %s%s\nPen %s/%s  ·  %s doubloons  ·  Session %s",
 			tostring(STATE.status or "Waiting"),
 			shortNumber(cash()),
 			shortNumber(attr("Income") or 0),
@@ -1959,12 +2344,16 @@ local function installHub()
 			baitLeft ~= math.huge and (" x" .. tostring(baitLeft)) or "",
 			tostring(attr("PenCount") or 0),
 			tostring(attr("PenSlots") or 0),
+			shortNumber(attr("Doubloons") or 0),
 			clock
 		))
 		local lines = {
 			string.format("Casts %d  ·  Kept %d  ·  Sold %d ($%s)", stats.casts, stats.kept, stats.sold, shortNumber(stats.soldCash)),
 			string.format("Double reps %d  ·  Bought %d  ·  Claimed %d", stats.doubles, stats.bought, stats.claimed),
 		}
+		if lair.dives > 0 or lair.snaps > 0 then
+			lines[#lines + 1] = string.format("Treasury dives %d  ·  +%s doubloons  ·  Snapped %d", lair.dives, shortNumber(lair.doubloons), lair.snaps)
+		end
 		if (tonumber(attr("Tutorial")) or 0) ~= 0 then
 			lines[#lines + 1] = "Finishing the game's tutorial for you"
 		end
@@ -1976,6 +2365,16 @@ local function installHub()
 		end
 		setInfo(activityInfo, table.concat(lines, "\n"))
 		setInfo(fishInfo, tostring(STATE.status or "Waiting") .. "\n" .. tostring(STATE.detail or ""))
+		local lairText
+		if not lairOpen() then
+			lairText = "Opens when your power can reach the Prehistoric sea. Keep training!"
+		else
+			local lineSkill = math.floor(tonumber(attr("LairLine")) or 0)
+			local luckSkill = math.floor(tonumber(attr("LairLuck")) or 0)
+			lairText = string.format("%s doubloons  ·  Line Strength %d/5  ·  Luck %d/5\nThis session: %d dives, +%s, deepest %d, snapped %d",
+				shortNumber(attr("Doubloons") or 0), lineSkill, luckSkill, lair.dives, shortNumber(lair.doubloons), lair.deepest, lair.snaps)
+		end
+		setInfo(lairInfo, lairText)
 	end
 
 	task.spawn(function()
@@ -1994,7 +2393,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.0.1"
+STATE.version = "1.1.0"
 
 if running() then
 	elevate()
@@ -2029,6 +2428,7 @@ task.spawn(function()
 		pcall(stepSellExtras)
 		pcall(stepBuy)
 		pcall(stepBait)
+		pcall(stepDoubloons)
 		pcall(stepClaims)
 		pcall(stepPets)
 		elevate()
