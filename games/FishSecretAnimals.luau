@@ -56,6 +56,7 @@ local STATE = {
 	autoBuyBait = true,
 	autoBestBait = true,
 	useSpecialBait = true,
+	makeRoom = true,
 	autoClaim = true,
 	autoCodes = true,
 	autoIndex = true,
@@ -140,6 +141,7 @@ local FLAG_KEYS = {
 	AutoBuyBait = "autoBuyBait",
 	AutoBestBait = "autoBestBait",
 	UseSpecialBait = "useSpecialBait",
+	MakeRoom = "makeRoom",
 	AutoClaim = "autoClaim",
 	AutoCodes = "autoCodes",
 	AutoIndex = "autoIndex",
@@ -552,7 +554,7 @@ local function sellBeast(beast)
 		stats.soldCash += tonumber(value) or 0
 		return true
 	end
-	fish.sellBlock[beast.Id] = os.clock() + 120
+	fish.sellBlock[beast.Id] = os.clock() + 600
 	return false
 end
 
@@ -584,55 +586,110 @@ local function handleCatch()
 	return true
 end
 
--- Sell what is left in storage after the pen has been filled.
+-- Selling stored Sea Beasts. The server only sells at the SELL stall, and not
+-- while you are casting, training or down in the Treasury. So this picks what
+-- to sell here, and the main loop walks over and sells it between casts.
 local function stepSellExtras()
-	if os.clock() < fish.nextSell or STATE.catchMode == nil then
+	if os.clock() < fish.nextSell or STATE.catchMode == nil or fish.sellList then
 		return
 	end
 	fish.nextSell = os.clock() + 15
 	if fish.lastFill == 0 or os.clock() - fish.lastFill < 2 then
 		return
 	end
-	local stored = {}
-	for _, beast in ipairs(beasts()) do
-		if type(beast) == "table" and beast.S == "store" and not protected(beast) and (fish.sellBlock[beast.Id] or 0) < os.clock() then
-			table.insert(stored, beast)
+	local all = beasts()
+	local limit = (tonumber(Config.MaxBeasts) or 100) - 5
+	local list, picked = {}, {}
+	local function pick(beast)
+		if #list < 10 and not picked[beast.Id] then
+			picked[beast.Id] = true
+			table.insert(list, beast)
 		end
 	end
-	if #stored == 0 then
-		return
+	local function cheapestFirst(a, b)
+		return beastValue(a) < beastValue(b)
 	end
-	if STATE.catchMode == "Keep everything" then
-		local limit = (tonumber(Config.MaxBeasts) or 100) - 5
-		if #beasts() < limit then
-			return
+	-- Storage holds Config.MaxBeasts. Once it is full the game removes a Sea
+	-- Beast for every new catch, so sell the cheapest stored ones first.
+	-- Never Secret or rarer, locked or exclusive ones, and never the pen.
+	if STATE.makeRoom == true and #all >= limit then
+		local secret = RARITY_RANK.Secret or 99
+		local spare = {}
+		for _, beast in ipairs(all) do
+			if type(beast) == "table" and beast.S == "store" and not beast.L and (fish.sellBlock[beast.Id] or 0) < os.clock() then
+				local info = Config.BeastById[beast.K]
+				if type(info) == "table" and not info.Exclusive and beastRank(beast) < secret then
+					table.insert(spare, beast)
+				end
+			end
 		end
-		table.sort(stored, function(a, b)
-			return beastValue(a) < beastValue(b)
-		end)
-		local extra = #beasts() - limit + 1
-		for index = 1, math.min(extra, #stored) do
-			sellBeast(stored[index])
-			task.wait(0.25)
+		table.sort(spare, cheapestFirst)
+		for index = 1, math.min(#all - limit + 1, #spare) do
+			pick(spare[index])
 		end
-		return
 	end
-	local sold = 0
-	for _, beast in ipairs(stored) do
-		if not running() or Cast.busy() then
+	if STATE.catchMode ~= "Keep everything" then
+		for _, beast in ipairs(all) do
+			if type(beast) == "table" and beast.S == "store" and not protected(beast) and (fish.sellBlock[beast.Id] or 0) < os.clock() then
+				pick(beast)
+			end
+		end
+	end
+	if #list > 0 then
+		fish.sellList = list
+		fish.sellFull = #all >= limit
+	end
+end
+
+local function sellSpot()
+	local map = Workspace:FindFirstChild("Map")
+	local stands = map and map:FindFirstChild("Stands")
+	local stall = stands and stands:FindFirstChild("Sell")
+	local circle = stall and stall:FindFirstChild("Circle")
+	if circle and circle:IsA("Model") and circle:FindFirstChildWhichIsA("BasePart", true) then
+		return (circle:GetBoundingBox()).Position
+	end
+	return stall and stall:GetPivot().Position or nil
+end
+
+-- Runs on the main loop between casts.
+local function stepSellTrip()
+	local list = fish.sellList
+	if not list or Cast.busy() or carried() then
+		return false
+	end
+	fish.sellList = nil
+	local spot = sellSpot()
+	local _, root = character()
+	if not spot or not root then
+		return false
+	end
+	if isTraining() then
+		send("StopTraining")
+		task.wait(0.6)
+	end
+	STATE.status = "Selling"
+	STATE.detail = "At the SELL stall"
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.CFrame = CFrame.new(spot + Vector3.new(0, 3.2, 0))
+	task.wait(0.6)
+	local sold, cashBefore = 0, stats.soldCash
+	for _, beast in ipairs(list) do
+		if not running() then
 			break
 		end
 		if sellBeast(beast) then
 			sold += 1
 		end
 		task.wait(0.25)
-		if sold >= 10 then
-			break
-		end
 	end
 	if sold > 0 then
-		noteActivity("Sold " .. sold .. " extra Sea Beast" .. (sold == 1 and "" or "s"))
+		local why = fish.sellFull and "Storage full: sold " or "Sold "
+		noteActivity(why .. sold .. " Sea Beast" .. (sold == 1 and "" or "s") .. " at the stall for $" .. shortNumber(stats.soldCash - cashBefore))
 	end
+	fish.nextCast = os.clock() + 0.3
+	fish.nextStart = 0
+	return true
 end
 
 local function stepFillPen()
@@ -944,6 +1001,8 @@ local function lairDive()
 		STATE.detail = string.format("Depth %d · %s doubloons so far · %d%% snap risk", depth, shortNumber(haul), math.floor(snap * 100 + 0.5))
 		local step
 		local started = os.clock()
+		-- The server takes about 0.9 s between steps.
+		task.wait(0.6)
 		repeat
 			task.wait(0.3)
 			step = call("Lair", "deeper", diveToken)
@@ -1044,9 +1103,12 @@ local function stepDoubloons()
 					if ok == true then
 						stats.bought += 1
 						notify(tostring(skill.Name) .. " upgraded", "Level " .. tostring(level + 1))
-					elseif type(message) == "string" then
-						noteActivity(tostring(skill.Name) .. ": " .. message)
-						lair.nextShop = os.clock() + 30
+					else
+						-- Refused (often mid-dive): try again a bit later.
+						lair.nextShop = os.clock() + 15
+						if type(message) == "string" and message ~= "stopped" then
+							noteActivity(tostring(skill.Name) .. ": " .. message)
+						end
 					end
 				end
 				return
@@ -1117,6 +1179,9 @@ local function stepMain()
 	if phase ~= "dive" and stepLeaveLair() then
 		return
 	end
+	if phase ~= "dive" and stepSellTrip() then
+		return
+	end
 	if phase == "fish" then
 		stepFish()
 	elseif phase == "train" then
@@ -1176,8 +1241,14 @@ local function nextBar()
 	if not row then
 		return nil
 	end
+	-- Like the rods, the late bars (Rocket Bar and up) cost their listed Price.
 	local ok, price = pcall(Config.BarPrice, tier + 1)
-	return row, ok and tonumber(price) or tonumber(row.Price)
+	local curve = ok and tonumber(price) or nil
+	local listed = tonumber(row.Price)
+	if curve and listed then
+		return row, math.max(curve, listed)
+	end
+	return row, curve or listed
 end
 
 local function stepBuy()
@@ -1517,8 +1588,10 @@ local function stepPets()
 		local now = Workspace:GetServerTimeNow()
 		for _, egg in pairs(state.NestEggs) do
 			local id = type(egg) == "table" and egg.Id ~= nil and tostring(egg.Id) or nil
-			local readyAt = type(egg) == "table" and tonumber(egg.R) or 0
-			if id and readyAt <= now and (fish.hatchBlock[id] or 0) < os.clock() then
+			-- Eggs waiting for a nest spot have no ready time yet; the game moves
+			-- them in by itself when a spot frees up.
+			local readyAt = type(egg) == "table" and tonumber(egg.R) or nil
+			if id and readyAt and readyAt <= now and (fish.hatchBlock[id] or 0) < os.clock() then
 				local result = call("NestHatch", id)
 				if type(result) == "table" then
 					stats.hatched += 1
@@ -2200,6 +2273,7 @@ local function installHub()
 			STATE.keepRarity = option
 		end)
 		toggle(catchBox, "Keep Mutated", "keepMutated", "Never sells a Sea Beast with a mutation")
+		toggle(catchBox, "Make Room When Full", "makeRoom", "Storage holds 100. When it fills up the game removes one for every catch, so this sells the cheapest first (never Secret or rarer)")
 		button(catchBox, "Fill Pen Now", "Puts your best Sea Beasts in the pen", "layout-grid", function()
 			send("FillPen")
 			notify("Pen filled", "")
@@ -2471,7 +2545,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.2.0"
+STATE.version = "1.3.0"
 
 if running() then
 	elevate()
