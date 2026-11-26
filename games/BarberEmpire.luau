@@ -54,6 +54,10 @@ local STATE = {
 	autoTools = true,
 	autoSkills = true,
 	autoTips = true,
+	useProducts = "Smart",
+	autoBuyProducts = true,
+	autoDrops = true,
+	autoCoins = true,
 	autoClaim = true,
 	walkSpeed = false,
 	speed = 32,
@@ -125,6 +129,9 @@ local FLAG_KEYS = {
 	AutoTools = "autoTools",
 	AutoSkills = "autoSkills",
 	AutoTips = "autoTips",
+	AutoBuyProducts = "autoBuyProducts",
+	AutoDrops = "autoDrops",
+	AutoCoins = "autoCoins",
 	AutoClaim = "autoClaim",
 	WalkSpeed = "walkSpeed",
 	AntiAfk = "antiAfk",
@@ -140,10 +147,12 @@ local FLAG_KEYS = {
 -- real barber working round the head.
 local SPEED_OPTIONS_CUT = { "Fast", "Normal", "Slow" }
 local CUT_SECONDS = { Fast = 7, Normal = 12, Slow = 20 }
+local PRODUCT_OPTIONS = { "Smart", "Always best", "Fast only", "Off" }
 local SPEED_OPTIONS = { "16", "24", "32", "50", "75", "100" }
 local KEY_OPTIONS = { "RightControl", "RightShift", "LeftAlt", "Insert", "End", "Home" }
 local CHOICES = {
 	CutSpeed = { key = "cutSpeed", options = SPEED_OPTIONS_CUT },
+	UseProducts = { key = "useProducts", options = PRODUCT_OPTIONS },
 	ToggleKey = { key = "toggleKey", options = KEY_OPTIONS },
 	WindTheme = { key = "windTheme" },
 	HubSize = { key = "hubSize", options = { "Compact", "Normal", "Large" } },
@@ -200,7 +209,7 @@ local function saveConfig()
 end
 STATE.writeConfig = saveConfig
 
-local stats = { cuts = 0, fives = 0, earned = 0, videos = 0, followers = 0, built = 0, hired = 0, bought = 0, claimed = 0, tips = 0 }
+local stats = { cuts = 0, fives = 0, earned = 0, videos = 0, followers = 0, built = 0, hired = 0, bought = 0, claimed = 0, tips = 0, products = 0, drops = 0, coins = 0 }
 STATE.stats = stats
 STATE.activity = {}
 local function noteActivity(text)
@@ -287,9 +296,13 @@ local ToolTiers = gameModule(HairLab, "ToolTiers")
 local SkillTree = gameModule(HairLab, "SkillTree")
 local BarberPass = gameModule(HairLab, "BarberPass")
 local Passes = gameModule(HairLab, "Passes")
+local Depth = gameModule(HairLab, "Depth")
+local Payout = gameModule(HairLab, "Payout")
 local CutStation = gameModule(ClientModules, "CutStation")
 local Customers = gameModule(ClientModules, "Customers")
 local ClipTok = gameModule(ClientModules, "ClipTok")
+local Finish = gameModule(ClientModules, "Finish")
+local CoinsModule = gameModule(ClientModules, "Coins")
 local StaffShop = gameModule(ClientModules, "StaffShop")
 local Playtime = gameModule(ClientModules, "Playtime")
 elevate()
@@ -391,8 +404,10 @@ local function doCut(args)
 	STATE.detail = tostring(who or "Customer")
 	local seconds = CUT_SECONDS[STATE.cutSpeed] or 12
 	local steps = math.max(4, math.floor(seconds / 1.5))
+	-- A cut that has started is always finished, even if this copy of the hub
+	-- is unloaded meanwhile; otherwise the customer would sit in the chair forever.
 	for step = 1, steps do
-		if not running() or not CutStation.isActive() then
+		if not CutStation.isActive() then
 			return
 		end
 		local mid = {}
@@ -403,7 +418,7 @@ local function doCut(args)
 		pcall(hair.setLengths, hair, mid)
 		task.wait(seconds / steps)
 	end
-	if not running() or not CutStation.isActive() then
+	if not CutStation.isActive() then
 		return
 	end
 	elevate()
@@ -434,7 +449,7 @@ local function doCut(args)
 	-- Press Done. During the game's tutorial Done can be held back for a moment,
 	-- so keep pressing until the chair is free.
 	for _ = 1, 20 do
-		if not running() or not CutStation.isActive() then
+		if not CutStation.isActive() then
 			break
 		end
 		pcall(args.onDone)
@@ -470,6 +485,160 @@ do
 		end
 		hubCleanup(function()
 			CutStation.begin = original
+		end)
+	end
+end
+
+-- Finishing products ----------------------------------------------------------
+-- After a cut the game offers your products (wax, spray, hot towel...). The one
+-- you pick has a little mini-game, then pays extra. The hub picks the best one
+-- and plays the mini-game the way a controller does: hold A to fill the bar
+-- (about 19 s), or tap A for the Hot Towel (about 2 s).
+local VirtualInput = game:GetService("VirtualInputManager")
+local productModes = nil
+local function productMode(id)
+	if productModes == nil then
+		productModes = {}
+		if Finish and type(Finish.apply) == "function" then
+			for _, up in ipairs(debug.getupvalues(Finish.apply)) do
+				if type(up) == "table" then
+					local found = false
+					for _, value in pairs(up) do
+						if value == "mash" or value == "rub" then
+							found = true
+							break
+						end
+					end
+					if found then
+						productModes = up
+						break
+					end
+				end
+			end
+		end
+	end
+	return productModes[id] or "rub"
+end
+local function productSeconds(id)
+	return productMode(id) == "mash" and 2.5 or 19
+end
+local function productPower()
+	local power = 1
+	if Payout and type(Payout.productPower) == "function" then
+		pcall(function()
+			power = Payout.productPower(LocalPlayer) or 1
+		end)
+	end
+	return power
+end
+local function productBoost(product, order)
+	local pay, views = product.pay or 1, product.views or 1
+	if Depth and type(Depth.productBoost) == "function" then
+		local ok, a, b = pcall(Depth.productBoost, product, order, productPower())
+		if ok and tonumber(a) then
+			pay, views = tonumber(a), tonumber(b) or views
+		end
+	end
+	return pay, views
+end
+-- Smart: a product is used when its extra pay is worth the extra seconds
+-- (a full haircut round is about 40 s). Hot Towel always is; the slow ones
+-- only when the bonus is big (Gold Serum, or the one the customer asked for).
+local function productWorthIt(product, order)
+	local pay = productBoost(product, order)
+	local mode = STATE.useProducts
+	if mode == "Always best" then
+		return true
+	elseif mode == "Fast only" then
+		return productSeconds(product.id) < 5
+	end
+	return pay - 1 >= productSeconds(product.id) / 40
+end
+local function pickProduct(order)
+	if not Depth or type(Depth.PRODUCTS) ~= "table" or STATE.useProducts == "Off" then
+		return nil
+	end
+	local owned = jsonAttr("Products")
+	local best, bestScore
+	for _, product in ipairs(Depth.PRODUCTS) do
+		if (tonumber(owned[product.id]) or 0) > 0 and productWorthIt(product, order) then
+			local pay, views = productBoost(product, order)
+			local score = (pay - 1) + (views - 1) * 0.25 - productSeconds(product.id) / 200
+			if not bestScore or score > bestScore then
+				best, bestScore = product, score
+			end
+		end
+	end
+	return best
+end
+STATE.pickProduct = pickProduct
+
+local function pressA(down)
+	elevate()
+	pcall(function()
+		VirtualInput:SendKeyEvent(down, Enum.KeyCode.ButtonA, false, game)
+	end)
+end
+
+local function playProduct(customer, product, order)
+	local finished = false
+	local mash = productMode(product.id) == "mash"
+	task.spawn(function()
+		-- The game calls this from its own script, which can't send input.
+		elevate()
+		task.wait(0.4)
+		elevate()
+		local started = os.clock()
+		if mash then
+			while not finished and os.clock() - started < 20 do
+				pressA(true)
+				pressA(false)
+				task.wait()
+			end
+		else
+			pressA(true)
+			while not finished and os.clock() - started < 45 do
+				task.wait(0.1)
+			end
+			pressA(false)
+		end
+	end)
+	local ok, cover = pcall(Finish.apply, customer, product, order)
+	finished = true
+	-- Release A from a hub thread; this one belongs to the game's script.
+	task.spawn(pressA, false)
+	return ok and tonumber(cover) or 0
+end
+
+do
+	local original = genv.ZinoosBarberChoose
+	if type(original) ~= "function" then
+		original = Finish and Finish.choose
+		genv.ZinoosBarberChoose = original
+	end
+	if Finish and type(original) == "function" then
+		Finish.choose = function(customer, order, ...)
+			if not running() or STATE.autoCut ~= true then
+				return original(customer, order, ...)
+			end
+			local product = pickProduct(order)
+			if not product then
+				-- Skip the game's 10 s product picker.
+				return nil, nil
+			end
+			STATE.status = "Finishing with " .. tostring(product.name)
+			local cover = playProduct(customer, product, order)
+			if cover < 0.05 then
+				return nil, nil
+			end
+			pcall(Finish.show, customer, product)
+			task.wait(0.7)
+			stats.products += 1
+			noteActivity("Used " .. tostring(product.name))
+			return product.id, nil
+		end
+		hubCleanup(function()
+			Finish.choose = original
 		end)
 	end
 end
@@ -753,6 +922,24 @@ local function shopOptions()
 			end
 		end
 	end
+	if STATE.autoBuyProducts == true and STATE.useProducts ~= "Off" and Depth and Payout and type(Depth.PRODUCTS) == "table" then
+		local owned = jsonAttr("Products")
+		for _, product in ipairs(Depth.PRODUCTS) do
+			if (tonumber(product.level) or 1) <= storeLevel() and (tonumber(owned[product.id]) or 0) < 3 and productWorthIt(product, nil) then
+				local ok, price = pcall(Payout.packPrice, LocalPlayer, product)
+				if ok and tonumber(price) then
+					options[#options + 1] = {
+						cost = tonumber(price),
+						label = "Bought " .. tostring(product.pack or 10) .. " " .. tostring(product.name),
+						counter = "bought",
+						buy = function()
+							return invoke("ToolShop", "product", product.id) == true
+						end,
+					}
+				end
+			end
+		end
+	end
 	if STATE.autoSkills == true and SkillTree and type(SkillTree.NODES) == "table" then
 		local mine = nil
 		pcall(function()
@@ -811,8 +998,62 @@ local function stepShop()
 	end
 end
 
--- Tip jar ---------------------------------------------------------------------
+-- Errands between customers: tip jar, product drops, coins ---------------------
 
+local function flat(a, b)
+	return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
+end
+
+-- Walks (no teleports) round the chairs and counters with PathfindingService.
+-- Stops early when done() says so, when a cut starts or after `timeout` seconds.
+local function walkTo(goal, timeout, done)
+	local _, root, hum = character()
+	if not root then
+		return false
+	end
+	local points = {}
+	pcall(function()
+		local path = game:GetService("PathfindingService"):CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true })
+		path:ComputeAsync(root.Position, goal)
+		if path.Status == Enum.PathStatus.Success then
+			for _, point in ipairs(path:GetWaypoints()) do
+				points[#points + 1] = point
+			end
+		end
+	end)
+	if #points == 0 then
+		points[1] = { Position = goal, Action = Enum.PathWaypointAction.Walk }
+	end
+	local started = os.clock()
+	local index = 1
+	while running() and os.clock() - started < timeout do
+		_, root, hum = character()
+		if not root or (CutStation and CutStation.isActive()) then
+			return false
+		end
+		if done(root) then
+			return true
+		end
+		local point = points[index]
+		if not point then
+			-- Path finished but not there yet: step straight at the goal.
+			hum:MoveTo(goal)
+		elseif flat(root.Position, point.Position) < 2 then
+			index += 1
+		else
+			if point.Action == Enum.PathWaypointAction.Jump then
+				hum.Jump = true
+			end
+			hum:MoveTo(point.Position)
+		end
+		task.wait(0.1)
+	end
+	local _, rootNow = character()
+	return rootNow ~= nil and done(rootNow)
+end
+
+-- Tip jar: the server only pays it out when you stand next to it; the game's
+-- own code empties it once you're within ~4 studs.
 local tips = { nextTry = 0 }
 -- Every tip jar carries the "TipJar" tag and its owner's UserId.
 local function myTipJar()
@@ -823,13 +1064,8 @@ local function myTipJar()
 	end
 	return nil
 end
--- The server only pays out the jar when you stand next to it; the game's own
--- code empties it once you're within ~4 studs. So walk over between customers.
 local function stepTips()
 	if STATE.autoTips ~= true or os.clock() < tips.nextTry then
-		return
-	end
-	if chairBusy() or (ClipTok and ClipTok.isOpen()) then
 		return
 	end
 	if not tips.jar or not tips.jar.Parent then
@@ -841,64 +1077,159 @@ local function stepTips()
 		tips.nextTry = os.clock() + 10
 		return
 	end
-	local _, root, hum = character()
-	if not root then
-		return
-	end
+	local _, root = character()
 	local spot = jar:GetPivot().Position
-	local away = Vector3.new(root.Position.X - spot.X, 0, root.Position.Z - spot.Z).Magnitude
-	if away > 150 then
+	if not root or flat(root.Position, spot) > 150 then
+		tips.nextTry = os.clock() + 10
 		return
 	end
 	tips.nextTry = os.clock() + 60
 	STATE.status = "Emptying the tip jar"
 	STATE.detail = "$" .. shortNumber(amount)
-	cutting.tipTrip = true
-	-- Walk round the chairs and counters, not into them.
 	local pad = jar:FindFirstChild("Pad")
-	local goal = pad and pad.Position or Vector3.new(spot.X, root.Position.Y - 3, spot.Z)
-	local points = {}
-	pcall(function()
-		local path = game:GetService("PathfindingService"):CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true })
-		path:ComputeAsync(root.Position, goal)
-		if path.Status == Enum.PathStatus.Success then
-			for _, point in ipairs(path:GetWaypoints()) do
-				points[#points + 1] = point.Position
-			end
-		end
+	walkTo(pad and pad.Position or spot, 12, function(rootNow)
+		return flat(rootNow.Position, spot) <= 3 or (tonumber(jar:GetAttribute("Amount")) or 0) < 1
 	end)
-	if #points == 0 then
-		points[1] = goal
-	end
-	local started = os.clock()
-	local index = 1
-	while running() and os.clock() - started < 12 and points[index] do
-		_, root, hum = character()
-		if not root or chairBusy() then
-			break
-		end
-		local offset = Vector3.new(root.Position.X - spot.X, 0, root.Position.Z - spot.Z)
-		if offset.Magnitude <= 3 or (tonumber(jar:GetAttribute("Amount")) or 0) < 1 then
-			break
-		end
-		local point = points[index]
-		if Vector3.new(root.Position.X - point.X, 0, root.Position.Z - point.Z).Magnitude < 2 then
-			index += 1
-		else
-			hum:MoveTo(point)
-		end
-		task.wait(0.1)
-	end
 	-- The game takes it from here; wait for the jar to read empty.
 	local waitUntil = os.clock() + 3
 	while running() and os.clock() < waitUntil and (tonumber(jar:GetAttribute("Amount")) or 0) >= 1 do
 		task.wait(0.2)
 	end
-	cutting.tipTrip = false
 	if (tonumber(jar:GetAttribute("Amount")) or 0) < 1 then
 		stats.tips += amount
 		noteActivity("Emptied the tip jar: $" .. shortNumber(amount))
 	end
+end
+
+-- Product drops: a free crate of finishing products lands somewhere nearby for
+-- 3 minutes. The game picks it up once you're within ~4 studs of it.
+local drop = nil
+do
+	local remote = Remotes:FindFirstChild("Drop")
+	if remote and remote:IsA("RemoteEvent") then
+		trackConnection(remote.OnClientEvent:Connect(function(kind, data)
+			if kind == "spawn" and type(data) == "table" and typeof(data.pos) == "Vector3" then
+				drop = { id = data.id, pos = data.pos, untilT = os.clock() + (tonumber(data.life) or 180), tries = 0 }
+				noteActivity("A product drop landed nearby")
+			else
+				drop = nil
+			end
+		end))
+	end
+end
+local function stepDrops()
+	if STATE.autoDrops ~= true or not drop then
+		return
+	end
+	if os.clock() > drop.untilT or drop.tries >= 3 then
+		drop = nil
+		return
+	end
+	local _, root = character()
+	if not root or (root.Position - drop.pos).Magnitude > 600 then
+		return
+	end
+	local target = drop
+	target.tries += 1
+	STATE.status = "Grabbing a product drop"
+	STATE.detail = string.format("%d studs away", math.floor(flat(root.Position, target.pos)))
+	walkTo(target.pos, 45, function(rootNow)
+		return drop ~= target or flat(rootNow.Position, target.pos) < 3
+	end)
+	local waitUntil = os.clock() + 3
+	while running() and drop == target and os.clock() < waitUntil do
+		task.wait(0.2)
+	end
+	if drop ~= target then
+		stats.drops += 1
+		noteActivity("Grabbed a product drop")
+	end
+end
+
+-- Coins (copper to diamond) pop up around the shop, most of all during Money
+-- Rain. The game collects one when you walk within ~8 studs of it.
+local coinList = nil
+local function coins()
+	if coinList == nil then
+		coinList = false
+		if CoinsModule and type(CoinsModule.init) == "function" then
+			for _, up in ipairs(debug.getupvalues(CoinsModule.init)) do
+				if type(up) == "function" then
+					local first = debug.getupvalues(up)[1]
+					if type(first) == "table" then
+						coinList = first
+						break
+					end
+				end
+			end
+		end
+	end
+	return coinList or {}
+end
+local coinSkip = setmetatable({}, { __mode = "k" })
+local function nearestCoin(root)
+	local best, bestDistance
+	local home = tips.jar and tips.jar.Parent and tips.jar:GetPivot().Position or root.Position
+	for _, coin in pairs(coins()) do
+		if type(coin) == "table" and coin.state == "idle" and typeof(coin.pos) == "Vector3" and (coinSkip[coin] or 0) < os.clock()
+			and flat(coin.pos, home) < 120 and math.abs(coin.pos.Y - root.Position.Y) < 20 then
+			local distance = flat(coin.pos, root.Position)
+			if not bestDistance or distance < bestDistance then
+				best, bestDistance = coin, distance
+			end
+		end
+	end
+	return best
+end
+local function stepCoins()
+	if STATE.autoCoins ~= true then
+		return
+	end
+	local _, root = character()
+	if not root or not nearestCoin(root) then
+		return
+	end
+	local started = os.clock()
+	local got = 0
+	while running() and os.clock() - started < 25 do
+		_, root = character()
+		local coin = root and nearestCoin(root)
+		if not coin then
+			break
+		end
+		STATE.status = "Collecting coins"
+		STATE.detail = got .. " so far"
+		local reach = coin.kind == "diamond" and 9 or 6
+		walkTo(coin.pos, 8, function(rootNow)
+			return coin.state ~= "idle" or flat(rootNow.Position, coin.pos) < reach
+		end)
+		task.wait(0.15)
+		if coin.state ~= "idle" then
+			got += 1
+		else
+			-- Couldn't reach it (on a roof, behind a wall): leave it for a while.
+			coinSkip[coin] = os.clock() + 60
+		end
+	end
+	if got > 0 then
+		stats.coins += got
+		noteActivity("Collected " .. got .. " coins")
+	end
+end
+
+local function stepErrands()
+	if chairBusy() or (ClipTok and ClipTok.isOpen()) then
+		return
+	end
+	stepTips()
+	if chairBusy() then
+		return
+	end
+	stepDrops()
+	if chairBusy() then
+		return
+	end
+	stepCoins()
 end
 
 -- Free rewards ----------------------------------------------------------------
@@ -970,6 +1301,18 @@ local function stepClaims(force)
 			if not got[tostring(tier)] and BarberPass.FREE and BarberPass.FREE[tier] and claimed("pass", "free", tier) then
 				count += 1
 				noteActivity("Barber Pass tier " .. tier .. " claimed")
+			end
+		end
+	end
+	-- The gift the game offers in its menu now and then.
+	if os.clock() >= (claims.nextMenuGift or 0) then
+		claims.nextMenuGift = os.clock() + 300
+		local opened = invoke("EscMenu", "open")
+		if type(opened) == "table" and opened.offer then
+			local result = invoke("EscMenu", "claim")
+			if type(result) == "table" and result.ok == true then
+				count += 1
+				noteActivity("Claimed the menu gift")
 			end
 		end
 	end
@@ -1645,6 +1988,14 @@ local function installHub()
 		end)
 		cutInfo = info(cutBox, "Status", "Starting")
 
+		local productBox = section(cutTab, "Finishing Products", "sparkles")
+		choice(productBox, "Use Products", "Smart: Hot Towel every cut (2s mini-game), slow ones only when the bonus is worth it. Always best: best product every cut (slow ones take ~19s)", PRODUCT_OPTIONS, function()
+			return STATE.useProducts
+		end, function(option)
+			STATE.useProducts = option
+		end)
+		toggle(productBox, "Auto Buy Products", "autoBuyProducts", "Keeps a few of the products it uses in stock")
+
 		local videoBox = section(cutTab, "ClipTok Videos", "camera")
 		toggle(videoBox, "Auto Post Videos", "autoPost", "Posts the before & after video of every cut for followers and more customers. Off = discards them")
 	end
@@ -1667,7 +2018,9 @@ local function installHub()
 	do
 		local claimBox = section(rewardTab, "Free Rewards", "gift")
 		toggle(claimBox, "Auto Claim", "autoClaim", "Daily reward, finished quests, quest chests, Barber Pass (free) and playtime gifts")
-		toggle(claimBox, "Auto Empty Tip Jar", "autoTips", "Moves the tips from your jar into your cash")
+		toggle(claimBox, "Auto Empty Tip Jar", "autoTips", "Walks over and empties your tip jar between customers")
+		toggle(claimBox, "Grab Product Drops", "autoDrops", "Walks to the free product crates that land nearby")
+		toggle(claimBox, "Collect Coins", "autoCoins", "Picks up the coins round your shop between customers (lots during Money Rain)")
 	end
 
 	do
@@ -1818,6 +2171,7 @@ local function installHub()
 		local lines = {
 			string.format("Haircuts %d (%d five-star)  ·  Earned $%s", stats.cuts, stats.fives, shortNumber(stats.earned)),
 			string.format("Videos %d (+%s followers)  ·  Tips $%s", stats.videos, shortNumber(stats.followers), shortNumber(stats.tips)),
+			string.format("Products used %d  ·  Drops %d  ·  Coins %d", stats.products, stats.drops, stats.coins),
 			string.format("Built %d  ·  Hired %d  ·  Bought %d  ·  Claimed %d", stats.built, stats.hired, stats.bought, stats.claimed),
 		}
 		if attr("Tutorial") == "on" then
@@ -1862,7 +2216,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.0.0"
+STATE.version = "1.1.0"
 
 if running() then
 	elevate()
@@ -1878,7 +2232,7 @@ task.spawn(function()
 	while running() do
 		local ok, err = pcall(function()
 			stepVideo()
-			stepTips()
+			stepErrands()
 			stepCall()
 		end)
 		if not ok then
