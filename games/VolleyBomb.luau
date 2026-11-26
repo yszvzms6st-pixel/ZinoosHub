@@ -115,7 +115,7 @@ do
 	end
 end
 
-local VERSION = "1.28.4"
+local VERSION = "1.29.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -163,6 +163,15 @@ local STATE = {
 	autoQuests = true,
 	autoAchievements = true,
 	autoSpin = true,
+	autoBountyTiers = true,
+	autoBountySpins = true,
+	bountyCoinSpins = false,
+	aimBounty = true,
+	autoTurkey = true,
+	autoLikeReward = true,
+	autoBoost = true,
+	leaveNoob = true,
+	matchQueue = "Off",
 	-- Player
 	antiAfk = true,
 	afk = false,
@@ -285,6 +294,7 @@ local SAVE_KEYS = {
 	"autoHit", "autoMove", "autoSpike", "autoDive", "autoServe", "smartAim", "aimMode", "autoAbility", "showLanding", "showPresses", "humanize", "reaction", "nativeFollowups", "trickShots", "spinMoves", "readPlayers", "playerMove", "proPosition", "emotes", "lobbyWander",
 	"autoVote", "voteMode", "autoProServer", "tryhard", "tryhardHops", "tryhardHold", "tryhardBest", "tryhardBestTop", "tryhardBestId", "autoBuyAbility", "abilityGoal", "abilityBuyMode", "skipAbilities", "autoEquipAbility", "autoBuyPacks", "saveForAbility", "packChoice",
 	"autoDaily", "autoQuests", "autoAchievements", "autoSpin",
+	"autoBountyTiers", "autoBountySpins", "bountyCoinSpins", "aimBounty", "autoTurkey", "autoLikeReward", "autoBoost", "leaveNoob", "matchQueue",
 	"antiAfk", "afk", "stayActive", "autoReload", "notifications", "fpsBoost", "showTracker", "customFov", "fov", "dodgeShockwave", "avoidBlasts", "autoHopEmpty",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme",
 }
@@ -314,6 +324,9 @@ local function loadSaved()
 	end
 	if not table.find(REACTION_OPTIONS, STATE.reaction) then
 		STATE.reaction = "Normal"
+	end
+	if not table.find({ "Off", "1v1", "2v2", "3v3", "1v1v1v1" }, STATE.matchQueue) then
+		STATE.matchQueue = "Off"
 	end
 	if not table.find(VOTE_OPTIONS, STATE.voteMode) then
 		STATE.voteMode = "Solo"
@@ -1016,9 +1029,8 @@ function brain.hitMods(kind, allowReady)
 end
 
 -- Curveball reads your strafe at the spike. Side 1 is a step to the aim's
--- right, which is the +Curve the ball module applies. A Move() from the
--- play loop gets wiped by the walk-to and the game's own controls before
--- the server looks, so the step is held on the last render of every frame.
+-- right, which is the +Curve the ball module applies. The movement layer
+-- below applies it through the same LocalPlayer:Move path as PlayerModule.
 function brain.curveStrafe(root, hum, side, aimDir, ballPos)
 	side = tonumber(side)
 	if not root or not hum or (side ~= 1 and side ~= -1) then
@@ -1046,7 +1058,9 @@ function brain.curveStrafe(root, hum, side, aimDir, ballPos)
 			end
 		end
 	end
-	hum:Move(move, false)
+	if type(STATE.pressMoveDirection) == "function" then
+		STATE.pressMoveDirection(move, 0.08)
+	end
 end
 
 function brain.bindCurveStrafe()
@@ -1268,6 +1282,12 @@ local function chooseDirection(kind, state, zones, myZone, ballPos, now, quality
 			if mode ~= "Fastest" and option.who and brain.weakSpot then
 				option.score += brain.weakSpot(option.who, option.zone, option.land)
 			end
+			-- Bounty rounds: ending the point in your target's square pays 100
+			-- Bounty Coins, so their square comes first.
+			local bountyTarget = STATE.aimBounty == true and STATE.bountyTarget or nil
+			if bountyTarget and option.who and (option.who == bountyTarget or option.who.Character == bountyTarget) then
+				option.score += 30
+			end
 			-- Punish the jump: the game's dive only works from the ground and
 			-- needs 0.7s before it can go again, so a player who is in the air
 			-- or mid-dive can only walk to this one.
@@ -1481,8 +1501,13 @@ local function startNativeDive(root, hum, dir, plan)
 	}
 	face(root, dir)
 	-- Dive reads Humanoid.MoveDirection first, so give it the same direction
-	-- the character is visibly facing instead of only rotating the root.
-	pcall(hum.Move, hum, dir, false)
+	-- the character is visibly facing instead of only rotating the root. Use
+	-- the real-input movement layer and let PlayerModule apply it on its own
+	-- render step before the Dive controller reads MoveDirection.
+	if type(STATE.pressMoveDirection) == "function" then
+		STATE.pressMoveDirection(dir, 0.2)
+		RunService.RenderStepped:Wait()
+	end
 	if brain.diveCheck.expectSet then
 		brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Set", nil, 1
 	end
@@ -1832,6 +1857,81 @@ function brain.easeFace(root, hum, dir, loose)
 	turnToward(root, flat.Unit, rate, true)
 end
 
+-- Anti-kick: walking ---------------------------------------------------------
+-- The game's anti-cheat watches movement driven through Humanoid methods and
+-- synthetic VirtualInputManager events. Roblox's own PlayerModule drives the
+-- character through LocalPlayer:Move, so the hub uses that same engine path.
+local drive = { goal = nil, untilT = 0, manualDirection = nil, manualUntil = 0, moving = false }
+local function applyMove(direction)
+	local moving = typeof(direction) == "Vector3" and direction.Magnitude > 0.001
+	if not moving and not drive.moving then
+		return
+	end
+	drive.moving = moving
+	gameThread()
+	pcall(LocalPlayer.Move, LocalPlayer, moving and direction or Vector3.zero, false)
+end
+function STATE.pressMoveDirection(direction, duration)
+	if typeof(direction) ~= "Vector3" or direction.Magnitude < 0.01 then
+		return
+	end
+	drive.manualDirection = direction.Unit
+	drive.manualUntil = os.clock() + math.max(tonumber(duration) or 0.08, 0.03)
+	applyMove(drive.manualDirection)
+end
+local function walkTo(hum, goal)
+	if typeof(goal) ~= "Vector3" then
+		return
+	end
+	drive.goal = goal
+	drive.untilT = os.clock() + 2
+end
+local function stopWalk(hum)
+	drive.goal = nil
+	if not drive.manualDirection or os.clock() >= drive.manualUntil then
+		applyMove(Vector3.zero)
+	end
+end
+STATE.walkTo, STATE.stopWalk = walkTo, stopWalk
+do
+	local BIND = "ZinoosWalk"
+	pcall(RunService.UnbindFromRenderStep, RunService, BIND)
+	RunService:BindToRenderStep(BIND, Enum.RenderPriority.Last.Value - 1, function()
+		if drive.manualDirection and os.clock() < drive.manualUntil then
+			applyMove(drive.manualDirection)
+			return
+		end
+		drive.manualDirection = nil
+		local goal = drive.goal
+		if not goal then
+			applyMove(Vector3.zero)
+			return
+		end
+		if not running() or os.clock() > drive.untilT then
+			drive.goal = nil
+			applyMove(Vector3.zero)
+			return
+		end
+		local _, root, hum = character()
+		if not root or not hum then
+			return
+		end
+		local delta = (goal - root.Position) * Vector3.new(1, 0, 1)
+		local distance = delta.Magnitude
+		if distance < 0.65 then
+			drive.goal = nil
+			applyMove(Vector3.zero)
+			return
+		end
+		-- Match a full thumbstick far away and ease into the last stud and a half.
+		applyMove(delta.Unit * math.clamp(distance / 1.5, 0.2, 1))
+	end)
+	hubCleanup(function()
+		pcall(RunService.UnbindFromRenderStep, RunService, BIND)
+		applyMove(Vector3.zero)
+	end)
+end
+
 -- Walk like someone on a keyboard: with the camera behind you (shift lock),
 -- WASD only gives 8 directions relative to where you face, so the path is
 -- made of those, with a fine adjustment right at the end. Urgent runs (a
@@ -1848,7 +1948,7 @@ local function moveTo(hum, root, spot, urgent)
 		brain.walkingUntil = os.clock() + 0.12
 	end
 	if STATE.playerMove ~= true or urgent or delta.Magnitude < 2.5 then
-		hum:MoveTo(goal)
+		walkTo(hum, goal)
 		return
 	end
 	local facing = yawOf(root.CFrame.LookVector)
@@ -1863,7 +1963,7 @@ local function moveTo(hum, root, spot, urgent)
 	end
 	local yaw = facing + key * math.pi / 4
 	local step = CFrame.Angles(0, yaw, 0).LookVector * math.min(delta.Magnitude, 6)
-	hum:MoveTo(root.Position + Vector3.new(step.X, 0, step.Z))
+	walkTo(hum, root.Position + Vector3.new(step.X, 0, step.Z))
 end
 
 -- With time, start wide of the ball and close in, so the run bends onto it
@@ -1925,7 +2025,7 @@ function brain.runLoop(hum, root, center)
 				if away < 1.15 then
 					jog.leaveAt = os.clock() + randomBetween(0.18, 0.55)
 					jog.goal = nil
-					hum:MoveTo(root.Position)
+					stopWalk(hum)
 					return
 				end
 				local steer = goal
@@ -1935,11 +2035,11 @@ function brain.runLoop(hum, root, center)
 				end
 				hum.AutoRotate = true
 				brain.walkingUntil = os.clock() + 0.12
-				hum:MoveTo(Vector3.new(steer.X, root.Position.Y, steer.Z))
+				walkTo(hum, Vector3.new(steer.X, root.Position.Y, steer.Z))
 				return
 			end
 			if not jog.arcUntil then
-				hum:MoveTo(root.Position)
+				stopWalk(hum)
 				return
 			end
 		end
@@ -1954,7 +2054,7 @@ function brain.runLoop(hum, root, center)
 	local ahead = loop.a + loop.dir * 0.9
 	hum.AutoRotate = true
 	brain.walkingUntil = os.clock() + 0.12
-	hum:MoveTo(Vector3.new(center.X + math.cos(ahead) * loop.r, root.Position.Y, center.Z + math.sin(ahead) * loop.r))
+	walkTo(hum, Vector3.new(center.X + math.cos(ahead) * loop.r, root.Position.Y, center.Z + math.sin(ahead) * loop.r))
 end
 -- Side steps: a ready shuffle while a ball could come your way. Each trip
 -- crosses the spot (several studs, so it is not a quarter-second flip) and
@@ -2011,9 +2111,9 @@ function brain.sideStep(hum, root, center, ballPos, zone)
 	brain.easeFace(root, hum, ballPos - root.Position, true)
 	if away > 0.8 then
 		brain.walkingUntil = os.clock() + 0.12
-		hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z))
+		walkTo(hum, Vector3.new(goal.X, root.Position.Y, goal.Z))
 	else
-		hum:MoveTo(root.Position)
+		stopWalk(hum)
 	end
 end
 
@@ -2187,10 +2287,7 @@ end
 
 local function stepBrain()
 	if STATE.afk == true then
-		local _, root, hum = character()
-		if hum and root then
-			pcall(hum.MoveTo, hum, root.Position)
-		end
+		drive.goal = nil
 		STATE.playStatus = "AFK"
 		return
 	end
@@ -2249,7 +2346,7 @@ local function stepBrain()
 		if char and state.Dead and STATE.autoHit == true and STATE.autoMove == true then
 			brain.deadSince = brain.deadSince or os.clock()
 			if os.clock() - brain.deadSince < 0.8 then
-				hum:MoveTo(root.Position)
+				stopWalk(hum)
 				STATE.playStatus = "Waiting for the blast to clear"
 				return
 			end
@@ -2267,7 +2364,7 @@ local function stepBrain()
 				local away = ((ready - root.Position) * Vector3.new(1, 0, 1)).Magnitude
 				if away > 6 or (away > 2.5 and STATE.spinMoves ~= true) then
 					hum.AutoRotate = true
-					hum:MoveTo(ready)
+					walkTo(hum, ready)
 					STATE.playStatus = "Getting ready for the serve"
 				elseif STATE.spinMoves == true and hum.FloorMaterial ~= Enum.Material.Air then
 					-- Keep moving while you wait: loops around the ready spot.
@@ -3073,7 +3170,7 @@ local function stepBrain()
 				brain.idleSpot = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
 			end
 			if STATE.autoMove == true and (brain.idleSpot - root.Position).Magnitude > 1.5 then
-				hum:MoveTo(Vector3.new(brain.idleSpot.X, root.Position.Y, brain.idleSpot.Z))
+				walkTo(hum, Vector3.new(brain.idleSpot.X, root.Position.Y, brain.idleSpot.Z))
 			end
 		elseif (center - root.Position).Magnitude > 4 then
 			moveTo(hum, root, center)
@@ -3233,7 +3330,7 @@ task.spawn(function()
 				lobby.nextWalk = os.clock() + randomBetween(5, 14)
 				local spot = safeLobbySpot(root, char)
 				if spot then
-					hum:MoveTo(spot)
+					walkTo(hum, spot)
 				end
 				if math.random() < 0.25 then
 					task.delay(randomBetween(0.3, 1.2), function()
@@ -3370,6 +3467,244 @@ local function stepRewards()
 	local nextSpin = (tonumber(LocalPlayer:GetAttribute("NextSpinReceivedAt")) or 0) - os.time()
 	STATE.rewardStatus = (#parts > 0 and ("Claimed " .. table.concat(parts, ", ")) or "Nothing to claim yet")
 		.. (nextSpin > 0 and string.format(" · free spin in %dm", math.ceil(nextSpin / 60)) or "")
+end
+
+-- New in the game (Nov 2026): Bounty event, Turkey's Challenge, coin boosts,
+-- like reward, Noob servers and the matchmaking menu ---------------------------
+local GameEnv = safeRequire(Shared:FindFirstChild("Environment")) or {}
+local EventsFolder = ReplicatedStorage.Data:FindFirstChild("Events")
+local BountyEvent = EventsFolder and safeRequire(EventsFolder:FindFirstChild("BountyEvent")) or nil
+local TurkeyEvent = EventsFolder and safeRequire(EventsFolder:FindFirstChild("TurkeyEvent")) or nil
+local events = { spinBusy = false, nextTurkey = 0, nextLike = 0, nextBoost = 0, noobAsked = 0, nextServerAsk = 0, nextQueue = 0 }
+
+local function placeType()
+	return tostring(GameEnv.placeType or "")
+end
+STATE.placeType = placeType
+
+-- Bounty rounds: the server tells each player their own target. Ending the
+-- point in the target's square off your hit pays 100 Bounty Coins.
+do
+	local event = remote("Bounty")
+	if event then
+		trackConnection(event.OnClientEvent:Connect(function(target)
+			STATE.bountyTarget = target
+		end))
+	end
+end
+
+local function bountyData()
+	local all = dataGet("Events")
+	return type(all) == "table" and type(all.Bounty) == "table" and all.Bounty or nil
+end
+
+local function stepBounty()
+	if type(BountyEvent) ~= "table" or type(BountyEvent.Tiers) ~= "table" then
+		STATE.bountyStatus = "No Bounty event right now"
+		return
+	end
+	local now = workspace:GetServerTimeNow()
+	local ends = tonumber(BountyEvent.EndTime) or 0
+	if now > ends + (tonumber(BountyEvent.ClaimGrace) or 0) then
+		STATE.bountyStatus = "The Bounty event is over"
+		return
+	end
+	local bounty = bountyData()
+	if not bounty then
+		return
+	end
+	local coins = tonumber(bounty.Coins) or 0
+	local tier = tonumber(bounty.Tier) or 0
+	local nextTier = BountyEvent.Tiers[tier + 1]
+	STATE.bountyStatus = string.format("Tier %d/%d · %d Bounty Coins%s", tier, #BountyEvent.Tiers, coins,
+		nextTier and string.format(" · next: %s for %d", tostring(nextTier.Name), tonumber(nextTier.Cost) or 0) or " · every tier claimed")
+	-- Milestone tiers, one per pass (the data refreshes in between).
+	if STATE.autoBountyTiers == true and nextTier and coins >= (tonumber(nextTier.Cost) or math.huge) then
+		local claim = remote("ClaimBountyTier")
+		if claim then
+			gameThread()
+			pcall(claim.FireServer, claim, tier + 1)
+			elevate()
+			stats.bountyTiers = (stats.bountyTiers or 0) + 1
+			noteActivity("Bounty tier " .. (tier + 1) .. ": " .. tostring(nextTier.Name))
+			return
+		end
+	end
+	-- Wheel: free spins first. Coins only go on the wheel once every tier is
+	-- claimed (or if you say so), because the tiers are the better deal.
+	local free = (tonumber(bounty.Spins) or 0) + (tonumber(bounty.PaidSpins) or 0)
+	local cost = BountyEvent.Wheel and tonumber(BountyEvent.Wheel.Cost) or math.huge
+	local coinSpin = now < ends and coins >= cost and (STATE.bountyCoinSpins == true or nextTier == nil)
+	if STATE.autoBountySpins == true and not events.spinBusy and (free > 0 or coinSpin) then
+		local spin, claim = remote("BountySpin"), remoteFunction("ClaimBountySpin")
+		if spin and claim then
+			events.spinBusy = true
+			gameThread()
+			pcall(spin.FireServer, spin)
+			elevate()
+			-- The wheel animation takes 5 s before the game claims the prize.
+			task.wait(5.5)
+			gameThread()
+			local ok, inside = pcall(claim.InvokeServer, claim)
+			elevate()
+			events.spinBusy = false
+			if ok then
+				stats.bountySpins = (stats.bountySpins or 0) + 1
+				noteActivity("Spun the Bounty wheel" .. (free > 0 and "" or " (" .. cost .. " coins)") .. (type(inside) == "string" and (": " .. inside) or ""))
+			end
+		end
+	end
+end
+
+-- Turkey's Challenge: five days of objectives (rounds, bumps, spikes). Claims
+-- each day's reward once it's ready. Never the Robux catch-up.
+local function stepTurkey()
+	if STATE.autoTurkey ~= true or os.clock() < events.nextTurkey or type(TurkeyEvent) ~= "table" then
+		return
+	end
+	events.nextTurkey = os.clock() + 45
+	local now = workspace:GetServerTimeNow()
+	if now > (tonumber(TurkeyEvent.EndTime) or 0) then
+		STATE.turkeyStatus = "Turkey's Challenge is over"
+		return
+	end
+	local getState, claim = remoteFunction("TurkeyEventState"), remoteFunction("TurkeyEventClaim")
+	if not getState or not claim then
+		return
+	end
+	gameThread()
+	local ok, state = pcall(getState.InvokeServer, getState)
+	elevate()
+	if not ok or type(state) ~= "table" or type(state.Days) ~= "table" then
+		return
+	end
+	local ready, done = {}, 0
+	for day, info in pairs(state.Days) do
+		if type(info) == "table" then
+			if info.State == "Ready" then
+				table.insert(ready, tonumber(day) or day)
+			elseif info.State == "Claimed" then
+				done += 1
+			end
+		end
+	end
+	for _, day in ipairs(ready) do
+		gameThread()
+		local okClaim, result = pcall(claim.InvokeServer, claim, day, false)
+		elevate()
+		if okClaim and type(result) == "table" then
+			done += 1
+			noteActivity("Turkey's Challenge day " .. tostring(day) .. " claimed")
+		end
+		task.wait(1)
+	end
+	local today = type(TurkeyEvent.CurrentDay) == "function" and TurkeyEvent.CurrentDay(now) or nil
+	STATE.turkeyStatus = string.format("%d/%d days claimed%s", done, #(TurkeyEvent.Days or {}), today and (" · today is day " .. tostring(today)) or "")
+end
+
+-- Small extras: the free like/group reward, 2x Coins boosts you own, and
+-- leaving a Noob server once the game says you've outgrown it.
+local function stepExtras()
+	local now = os.clock()
+	if STATE.autoLikeReward == true and now >= events.nextLike and dataGet("ClaimedLikeReward") == false and not arenaName() then
+		events.nextLike = now + 600
+		local claim = remote("ClaimLikeReward")
+		if claim then
+			gameThread()
+			pcall(claim.FireServer, claim)
+			elevate()
+			noteActivity("Asked for the free gift reward")
+		end
+	end
+	if STATE.autoBoost == true and now >= events.nextBoost and arenaName() then
+		local boosts = dataGet("Boosts")
+		if type(boosts) == "table" and (tonumber(boosts.Coins) or 0) > 0 and (tonumber(boosts.CoinsSeconds) or 0) <= 0 then
+			events.nextBoost = now + 60
+			local use = remote("UseBoost")
+			if use then
+				gameThread()
+				pcall(use.FireServer, use)
+				elevate()
+				noteActivity("Turned on a 2x Coins boost")
+			end
+		end
+	end
+	if STATE.leaveNoob == true and placeType() == "noob" and not arenaName() and now >= events.noobAsked
+		and (tonumber(dataGet("Eliminations")) or 0) >= 15 then
+		events.noobAsked = now + 120
+		local leave = remote("LeaveNoobServer")
+		if leave then
+			gameThread()
+			pcall(leave.FireServer, leave)
+			elevate()
+			noteActivity("Leaving the Noob server for a normal one")
+		end
+	end
+end
+
+-- Matchmaking menu (Server Selector). These are the same requests its
+-- buttons send, so no teleport scripts or pads are needed.
+local Matchmaking = nil
+local function matchmaking()
+	if Matchmaking == nil then
+		Matchmaking = safeRequire(Shared.Controllers:FindFirstChild("MatchmakingController")) or false
+	end
+	return Matchmaking or nil
+end
+STATE.matchmaking = matchmaking
+
+function STATE.askServer(name)
+	local mm = matchmaking()
+	if not mm or type(mm.Request) ~= "function" then
+		return false, "no server menu here"
+	end
+	gameThread()
+	local ok, result = pcall(mm.Request, mm, "Server", { name = name })
+	elevate()
+	if ok and type(result) == "table" then
+		return result.ok == true, tostring(result.reason or result.message or "")
+	end
+	return ok, ok and "" or tostring(result)
+end
+
+local QUEUE_OPTIONS = { "Off", "1v1", "2v2", "3v3", "1v1v1v1" }
+STATE.QUEUE_OPTIONS = QUEUE_OPTIONS
+local function stepQueue()
+	local mode = STATE.matchQueue
+	local mm = matchmaking()
+	if mode == "Off" or not table.find(QUEUE_OPTIONS, mode) or not mm or type(mm.Request) ~= "function" then
+		return
+	end
+	if arenaName() or STATE.afk == true or os.clock() < events.nextQueue then
+		return
+	end
+	local search = type(mm._state) == "table" and mm._state.search
+	if type(search) == "table" and search.status then
+		STATE.queueStatus = tostring(search.status) .. " · " .. tostring(search.mode or mode)
+		return
+	end
+	events.nextQueue = os.clock() + 20
+	gameThread()
+	local ok, result = pcall(mm.Request, mm, "Join", { mode = mode, fill = true })
+	elevate()
+	if ok and type(result) == "table" and result.ok == false then
+		STATE.queueStatus = "Can't queue: " .. tostring(result.reason)
+		events.nextQueue = os.clock() + 120
+	else
+		STATE.queueStatus = "Searching for a " .. mode .. " match"
+		noteActivity("Queued for " .. mode)
+	end
+end
+
+local function stepEvents()
+	pcall(stepBounty)
+	elevate()
+	pcall(stepTurkey)
+	elevate()
+	pcall(stepExtras)
+	elevate()
+	pcall(stepQueue)
+	elevate()
 end
 
 -- Shop -------------------------------------------------------------------------
@@ -3552,7 +3887,36 @@ end
 
 local function stepProServer()
 	if STATE.onNewServer() then
-		STATE.proStatus = "New server. Staying put."
+		-- New lobbies: ask the Server Selector, the same as pressing its Pro card.
+		local kind = placeType()
+		if kind == "pro" then
+			STATE.proStatus = "You're in a Pro Server (1.5x coins)"
+			return
+		elseif STATE.autoProServer ~= true then
+			STATE.proStatus = "Auto Join is off"
+			return
+		elseif STATE.matchQueue ~= "Off" then
+			STATE.proStatus = "Match Queue is on, so staying out of Pro Servers"
+			return
+		elseif kind ~= "main" then
+			STATE.proStatus = "Pro Servers are joined from a normal server"
+			return
+		end
+		local wins = leaderstat("Wins")
+		local _, _, needed = proPad()
+		if wins < needed then
+			STATE.proStatus = string.format("%d/%d wins to unlock Pro Servers (1.5x coins)", wins, needed)
+			return
+		end
+		if arenaName() or os.clock() < events.nextServerAsk then
+			return
+		end
+		events.nextServerAsk = os.clock() + 600
+		local ok, why = STATE.askServer("Pro")
+		STATE.proStatus = ok and "Joining Pro Servers..." or ("Pro Servers: " .. (why ~= "" and why or "not available right now"))
+		if ok then
+			noteActivity("Joining Pro Servers")
+		end
 		return
 	end
 	if game.PlaceId == PRO_PLACE then
@@ -3867,13 +4231,16 @@ local function pulseAntiAfk()
 		return
 	end
 	pcall(function()
-		local virtual = game:GetService("VirtualUser")
-		virtual:CaptureController()
-		virtual:ClickButton2(Vector2.new(-1, -1))
-	end)
-	pcall(function()
-		local mouse = UserInputService:GetMouseLocation()
-		game:GetService("VirtualInputManager"):SendMouseMoveEvent(mouse.X, mouse.Y, game)
+		-- Volley Bomb flags both VirtualUser and VirtualInputManager input.
+		-- Real's native input is safe, but only reaches Roblox while its window
+		-- is focused; never fall back to either detectable Roblox service.
+		if type(isrbxactive) == "function" and isrbxactive() and type(mousemoverel) == "function" then
+			mousemoverel(1, 0)
+			mousemoverel(-1, 0)
+			STATE.antiAfkStatus = "Active"
+		else
+			STATE.antiAfkStatus = "Waiting for Roblox window focus"
+		end
 	end)
 end
 trackConnection(LocalPlayer.Idled:Connect(pulseAntiAfk))
@@ -4160,7 +4527,24 @@ do
 	task.spawn(function()
 		while running() do
 			task.wait(15)
-			if STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() and not STATE.onNewServer() then
+			if STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() and STATE.onNewServer() then
+				-- New lobbies: ask the Server Selector for another normal server.
+				local count = #Players:GetPlayers()
+				if count < 4 and STATE.matchQueue == "Off" then
+					emptySince = emptySince or os.clock()
+					STATE.hopStatus = string.format("Only %d here; asking for a busier server in %ds", count, math.max(0, math.ceil(120 - (os.clock() - emptySince))))
+					if os.clock() - emptySince >= 120 and os.clock() - lastHop >= 600 then
+						lastHop = os.clock()
+						local ok = STATE.askServer(placeType() == "pro" and "Pro" or "Main")
+						if ok then
+							noteActivity("Server nearly empty, moving to another one")
+						end
+					end
+				else
+					emptySince = nil
+					STATE.hopStatus = count .. " players here"
+				end
+			elseif STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() and not STATE.onNewServer() then
 				local count = #Players:GetPlayers()
 				if count < 4 then
 					emptySince = emptySince or os.clock()
@@ -4600,6 +4984,7 @@ local function installHub()
 	local aimBox = section(playTab, "Aiming", "crosshair")
 	toggle(aimBox, "Smart Aim", "smartAim", "Works out where each hit lands and sends it into another player's square")
 	choice(aimBox, "Aim For", "Hardest to save = far from the player · Fastest = shortest flight", AIM_OPTIONS, "aimMode")
+	toggle(aimBox, "Hunt Bounty Target", "aimBounty", "In Bounty rounds, aims at your bounty target's square first (100 Bounty Coins when the point ends there off your hit)")
 	toggle(aimBox, "Show Landing Spot", "showLanding", "Purple circle where the ball will land")
 	toggle(aimBox, "Show Button Presses", "showPresses", "The Bump/Spike, Dive and ability buttons at the bottom press in when auto play uses them (only on your screen)")
 	local humanBox = section(playTab, "Play Like A Human", "user-check")
@@ -4705,6 +5090,14 @@ local function installHub()
 	toggle(rewardBox, "Auto Claim Quests", "autoQuests")
 	toggle(rewardBox, "Auto Claim Achievements", "autoAchievements")
 	toggle(rewardBox, "Auto Spin Wheel", "autoSpin", "Uses your spins as soon as you have them")
+	local eventBox = section(rewardTab, "Events", "party-popper")
+	local eventInfo = info(eventBox, "Events", "Loading...")
+	toggle(eventBox, "Auto Claim Bounty Tiers", "autoBountyTiers", "Claims the next Bounty milestone as soon as you have the Bounty Coins")
+	toggle(eventBox, "Auto Bounty Spins", "autoBountySpins", "Uses your free Bounty wheel spins. Coins only go on the wheel once every tier is claimed")
+	toggle(eventBox, "Spend Bounty Coins On Spins", "bountyCoinSpins", "Also spins with coins (250 each) before the tiers are done")
+	toggle(eventBox, "Auto Turkey's Challenge", "autoTurkey", "Claims each day's Turkey's Challenge reward once its objectives are done (never the Robux catch-up)")
+	toggle(eventBox, "Use 2x Coins Boosts", "autoBoost", "Turns on a 2x Coins boost you own when a round starts and none is running")
+	toggle(eventBox, "Claim Free Gift", "autoLikeReward", "Claims the lobby's free gift once it's yours")
 	local questBox = section(rewardTab, "Daily Quests", "list-checks")
 	local questInfo = info(questBox, "Progress", "Loading...")
 
@@ -4729,10 +5122,13 @@ local function installHub()
 	local potatoInfo = info(cameraBox, "Graphics", STATE.potatoStatus or "Off. Normal look")
 	local afkBox = section(playerTab, "AFK", "moon")
 	toggle(afkBox, "AFK", "afk", "On: you stand there and the hub does not play. Off: auto play carries on")
-	toggle(afkBox, "Anti AFK", "antiAfk", "Stops the 20 minute idle kick")
+	toggle(afkBox, "Anti AFK", "antiAfk", "Stops the 20 minute idle kick while the Roblox window is focused (the game's anti-cheat blocks background synthetic input)")
 	toggle(afkBox, "Stay Active", "stayActive", "Turns the game's AFK button off so you keep getting put in rounds. Does nothing while AFK above is on")
 	toggle(afkBox, "Reload Hub After Server Change", "autoReload")
 	local serverBox = section(playerTab, "Server", "server")
+	toggle(serverBox, "Leave Noob Servers", "leaveNoob", "Once you've got 15 eliminations in a Noob server, takes the game's offer to move to a normal one")
+	choice(serverBox, "Match Queue", "Off = play the normal rounds. Otherwise keeps you queued for that match type between games", STATE.QUEUE_OPTIONS, "matchQueue")
+	local queueInfo = info(serverBox, "Queue", "Off")
 	toggle(serverBox, "Leave Empty Servers", "autoHopEmpty", "If your server stays under 4 players between rounds for 2 minutes, moves you to the busiest server (at most every 10 minutes). Good for leaving it on overnight")
 	button(serverBox, "Rejoin", nil, "rotate-ccw", STATE.rejoin)
 	button(serverBox, "Server Hop", nil, "shuffle", function()
@@ -4875,6 +5271,8 @@ local function installHub()
 		setInfo(abilityInfo, ability and (tostring(abilityData and abilityData.DisplayName or ability)
 			.. (abilityData and abilityData.Description and ("\n" .. abilityData.Description) or "")) or "None equipped")
 		setInfo(rewardInfo, tostring(STATE.rewardStatus))
+		setInfo(eventInfo, "Bounty · " .. tostring(STATE.bountyStatus or "Waiting") .. string.char(10) .. "Turkey · " .. tostring(STATE.turkeyStatus or "Waiting"))
+		setInfo(queueInfo, STATE.matchQueue == "Off" and "Off" or tostring(STATE.queueStatus or ("Waiting to queue " .. STATE.matchQueue)))
 		setInfo(shopInfo, tostring(STATE.shopStatus))
 		setInfo(proInfo, tostring(STATE.proStatus))
 		setInfo(potatoInfo, tostring(STATE.potatoStatus or "Off. Normal look"))
@@ -4952,6 +5350,8 @@ task.spawn(function()
 		pcall(stepStayActive)
 		elevate()
 		pcall(stepRewards)
+		elevate()
+		pcall(stepEvents)
 		elevate()
 		pcall(stepVote)
 		elevate()
