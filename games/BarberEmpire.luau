@@ -732,6 +732,7 @@ local function stepCall()
 end
 
 -- ClipTok: every cut is filmed. Post it for followers, then close the results.
+local FOLLOWER_CAP = 1e290
 local video = { closeSeen = nil, resultsAt = nil, lastPress = 0 }
 local function stepVideo()
 	if not ClipTok or not ClipTok.isOpen() then
@@ -756,8 +757,18 @@ local function stepVideo()
 		return
 	end
 	video.lastPress = os.clock()
-	if STATE.autoPost == true then
+	-- Followers multiply with every video. Near the biggest number Roblox can
+	-- hold (about 1e308) the next post would turn them into infinity, which can
+	-- break the save, so past FOLLOWER_CAP the hub discards videos instead.
+	local followers = tonumber(attr("Followers")) or 0
+	if STATE.autoPost == true and followers < FOLLOWER_CAP then
 		pcall(ClipTok._press, "post")
+	elseif STATE.autoPost == true then
+		if not video.capNoted then
+			video.capNoted = true
+			noteActivity("Followers maxed out: videos are discarded now so the number can't overflow")
+		end
+		pcall(ClipTok._press, "skip")
 	else
 		pcall(ClipTok._press, "skip")
 	end
@@ -1997,7 +2008,7 @@ local function installHub()
 		toggle(productBox, "Auto Buy Products", "autoBuyProducts", "Keeps a few of the products it uses in stock")
 
 		local videoBox = section(cutTab, "ClipTok Videos", "camera")
-		toggle(videoBox, "Auto Post Videos", "autoPost", "Posts the before & after video of every cut for followers and more customers. Off = discards them")
+		toggle(videoBox, "Auto Post Videos", "autoPost", "Posts the before & after video of every cut for followers and more customers (stops by itself just before followers max out). Off = discards them")
 	end
 
 	local shopInfo
@@ -2216,7 +2227,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.1.0"
+STATE.version = "1.1.1"
 
 if running() then
 	elevate()
