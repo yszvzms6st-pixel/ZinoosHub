@@ -115,7 +115,7 @@ do
 	end
 end
 
-local VERSION = "1.29.4"
+local VERSION = "1.29.5"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -3489,6 +3489,13 @@ local function inMatchServer()
 	return workspace:GetAttribute("MatchState") ~= nil or workspace:GetAttribute("MatchActive") == true
 end
 STATE.inMatchServer = inMatchServer
+-- The match is over (someone reached the winning score) but you're still in
+-- its server until the game moves you. Queueing is fine from here.
+local function matchFinished()
+	local raw = workspace:GetAttribute("MatchState")
+	return type(raw) == "string" and string.find(raw, '"phase":"Ended"', 1, true) ~= nil
+end
+STATE.matchFinished = matchFinished
 
 -- Bounty rounds: the server tells each player their own target. Ending the
 -- point in the target's square off your hit pays 100 Bounty Coins.
@@ -3683,8 +3690,8 @@ local function stepQueue()
 	if mode == "Off" or not table.find(QUEUE_OPTIONS, mode) or not mm or type(mm.Request) ~= "function" then
 		return
 	end
-	if inMatchServer() then
-		STATE.queueStatus = "In a match. Queues again once you're back in a lobby"
+	if inMatchServer() and not matchFinished() then
+		STATE.queueStatus = "In a match. Queues again as soon as it ends"
 		return
 	end
 	if arenaName() or STATE.afk == true or os.clock() < events.nextQueue then
