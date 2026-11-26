@@ -82,6 +82,20 @@ if type(AbilityController._lastUsed) ~= "table" then
 	end) or AbilityController
 end
 
+-- Anti-kick: BallController:Hit checks debug.getmemorycategory(). Game threads
+-- carry their script's name there, but executor threads have an empty one, and
+-- an empty one makes Hit quietly fire "BallService/Resync" with a secret tag,
+-- which gets you kicked. So every hub thread that calls into the game (Swing,
+-- Dive, abilities) first tags itself like the game's own client runtime.
+-- Threads and connections made after this inherit the tag too.
+local GAME_THREAD_TAG = "ClientRunTime"
+local function gameThread()
+	if debug.getmemorycategory() ~= GAME_THREAD_TAG then
+		pcall(debug.setmemorycategory, GAME_THREAD_TAG)
+	end
+end
+gameThread()
+
 local Info = ReplicatedStorage:WaitForChild("Data"):WaitForChild("Info")
 local function safeRequire(instance)
 	local ok, result = pcall(require, instance)
@@ -101,7 +115,7 @@ do
 	end
 end
 
-local VERSION = "1.28.3"
+local VERSION = "1.28.4"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -788,6 +802,7 @@ local function useAbility(moment)
 	if type(AbilityController._active) == "table" and AbilityController._active[name] then
 		return false
 	end
+	gameThread()
 	local ok = pcall(AbilityController.ActivateEquipped, AbilityController)
 	elevate()
 	if ok then
@@ -1381,6 +1396,7 @@ local function tryHit(kind, char, root, state, zones, myZone, ballPos, now)
 		brain.pendingCurve = nil
 	end
 	brain.pendingKind, brain.pendingPick, brain.pendingQuality = resolvedKind, pick, quality
+	gameThread()
 	local ok = pcall(BallController.Swing, BallController)
 	elevate()
 	if not ok then
@@ -1470,6 +1486,7 @@ local function startNativeDive(root, hum, dir, plan)
 	if brain.diveCheck.expectSet then
 		brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Set", nil, 1
 	end
+	gameThread()
 	local ok, activated = pcall(AbilityController.Activate, AbilityController, "Dive")
 	elevate()
 	if not ok or activated == false
@@ -1497,6 +1514,7 @@ local function tryTip(char, root, state, zones, myZone, ballPos, now)
 	end
 	face(root, dir)
 	brain.pendingKind, brain.pendingPick, brain.pendingQuality = "Tip", pick, 1
+	gameThread()
 	local ok = pcall(BallController.Swing, BallController)
 	elevate()
 	if ok then
@@ -2347,6 +2365,7 @@ local function stepBrain()
 			brain.lastServe = os.clock()
 			-- Normal player input reaches the serve through Swing; keep the
 			-- non-humanized mode on that same path too.
+			gameThread()
 			local served = pcall(BallController.Swing, BallController)
 			elevate()
 			if served then
