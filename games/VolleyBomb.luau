@@ -115,7 +115,7 @@ do
 	end
 end
 
-local VERSION = "1.29.3"
+local VERSION = "1.29.4"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -3482,6 +3482,14 @@ local function placeType()
 end
 STATE.placeType = placeType
 
+-- Matchmaking matches (1v1, 2v2, 3v3, 1v1v1v1) run in their own server, marked
+-- with a MatchState attribute. Only 2-8 people are in one, so it must never
+-- count as "empty", and the hub must never queue or switch servers from it.
+local function inMatchServer()
+	return workspace:GetAttribute("MatchState") ~= nil or workspace:GetAttribute("MatchActive") == true
+end
+STATE.inMatchServer = inMatchServer
+
 -- Bounty rounds: the server tells each player their own target. Ending the
 -- point in the target's square off your hit pays 100 Bounty Coins.
 do
@@ -3629,7 +3637,7 @@ local function stepExtras()
 			end
 		end
 	end
-	if STATE.leaveNoob == true and placeType() == "noob" and not arenaName() and now >= events.noobAsked
+	if STATE.leaveNoob == true and placeType() == "noob" and not arenaName() and not inMatchServer() and now >= events.noobAsked
 		and (tonumber(dataGet("Eliminations")) or 0) >= 15 then
 		events.noobAsked = now + 120
 		local leave = remote("LeaveNoobServer")
@@ -3673,6 +3681,10 @@ local function stepQueue()
 	local mode = STATE.matchQueue
 	local mm = matchmaking()
 	if mode == "Off" or not table.find(QUEUE_OPTIONS, mode) or not mm or type(mm.Request) ~= "function" then
+		return
+	end
+	if inMatchServer() then
+		STATE.queueStatus = "In a match. Queues again once you're back in a lobby"
 		return
 	end
 	if arenaName() or STATE.afk == true or os.clock() < events.nextQueue then
@@ -3886,6 +3898,10 @@ function STATE.onNewServer()
 end
 
 local function stepProServer()
+	if inMatchServer() then
+		STATE.proStatus = "In a match. Staying put"
+		return
+	end
 	if STATE.onNewServer() then
 		-- New lobbies: ask the Server Selector, the same as pressing its Pro card.
 		local kind = placeType()
@@ -4527,7 +4543,10 @@ do
 	task.spawn(function()
 		while running() do
 			task.wait(15)
-			if STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() and STATE.onNewServer() then
+			if inMatchServer() then
+				emptySince = nil
+				STATE.hopStatus = "In a match. Staying put"
+			elseif STATE.autoHopEmpty == true and STATE.afk ~= true and not arenaName() and STATE.onNewServer() then
 				-- New lobbies: ask the Server Selector for another normal server.
 				local count = #Players:GetPlayers()
 				if count < 4 and STATE.matchQueue == "Off" then
