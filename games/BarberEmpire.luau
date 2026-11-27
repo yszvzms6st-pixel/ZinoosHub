@@ -305,6 +305,7 @@ local Finish = gameModule(ClientModules, "Finish")
 local CoinsModule = gameModule(ClientModules, "Coins")
 local StaffShop = gameModule(ClientModules, "StaffShop")
 local Playtime = gameModule(ClientModules, "Playtime")
+local CutChoice = gameModule(ClientModules, "CutChoice")
 elevate()
 
 local function invoke(remoteName, ...)
@@ -639,6 +640,97 @@ do
 		end
 		hubCleanup(function()
 			Finish.choose = original
+		end)
+	end
+end
+
+-- "You pick!" customers -------------------------------------------------------
+-- Some customers can't decide, and the game stops on a 3-card picker (easy,
+-- medium, hard) until you choose. The hub picks the best-paying cut it can
+-- five-star (dye cuts only with the Hair Dye pass) and tells the server, the
+-- same way the CHOOSE button does.
+local choiceNames = { "Easy", "Medium", "Hard" }
+local function choicePay(customer, order)
+	if not HairCuts or type(HairCuts.payment) ~= "function" then
+		return nil
+	end
+	local ok, base, tip = pcall(HairCuts.payment, order, 5, Random.new(customer.tipSeed or 1), false)
+	if not ok or type(base) ~= "number" then
+		return nil
+	end
+	if Payout and type(Payout.compute) == "function" then
+		local okPay, pay, extra = pcall(Payout.compute, LocalPlayer, base, tip, { stars = 5, rich = customer.rich, order = order })
+		if okPay and type(pay) == "number" then
+			return pay + (tonumber(extra) or 0)
+		end
+	end
+	return base + (tonumber(tip) or 0)
+end
+
+local function pickChoice(customer)
+	local choices = customer.choices
+	if type(choices) ~= "table" or type(choices.seeds) ~= "table" or not HairCuts or type(HairCuts.makeOrder) ~= "function" then
+		return false
+	end
+	local canDye = hasPass("HairDye")
+	local bestIndex, bestOrder, bestPay = nil, nil, nil
+	local fallbackIndex, fallbackOrder = nil, nil
+	for index, seed in choices.seeds do
+		local ok, order = pcall(HairCuts.makeOrder, choices.style, Random.new(seed), {
+			rich = choices.rich,
+			level = choices.level,
+			female = choices.female,
+		})
+		if ok and type(order) == "table" then
+			fallbackIndex, fallbackOrder = index, order
+			if not order.dye or canDye then
+				local pay = choicePay(customer, order) or index
+				if bestPay == nil or pay > bestPay then
+					bestIndex, bestOrder, bestPay = index, order, pay
+				end
+			end
+		end
+	end
+	bestIndex = bestIndex or fallbackIndex
+	bestOrder = bestOrder or fallbackOrder
+	if not bestIndex or not bestOrder then
+		return false
+	end
+	bestOrder.name = customer.name
+	if customer.hair and type(HairCuts.fitDye) == "function" then
+		pcall(HairCuts.fitDye, bestOrder, customer.hair)
+	end
+	customer.order = bestOrder
+	customer.choices = nil
+	local remote = Remotes:FindFirstChild("PickCut")
+	if remote and customer.token then
+		remote:FireServer(customer.token, bestIndex)
+	end
+	if type(customer.say) == "function" then
+		pcall(customer.say, customer, "Ooh, the " .. tostring(bestOrder.title) .. "? Let's do it!", 2.5)
+	end
+	noteActivity("Picked the " .. tostring(choiceNames[bestIndex] or bestIndex) .. " cut: " .. tostring(bestOrder.title))
+	return true
+end
+
+do
+	local original = genv.ZinoosBarberAsk
+	if type(original) ~= "function" then
+		original = CutChoice and CutChoice.ask
+		genv.ZinoosBarberAsk = original
+	end
+	if CutChoice and type(original) == "function" then
+		CutChoice.ask = function(customer, ...)
+			if running() and STATE.autoCut == true and type(customer) == "table" then
+				local ok, picked = pcall(pickChoice, customer)
+				if ok and picked then
+					return
+				end
+			end
+			return original(customer, ...)
+		end
+		hubCleanup(function()
+			CutChoice.ask = original
 		end)
 	end
 end
@@ -2227,7 +2319,7 @@ local function installHub()
 end
 
 loadSaved()
-STATE.version = "1.1.1"
+STATE.version = "1.1.2"
 
 if running() then
 	elevate()
