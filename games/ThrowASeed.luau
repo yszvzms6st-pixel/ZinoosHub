@@ -102,7 +102,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.6"
+local VERSION = "1.5.7"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -401,6 +401,37 @@ local function syncPowerDisplay(power)
 	for _, settings in ipairs(list) do
 		if type(settings) == "table" and type(settings.power) == "number" then
 			settings.power = power
+		end
+	end
+	-- The Throw Power window keeps its own drawn text. PowerPct can already be
+	-- 100 while that window still says 21% and Tropical Beach until it is redrawn.
+	local preset = pg and pg:FindFirstChild("MenuPower")
+	preset = preset and preset:FindFirstChild("P100", true)
+	if not preset or typeof(getconnections) ~= "function" or typeof(debug) ~= "table" or typeof(debug.getupvalue) ~= "function" then
+		local shown = pg and pg:FindFirstChild("MenuPower")
+		shown = shown and shown:FindFirstChild("Percent", true)
+		if shown then
+			shown.Text = power .. "%"
+		end
+		return
+	end
+	local okConns, conns = pcall(getconnections, preset.Activated)
+	if not okConns or type(conns) ~= "table" then
+		return
+	end
+	for _, conn in ipairs(conns) do
+		local fn = conn.Function
+		if type(fn) == "function" then
+			for index = 1, 12 do
+				local okUp, upvalue = pcall(debug.getupvalue, fn, index)
+				if not okUp or upvalue == nil then
+					break
+				end
+				if type(upvalue) == "function" then
+					pcall(upvalue)
+					return
+				end
+			end
 		end
 	end
 end
