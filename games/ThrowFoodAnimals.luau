@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.6.3",
+	version = "3.6.4",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
@@ -118,6 +118,7 @@ local STATE = {
 	feastGoal = "Animals first",
 	autoDeepFreeze = true,
 	autoAdvent = true,
+	streamerMode = false,
 	dreamBuy = false,
 	dreamPotionBuy = false,
 	dreamInfuse = false,
@@ -288,6 +289,7 @@ local FLAG_KEYS = {
 	AutoFeast = "autoFeast",
 	AutoDeepFreeze = "autoDeepFreeze",
 	AutoAdvent = "autoAdvent",
+	StreamerMode = "streamerMode",
 	DreamBuy = "dreamBuy",
 	DreamPotionBuy = "dreamPotionBuy",
 	DreamInfuse = "dreamInfuse",
@@ -5857,6 +5859,100 @@ local function installHub()
 	local syncToggle
 	local dropdowns = {}
 
+	local streamer = { names = {}, boards = {} }
+	local function maskNames(hide)
+		local aliases = {}
+		if LocalPlayer.Name ~= "" then
+			table.insert(aliases, LocalPlayer.Name)
+		end
+		if LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName ~= LocalPlayer.Name then
+			table.insert(aliases, LocalPlayer.DisplayName)
+		end
+		local function cover(label)
+			if not (label:IsA("TextLabel") or label:IsA("TextButton") or label:IsA("TextBox")) then
+				return
+			end
+			for _, name in ipairs(aliases) do
+				if label.Text == name then
+					if streamer.names[label] == nil then
+						streamer.names[label] = label.Text
+					end
+					label.Text = "Anonymous"
+					return
+				end
+			end
+		end
+		if hide then
+			for label in pairs(streamer.names) do
+				if typeof(label) ~= "Instance" or not label.Parent then
+					streamer.names[label] = nil
+				end
+			end
+			local user = Window.User
+			if type(user) == "table" and type(user.SetAnonymous) == "function" then
+				pcall(user.SetAnonymous, user, true)
+			end
+			local gui = LocalPlayer:FindFirstChild("PlayerGui")
+			if gui then
+				for _, label in gui:GetDescendants() do
+					cover(label)
+				end
+			end
+			local list = CoreGui:FindFirstChild("PlayerList")
+			if list then
+				for _, label in list:GetDescendants() do
+					cover(label)
+				end
+			end
+			local character = LocalPlayer.Character
+			local hum = character and character:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			end
+			if character then
+				for _, board in character:GetDescendants() do
+					if board:IsA("BillboardGui") and board.Enabled then
+						board.Enabled = false
+						streamer.boards[board] = true
+					end
+				end
+			end
+		else
+			local user = Window.User
+			if type(user) == "table" and type(user.SetAnonymous) == "function" then
+				pcall(user.SetAnonymous, user, false)
+			end
+			for label, text in pairs(streamer.names) do
+				if typeof(label) == "Instance" and label.Parent then
+					label.Text = text
+				end
+			end
+			table.clear(streamer.names)
+			for board in pairs(streamer.boards) do
+				if typeof(board) == "Instance" and board.Parent then
+					board.Enabled = true
+				end
+			end
+			table.clear(streamer.boards)
+			local hum = humanoid()
+			if hum then
+				hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+			end
+		end
+	end
+	local function applyStreamer(on)
+		maskNames(on == true)
+	end
+	STATE.applyStreamer = applyStreamer
+	task.spawn(function()
+		while running() and not windowGone do
+			if STATE.streamerMode == true then
+				maskNames(true)
+			end
+			task.wait(1)
+		end
+	end)
+
 	local function onToggle(key, on)
 		STATE[key] = on
 		if key == "autoThrow" and on then
@@ -5913,6 +6009,10 @@ local function installHub()
 			end
 		elseif key == "equipBest" and on then
 			task.spawn(STATE.equipBestNow)
+		elseif key == "streamerMode" then
+			if STATE.applyStreamer then
+				STATE.applyStreamer(on)
+			end
 		elseif key == "walkSpeed" and not on then
 			local hum = humanoid()
 			if hum then
@@ -6559,6 +6659,7 @@ local function installHub()
 			pcall(Window.SetToggleKey, Window, Enum.KeyCode[option])
 		end)
 		toggle(lookBox, "Start Hidden", "hideOnStart", "Opens with the key or the Zinoos button")
+		toggle(lookBox, "Streamer Mode", "streamerMode", "Hides your username and display name on the hub, the player list and your nametag")
 
 		local configBox = section(settingsTab, "Config", "save", false)
 		info(configBox, "Saving", "Changes save automatically for this Roblox account.")
@@ -6578,7 +6679,7 @@ local function installHub()
 					instantPrompts = false, fly = false, noPausePopup = true, autoReconnect = false,
 					disable3d = false, fpsBoost = false, hidePets = true,
 					notifications = true, notifyCatches = true, notifySales = true, notifyProgress = true,
-					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false,
+					espEnabled = false, espOwnOnly = false, espAllAnimals = false, hideOnStart = false, streamerMode = false,
 					trainOnBoost = true, autoRingRush = true, dreamBuy = false, dreamPotionBuy = false, dreamInfuse = false, autoTrail = true, cycleTrain = false,
 					indexHunt = false, collectClaim = true, collectStop = true, collectSuper = false,
 				}
