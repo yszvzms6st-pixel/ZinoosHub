@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.6.5",
+	version = "3.6.6",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
@@ -123,8 +123,8 @@ local STATE = {
 	dreamPotionBuy = false,
 	dreamInfuse = false,
 	autoTrail = true,
-	-- Collection page: one Auto Collect switch for the world index and the
-	-- Dreamland collection. "indexHunt" keeps its old save key.
+	-- Collection page: one Auto Collect switch for the world index, Dreamland
+	-- and the Deep Freeze collection. "indexHunt" keeps its old save key.
 	indexHunt = false,
 	collectClaim = true,
 	collectStop = true,
@@ -1219,6 +1219,8 @@ local GameConfig = optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "
 local RarityConfig = optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "RarityConfig")
 local Dreamland = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "Dreamland")
 local DreamlandConfig = Dreamland and Dreamland.Config or optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "DreamlandConfig")
+STATE.deepFreeze = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "DeepFreeze")
+STATE.deepFreezeConfig = STATE.deepFreeze and STATE.deepFreeze.Config or optionalRequire(ReplicatedStorage:FindFirstChild("Config"), "DeepFreezeConfig")
 local IndexRewards = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "IndexRewards")
 local controllers = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client"):WaitForChild("Controllers")
 local GameDataController = require(controllers.DataController)
@@ -1719,10 +1721,11 @@ local function dreamCaught()
 	return type(data) == "table" and type(data.Caught) == "table" and data.Caught or {}
 end
 
--- Collection: the world index (one collection per zone) and the Dreamland
--- collection (split into its five dream habitats) as one list. Each row:
--- id ("Forest" or "Dream:Taiga"), area, name, found, total, dream, claimed,
--- reachable (a throw at this level can land there).
+-- Collection: the world index (one collection per zone), Dreamland (split
+-- into its five habitats) and Deep Freeze (its own 42-animal collection,
+-- grouped by the zone each animal comes from). Each row: id ("Forest",
+-- "Dream:Taiga" or "Freeze:Taiga"), area, name, found, total, dream/freeze,
+-- claimed, reachable (a throw at this level can land there).
 STATE.collectReach = { at = 0, level = nil, areas = {} }
 function STATE.collectReachable(area)
 	local cache = STATE.collectReach
@@ -1736,10 +1739,66 @@ function STATE.collectReachable(area)
 	return cache.areas[area]
 end
 
+function STATE.freezeCollectLive()
+	local module = STATE.deepFreeze
+	if not module or type(module.State) ~= "function" then
+		return false
+	end
+	local ok, state = pcall(module.State)
+	elevate()
+	if not ok or type(state) ~= "table" or state.Active ~= true then
+		return false
+	end
+	if type(module.IsEligible) == "function" then
+		local eligibleOk, eligible = pcall(module.IsEligible, LocalPlayer)
+		elevate()
+		if not eligibleOk or eligible ~= true then
+			return false
+		end
+	end
+	return true
+end
+
+function STATE.freezeZoneFrozen(zone)
+	local module = STATE.deepFreeze
+	if not module or type(module.IsFrozen) ~= "function" then
+		return false
+	end
+	local ok, frozen = pcall(module.IsFrozen, zone)
+	elevate()
+	return ok and frozen == true
+end
+
+-- AnimalAt's arguments differ from Thanksgiving's. Try the shapes the module
+-- might use and keep the one that names a real freeze animal.
+function STATE.freezeAnimalAt(zone, depth)
+	local module = STATE.deepFreeze
+	if not module or type(module.AnimalAt) ~= "function" then
+		return nil
+	end
+	local save = getData("DeepFreeze")
+	local attempts = {
+		{ zone, depth },
+		{ zone, depth, save },
+		{ save, zone, depth },
+	}
+	for _, args in ipairs(attempts) do
+		local ok, value = pcall(module.AnimalAt, table.unpack(args))
+		elevate()
+		if ok and type(value) == "table" and type(value.ModelName) == "string" then
+			return value
+		end
+	end
+	return nil
+end
+
 function STATE.collectionRows()
 	local data = readAll()
 	local index = type(data.Index) == "table" and data.Index or {}
-	local rows = { world = {}, dream = {}, worldFound = 0, worldTotal = 0, dreamFound = 0, dreamTotal = 0 }
+	local rows = {
+		world = {}, dream = {}, freeze = {},
+		worldFound = 0, worldTotal = 0, dreamFound = 0, dreamTotal = 0, freezeFound = 0, freezeTotal = 0,
+	}
 	if IndexRewards then
 		local ok, collections = pcall(IndexRewards.Collections, "World")
 		for _, collection in ipairs(ok and type(collections) == "table" and collections or {}) do
@@ -1799,6 +1858,56 @@ function STATE.collectionRows()
 				rows.dreamFound += found
 				rows.dreamTotal += #zone.Animals
 			end
+		end
+	end
+	if STATE.deepFreezeConfig and type(STATE.deepFreezeConfig.Animals) == "table" then
+		local byZone = {}
+		for _, animal in ipairs(STATE.deepFreezeConfig.Animals) do
+			if type(animal) == "table" and type(animal.Zone) == "string" and type(animal.ModelName) == "string" then
+				local list = byZone[animal.Zone]
+				if not list then
+					list = {}
+					byZone[animal.Zone] = list
+				end
+				table.insert(list, animal)
+			end
+		end
+		local zoneOrder = {}
+		for _, key in ipairs(type(STATE.deepFreezeConfig.Zones) == "table" and STATE.deepFreezeConfig.Zones or {}) do
+			if byZone[key] then
+				table.insert(zoneOrder, key)
+			end
+		end
+		if #zoneOrder == 0 then
+			for key in pairs(byZone) do
+				table.insert(zoneOrder, key)
+			end
+			table.sort(zoneOrder)
+		end
+		for _, zone in ipairs(zoneOrder) do
+			local animals = byZone[zone]
+			local found, firstMissing = 0, nil
+			for position, animal in ipairs(animals) do
+				if index[animal.ModelName] then
+					found += 1
+				elseif firstMissing == nil then
+					firstMissing = (position - 1) / #animals
+				end
+			end
+			table.insert(rows.freeze, {
+				firstMissing = firstMissing,
+				id = "Freeze:" .. zone,
+				area = zone,
+				name = displayAreaName(zone),
+				found = found,
+				total = #animals,
+				freeze = true,
+				animals = animals,
+				frozen = STATE.freezeZoneFrozen(zone),
+				reachable = STATE.collectReachable(zone),
+			})
+			rows.freezeFound += found
+			rows.freezeTotal += #animals
 		end
 	end
 	elevate()
@@ -2047,6 +2156,34 @@ function STATE.aimTarget()
 	STATE.collectFoodWanted = nil
 	local plans = STATE.collectPlans and STATE.collectPlans(rows.world) or nil
 	local function aimAt(row)
+		if row.freeze then
+			local caught = getData("Index")
+			caught = type(caught) == "table" and caught or {}
+			local depths = { 0.12, 0.17, 0.28, 0.4, 0.5, 0.62, 0.78, 0.85, 0.92 }
+			if type(row.animals) == "table" then
+				for _, animal in ipairs(row.animals) do
+					if not caught[animal.ModelName] then
+						for _, depth in ipairs(depths) do
+							local at = STATE.freezeAnimalAt(row.area, depth)
+							if type(at) == "table" and at.ModelName == animal.ModelName then
+								local power = aimPowerFor(row.area, depth)
+								if power then
+									return power, string.format("Collecting Deep Freeze %s · %d/%d", row.name, row.found, row.total), row.id
+								end
+							end
+						end
+						break
+					end
+				end
+			end
+			local missingAt = tonumber(row.firstMissing) or 0.5
+			local depth = missingAt < 0.45 and 0.17 or (missingAt < 0.75 and 0.5 or 0.85)
+			local power = aimPowerFor(row.area, depth)
+			if power then
+				return power, string.format("Collecting Deep Freeze %s · %d/%d", row.name, row.found, row.total), row.id
+			end
+			return nil
+		end
 		local plan = plans and not row.dream and plans[row.id] or nil
 		if plan and plan.chance > 0 then
 			STATE.collectFoodWanted = plan.food
@@ -2081,7 +2218,7 @@ function STATE.aimTarget()
 				depth = math.clamp((bestCount - 0.5) / #animals + 0.04, 0.05, 0.95)
 			end
 		end
-		if not row.dream then
+		if not row.dream and not row.freeze then
 			local at = tonumber(row.firstMissing) or 0.9
 			if at < 0.45 then
 				depth, band = 0.17, "front"
@@ -2101,7 +2238,7 @@ function STATE.aimTarget()
 
 	local target = tostring(STATE.collectTarget or "Auto")
 	if target ~= "Auto" then
-		for _, list in ipairs({ rows.world, rows.dream }) do
+		for _, list in ipairs({ rows.world, rows.dream, rows.freeze }) do
 			for _, row in ipairs(list) do
 				if row.id == target then
 					if row.found >= row.total then
@@ -2111,11 +2248,34 @@ function STATE.aimTarget()
 						-- Dream animals only appear during a run; farm normally until then.
 						return 0, "Waiting for the next Dreamland run · " .. row.name, row.id
 					end
+					if row.freeze and row.frozen ~= true then
+						return 0, "Waiting for the next freeze · " .. row.name, row.id
+					end
 					return aimAt(row)
 				end
 			end
 		end
 		return nil
+	end
+
+	-- Freeze animals only appear while their zone is frozen, so they come first.
+	local freezeLive = STATE.freezeCollectLive()
+	STATE.freezeRunOn = freezeLive
+	if freezeLive then
+		local best = nil
+		for _, row in ipairs(rows.freeze) do
+			local missing = row.total - row.found
+			local banned = STATE.collectBans and (STATE.collectBans[row.id] or 0) > os.clock()
+			if missing > 0 and row.reachable and row.frozen and not banned and (not best or missing > best.total - best.found) then
+				best = row
+			end
+		end
+		if best then
+			local power, label, id = aimAt(best)
+			if power then
+				return power, label, id
+			end
+		end
 	end
 
 	-- Dream animals only show up for a few minutes, so they come first.
@@ -2190,14 +2350,14 @@ end
 -- in both lists.
 function STATE.collectComplete(rows)
 	local target = tostring(STATE.collectTarget or "Auto")
-	for _, list in ipairs({ rows.world, rows.dream }) do
+	for _, list in ipairs({ rows.world, rows.dream, rows.freeze }) do
 		for _, row in ipairs(list) do
 			if (target == "Auto" or row.id == target) and row.found < row.total then
 				return false
 			end
 		end
 	end
-	return #rows.world + #rows.dream > 0
+	return #rows.world + #rows.dream + #rows.freeze > 0
 end
 
 local function setThrowPower(power)
@@ -2243,7 +2403,7 @@ function STATE.applyAim()
 	-- row), skip that zone for 10 minutes and plan again.
 	do
 		local rows = STATE.collectRows
-		local found = rows and (rows.worldFound + rows.dreamFound) or 0
+		local found = rows and ((rows.worldFound or 0) + (rows.dreamFound or 0) + (rows.freezeFound or 0)) or 0
 		local miss = STATE.collectMiss
 		local catches = tonumber(stats.catches) or 0
 		if STATE.indexHunt == true and miss and miss.id == STATE.collectAimId and miss.id and not string.find(miss.id, "^Dream:") then
@@ -2270,7 +2430,7 @@ function STATE.applyAim()
 		STATE.collectMiss = {
 			id = STATE.collectAimId,
 			count = 0,
-			found = rows and (rows.worldFound + rows.dreamFound) or 0,
+			found = rows and ((rows.worldFound or 0) + (rows.dreamFound or 0) + (rows.freezeFound or 0)) or 0,
 			catches = tonumber(stats.catches) or 0,
 		}
 	end
@@ -2721,14 +2881,22 @@ do
 
 	local previousAim = STATE.aimTarget
 	function STATE.aimTarget()
+		local okAim, power, label, id = pcall(previousAim)
+		elevate()
+		if okAim and type(id) == "string" and string.sub(id, 1, 7) == "Freeze:" then
+			return power, label, id
+		end
 		if STATE.autoDeepFreeze == true then
-			local ok, power, label = pcall(freeze.plan)
+			local ok, piecePower, pieceLabel = pcall(freeze.plan)
 			elevate()
-			if ok and type(power) == "number" then
-				return power, label, nil
+			if ok and type(piecePower) == "number" then
+				return piecePower, pieceLabel, nil
 			end
 		end
-		return previousAim()
+		if okAim then
+			return power, label, id
+		end
+		return nil
 	end
 
 	function freeze.text()
@@ -4404,6 +4572,7 @@ end
 function STATE.stepCollection()
 	local rows = STATE.collectionRows()
 	STATE.collectRows = rows
+	STATE.freezeRunOn = STATE.freezeCollectLive()
 	if STATE.indexHunt == true and STATE.collectStop == true and STATE.collectComplete(rows) then
 		STATE.indexHunt = false
 		if STATE.syncToggle then
@@ -4422,8 +4591,8 @@ function STATE.stepCollection()
 			STATE.collectRestoring = false
 		end)
 	end
-	local found = rows.worldFound + rows.dreamFound
-	local total = rows.worldTotal + rows.dreamTotal
+	local found = (rows.worldFound or 0) + (rows.dreamFound or 0) + (rows.freezeFound or 0)
+	local total = (rows.worldTotal or 0) + (rows.dreamTotal or 0) + (rows.freezeTotal or 0)
 	local doing
 	if STATE.indexHunt ~= true then
 		doing = "Auto Collect is off"
@@ -4596,7 +4765,7 @@ function STATE.buildCollectList(paragraph, title)
 		return entry
 	end
 
-	local worldHead, dreamHead = nil, nil
+	local worldHead, dreamHead, freezeHead = nil, nil, nil
 	local built = false
 	local function build(rows)
 		worldHead = header("WORLD INDEX")
@@ -4606,6 +4775,12 @@ function STATE.buildCollectList(paragraph, title)
 		dreamHead = header("DREAMLAND")
 		for _, item in ipairs(rows.dream) do
 			row(item.id)
+		end
+		if type(rows.freeze) == "table" and #rows.freeze > 0 then
+			freezeHead = header("DEEP FREEZE")
+			for _, item in ipairs(rows.freeze) do
+				row(item.id)
+			end
 		end
 		built = true
 	end
@@ -4631,18 +4806,25 @@ function STATE.buildCollectList(paragraph, title)
 		dreamHead.right.Text = (STATE.dreamTiming and (tostring(STATE.dreamTiming) .. "  ·  ") or "") .. dreamText
 		dreamHead.right.TextColor3 = STATE.dreamLive and accent or ink
 		setFill(dreamHead.fill, rows.dreamFound, rows.dreamTotal)
+		if freezeHead then
+			local freezeText = string.format("%d / %d", rows.freezeFound or 0, rows.freezeTotal or 0)
+			freezeHead.right.Text = (STATE.freezeRunOn and "Freeze on  ·  " or "") .. freezeText
+			freezeHead.right.TextColor3 = STATE.freezeRunOn and accent or ink
+			setFill(freezeHead.fill, rows.freezeFound or 0, rows.freezeTotal or 0)
+		end
 		local aiming = STATE.indexHunt == true and STATE.collectAimId or nil
-		for _, list in ipairs({ rows.world, rows.dream }) do
+		for _, list in ipairs({ rows.world, rows.dream, rows.freeze or {} }) do
 			for _, item in ipairs(list) do
 				local entry = rowsById[item.id]
 				if entry then
 					local complete = item.found >= item.total
 					local targeted = aiming == item.id
-					local waiting = targeted and item.dream and STATE.dreamLive ~= true
+					local waiting = targeted and ((item.dream and STATE.dreamLive ~= true) or (item.freeze and item.frozen ~= true))
 					local key = string.format("%d/%d/%s/%s/%s/%s/%s", item.found, item.total, tostring(complete), tostring(targeted), tostring(item.reachable), tostring(item.claimed), tostring(waiting))
 					if entry.last ~= key then
 						entry.last = key
-						entry.name.Text = item.name .. (waiting and "  ·  waiting for run" or (targeted and "  ·  collecting" or (not item.reachable and "  ·  out of reach" or "")))
+						local waitText = item.freeze and "  ·  waiting for freeze" or "  ·  waiting for run"
+						entry.name.Text = item.name .. (waiting and waitText or (targeted and "  ·  collecting" or (not item.reachable and "  ·  out of reach" or "")))
 						entry.name.TextColor3 = targeted and accent or ink
 						entry.name.TextTransparency = (item.reachable or complete) and 0 or 0.5
 						entry.count.Text = complete and ((item.claimed == false and not item.dream) and "Reward ready" or "Done") or string.format("%d / %d", item.found, item.total)
@@ -4984,8 +5166,8 @@ do
 		task.spawn(function()
 			while running() and screen == gui and gui.Parent do
 				local rows = STATE.collectRows
-				local found = rows and (rows.worldFound + rows.dreamFound) or 0
-				local total = rows and (rows.worldTotal + rows.dreamTotal) or 0
+				local found = rows and ((rows.worldFound or 0) + (rows.dreamFound or 0) + (rows.freezeFound or 0)) or 0
+				local total = rows and ((rows.worldTotal or 0) + (rows.dreamTotal or 0) + (rows.freezeTotal or 0)) or 0
 				local doingText = tostring(STATE.aimStatus or STATE.status or "")
 				if STATE.cycleTrain == true and STATE.cycleInfo and STATE.cycleInfo() then
 					doingText = "Train & Throw: " .. tostring(STATE.cycleStatus)
@@ -6472,11 +6654,11 @@ local function installHub()
 	end
 
 	-- Collection -----------------------------------------------------------
-	-- One page for the world index and the Dreamland collection.
+	-- One page for the world index, Dreamland and the Deep Freeze collection.
 	local collectInfo, collectUpdate
 	do
 		local box = section(collectTab, "Collection", "library")
-		toggle(box, "Auto Collect", "indexHunt", "Aims your throws at zones where you're still missing animals")
+		toggle(box, "Auto Collect", "indexHunt", "Aims your throws at World, Dreamland and Deep Freeze animals you are still missing")
 		local firstRows = STATE.collectionRows()
 		STATE.collectRows = firstRows
 		local targetIds, targetNames = { "Auto" }, { "Auto" }
@@ -6487,6 +6669,10 @@ local function installHub()
 		for _, item in ipairs(firstRows.dream) do
 			table.insert(targetIds, item.id)
 			table.insert(targetNames, "Dreamland · " .. item.name)
+		end
+		for _, item in ipairs(firstRows.freeze or {}) do
+			table.insert(targetIds, item.id)
+			table.insert(targetNames, "Deep Freeze · " .. item.name)
 		end
 		if not table.find(targetIds, STATE.collectTarget) then
 			STATE.collectTarget = "Auto"
@@ -6504,7 +6690,7 @@ local function installHub()
 		collectInfo = info(box, "Progress", tostring(STATE.collectStatus))
 
 		local listBox = section(collectTab, "Zones", "map")
-		local listTitle = "World & Dreamland"
+		local listTitle = "World, Dreamland & Deep Freeze"
 		local holder = info(listBox, listTitle, "Every zone's index. The one being collected is highlighted")
 		local okList, update = pcall(STATE.buildCollectList, holder, listTitle)
 		elevate()
