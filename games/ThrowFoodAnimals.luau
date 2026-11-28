@@ -109,13 +109,14 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.6.1",
+	version = "3.6.2",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
 	autoFeast = true,
 	feastOrder = "Regular",
 	feastGoal = "Animals first",
+	autoDeepFreeze = true,
 	dreamBuy = false,
 	dreamPotionBuy = false,
 	dreamInfuse = false,
@@ -284,6 +285,7 @@ local FLAG_KEYS = {
 	TrainOnBoost = "trainOnBoost",
 	AutoRingRush = "autoRingRush",
 	AutoFeast = "autoFeast",
+	AutoDeepFreeze = "autoDeepFreeze",
 	DreamBuy = "dreamBuy",
 	DreamPotionBuy = "dreamPotionBuy",
 	DreamInfuse = "dreamInfuse",
@@ -2598,6 +2600,167 @@ do
 	end
 end
 
+-- Deep Freeze. Every 30 minutes a 5 minute freeze hits one group of zones,
+-- plus Starfall Heights. Throws landing there can bring back an ice piece.
+-- Held pieces get placed on the cryo chamber. Nothing here runs unless the
+-- game's Deep Freeze module is present and a freeze is actually on.
+do
+	local DeepFreeze = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "DeepFreeze")
+	local config = DeepFreeze and type(DeepFreeze.Config) == "table" and DeepFreeze.Config or nil
+	local freeze = { status = nil, placed = 0, talked = false }
+	STATE.freeze = freeze
+
+	local function helper(name, ...)
+		local fn = DeepFreeze and DeepFreeze[name]
+		if type(fn) ~= "function" then
+			return nil
+		end
+		local ok, value = pcall(fn, ...)
+		elevate()
+		if ok then
+			return value
+		end
+		return nil
+	end
+
+	local function freezeData()
+		local value = getData("DeepFreeze")
+		return type(value) == "table" and value or {}
+	end
+
+	function freeze.run()
+		if STATE.autoDeepFreeze ~= true or not config then
+			return nil
+		end
+		local state = helper("State")
+		if type(state) ~= "table" or state.Active ~= true then
+			return nil
+		end
+		if helper("IsEligible", LocalPlayer) ~= true then
+			return nil
+		end
+		return state
+	end
+
+	local function chamber()
+		local stand = workspace:FindFirstChild("DeepFreezeStand")
+		return stand and (stand:FindFirstChild("CryoChamber") or stand:FindFirstChild("CaptainSkip") or stand)
+	end
+
+	function freeze.plan()
+		local state = freeze.run()
+		if not state then
+			return nil
+		end
+		local zones = helper("FrozenZones", state)
+		if type(zones) ~= "table" then
+			return nil
+		end
+		local save = freezeData()
+		local bestPower, bestLabel, bestScore = nil, nil, -1
+		for _, key in ipairs(zones) do
+			local piece = helper("PieceState", save, key)
+			local score = piece == "Placed" and 0 or (piece == "Held" and 20 or 50)
+			if key ~= "StarfallHeights" then
+				score += 5
+			end
+			if score > bestScore then
+				local power = aimPowerFor(key, 0.55)
+				if type(power) == "number" then
+					bestPower, bestLabel, bestScore = power, displayAreaName(key), score
+				end
+			end
+		end
+		if bestPower == nil then
+			return nil
+		end
+		return bestPower, "Deep Freeze: " .. tostring(bestLabel)
+	end
+
+	function freeze.maintain()
+		if STATE.autoDeepFreeze ~= true or not config then
+			return false
+		end
+		if helper("IsEligible", LocalPlayer) ~= true then
+			return false
+		end
+		local save = freezeData()
+		local spot = chamber()
+		if save.Talked ~= true and not freeze.talked and spot then
+			local result = invokeNear("Deep Freeze", spot, "DeepFreeze_Action", "Talked")
+			if result.Ok then
+				freeze.talked = true
+				noteActivity("Deep Freeze: talked to Captain Skip")
+			end
+		end
+		local held = {}
+		for _, key in ipairs(config.Zones or {}) do
+			if helper("PieceState", save, key) == "Held" then
+				table.insert(held, key)
+			end
+		end
+		if #held == 0 or not spot then
+			return false
+		end
+		for _, key in ipairs(held) do
+			local result = invokeNear("Deep Freeze", spot, "DeepFreeze_Action", "Place", key)
+			if result.Ok then
+				freeze.placed += 1
+				noteActivity("Deep Freeze: placed the " .. displayAreaName(key) .. " piece")
+			else
+				freeze.status = "Place: " .. tostring(result.Reason or "rejected")
+				break
+			end
+		end
+		return true
+	end
+
+	local previousAim = STATE.aimTarget
+	function STATE.aimTarget()
+		if STATE.autoDeepFreeze == true then
+			local ok, power, label = pcall(freeze.plan)
+			elevate()
+			if ok and type(power) == "number" then
+				return power, label, nil
+			end
+		end
+		return previousAim()
+	end
+
+	function freeze.text()
+		if not config then
+			return "Deep Freeze isn't in this server"
+		end
+		local now = workspace:GetServerTimeNow()
+		local state = helper("State")
+		local save = freezeData()
+		local placed = tonumber(helper("PlacedCount", save)) or 0
+		local total = tonumber(helper("TotalPieces")) or #(config.Zones or {})
+		local lines = {}
+		if type(state) ~= "table" or state.Open ~= true then
+			lines[1] = state and state.Ended and "Deep Freeze has ended" or "Deep Freeze isn't open"
+		elseif helper("IsEligible", LocalPlayer) ~= true then
+			lines[1] = "The game hasn't opened Deep Freeze for you yet"
+		elseif state.Active and state.RunEnd then
+			local left = math.max(0, math.floor(state.RunEnd - now))
+			lines[1] = string.format("FREEZE IS ON: %d:%02d left", left // 60, left % 60)
+		elseif state.NextStart then
+			local left = math.max(0, math.floor(state.NextStart - now))
+			lines[1] = string.format("Next freeze in %d:%02d", left // 60, left % 60)
+		else
+			lines[1] = "No more freezes"
+		end
+		lines[2] = string.format("Pieces %d/%d placed · %d held", placed, total, tonumber(helper("HeldCount", save)) or 0)
+		if state and state.EndsAt then
+			lines[3] = "Event ends in " .. string.format("%dd %dh", math.max(0, math.floor((state.EndsAt - now) / 86400)), math.max(0, math.floor((state.EndsAt - now) % 86400 / 3600)))
+		end
+		if freeze.status then
+			lines[#lines + 1] = tostring(freeze.status)
+		end
+		return table.concat(lines, "\n")
+	end
+end
+
 local lastObservedThrows = tonumber(getData("Throws")) or 0
 local nextThrowTrigger = 0
 local function shouldUseSuperThrow()
@@ -2692,6 +2855,10 @@ local function stepThrow()
 			end
 			task.wait(0.4)
 		end
+	end
+	if not ringPlay and STATE.freeze then
+		pcall(STATE.freeze.maintain)
+		elevate()
 	end
 	-- Point this throw at a Dreamland habitat or an unfinished index area when
 	-- those options are on; otherwise keep (or restore) maximum distance.
@@ -5952,7 +6119,7 @@ local function installHub()
 	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
 	-- Farming --------------------------------------------------------------
-	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo, feastInfo
+	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo, feastInfo, freezeInfo
 	-- Admin Abuse ----------------------------------------------------------
 	do
 		local ringBox = section(abuseTab, "Ring Rush", "orbit")
@@ -5971,6 +6138,9 @@ local function installHub()
 			STATE.feastGoal = option
 		end)
 		feastInfo = info(feastBox, "Thanksgiving", "Checking...")
+		local freezeBox = section(abuseTab, "Deep Freeze", "snowflake")
+		toggle(freezeBox, "Auto Deep Freeze", "autoDeepFreeze", "While a freeze is on, throws into a frozen zone and places ice pieces on the cryo chamber")
+		freezeInfo = info(freezeBox, "Deep Freeze", "Checking...")
 		local liveBox = section(abuseTab, "Live Boosts", "sparkles")
 		toggle(liveBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level and during Ring Rush")
 		boostInfo = info(liveBox, "Boosts", tostring(STATE.boostStatus))
@@ -6493,6 +6663,11 @@ local function installHub()
 			local ok, text = pcall(STATE.feast.text)
 			elevate()
 			setInfo(feastInfo, ok and tostring(text) or "Checking...")
+		end
+		if STATE.freeze then
+			local ok, text = pcall(STATE.freeze.text)
+			elevate()
+			setInfo(freezeInfo, ok and tostring(text) or "Checking...")
 		end
 		setInfo(aimInfo, tostring(STATE.aimStatus))
 		setInfo(upgradeInfo, string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(food), tostring(stand), tostring(fence)))
