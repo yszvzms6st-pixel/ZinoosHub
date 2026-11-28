@@ -102,7 +102,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.4"
+local VERSION = "1.5.5"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1551,40 +1551,6 @@ local function starfallPlan()
 	return best
 end
 
-local function starfallIndexPlan()
-	if STATE.autoStarfall ~= true or attr("StarfallOk") ~= true or not Balance.Starfall then
-		return nil
-	end
-	local now = workspace:GetServerTimeNow()
-	local untilAt = tonumber(workspace:GetAttribute("StarfallUntil")) or 0
-	if now > untilAt + (tonumber(Balance.Starfall.StandDays) or 3) * 86400 then
-		return nil
-	end
-	if abuseOn("Throw") or abuseOn("Luck") or abuseOn("Mutation") then
-		return nil
-	end
-	local have = type(ClientState.index) == "table" and ClientState.index or {}
-	local reach = tonumber(attr("ZoneReach")) or #ZoneConfig.List
-	local best
-	for _, plant in ipairs(Balance.Starfall.plants or {}) do
-		if not have[plant.name] then
-			local zoneIndex
-			for index, zone in ipairs(ZoneConfig.List or {}) do
-				if zone.name == plant.zone then
-					zoneIndex = index
-					break
-				end
-			end
-			local power = zoneIndex and zoneIndex <= reach and zonePower(plant.zone, 1) or nil
-			local odds = tonumber(plant.odds) or math.huge
-			if power and (not best or odds < best.odds) then
-				best = { kind = "Starfall Index", zone = plant.zone, power = power, odds = odds, endsAt = untilAt }
-			end
-		end
-	end
-	return best
-end
-
 local function jackpotPlan()
 	if STATE.autoAdminAbuse ~= true or not abuseOn("Jackpot") then
 		return nil
@@ -1599,7 +1565,7 @@ local function jackpotPlan()
 end
 
 function eventAim.plan()
-	return jackpotPlan() or starfallPlan() or harvestPlan() or starfallIndexPlan()
+	return jackpotPlan() or starfallPlan() or harvestPlan()
 end
 
 function eventAim.restore()
@@ -3945,7 +3911,7 @@ local function installHub()
 	toggle(harvestBox, "Auto Use Harvest Mutation", "autoHarvestMutate", "Walks to your best placed plant and gives it the Harvest Mutation (x2 money for good)")
 	local starBox = section(eventTab, "Starfall Update", "star")
 	local starInfo = info(starBox, "Live Status", "Checking Starfall...")
-	toggle(starBox, "Auto Starfall", "autoStarfall", "During a crystal wave, throws into a zone that still has a star crystal. A perfect throw counts as 2 hits, up to 10 a wave. Between waves, throws for Starfall plants you are missing unless an admin boost is on")
+	toggle(starBox, "Auto Starfall", "autoStarfall", "Only while a crystal wave is up: throws into a zone that still has a star crystal. A perfect throw counts as 2 hits, 10 a wave. Normal throws the rest of the time")
 	toggle(starBox, "Auto Buy Star Stand", "autoStarfallShop", "Spends Stardust on the Star Stand rewards in order, including the Starfall Mutation")
 	toggle(starBox, "Auto Use Starfall Mutation", "autoStarfallMutate", "Walks to your best placed plant and gives it the Starfall Mutation (x2 money for good, stacks)")
 	toggle(starBox, "Auto Cosmic Road", "autoCosmic", "Races the Cosmic Road for Stardust when no crystal wave or jackpot is up")
