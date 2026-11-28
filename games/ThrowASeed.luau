@@ -45,6 +45,8 @@ local Balance = require(ReplicatedStorage:WaitForChild("Balance", 30))
 elevate()
 local ZoneConfig = require(ReplicatedStorage:WaitForChild("ZoneConfig", 30))
 elevate()
+local CosmicTrack = require(ReplicatedStorage:WaitForChild("CosmicTrack", 30))
+elevate()
 -- The game keeps your plants, seeds and index in its ClientState module.
 -- An executor's require() can hand back a fresh, empty copy of that module,
 -- so look for the copy the game itself is using first.
@@ -100,7 +102,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.2"
+local VERSION = "1.5.3"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -149,6 +151,10 @@ local STATE = {
 	autoHarvestBasket = true,
 	autoHarvestShop = true,
 	autoHarvestMutate = true,
+	autoStarfall = true,
+	autoStarfallShop = true,
+	autoStarfallMutate = true,
+	autoCosmic = true,
 	-- Alerts
 	notifications = true,
 	notifyMinRarity = "Epic",
@@ -176,6 +182,8 @@ local STATE = {
 	rewardStatus = "Waiting",
 	abuseStatus = "Watching for admin events",
 	harvestStatus = "Checking event",
+	starfallStatus = "Checking Starfall",
+	cosmicStatus = "Waiting",
 	toggleControls = {},
 }
 genv.ZinoosSeedState = STATE
@@ -255,6 +263,7 @@ local SAVE_KEYS = {
 	"autoPlace", "autoFuse", "fuseMaxRarity", "autoSell", "sellRarities", "keepMutations", "keepBigSizes", "smartStorage", "keepTradeDupes", "tradeSpares", "keepMutationMin", "indexHunt", "historyFilter",
 	"autoDaily", "autoGifts", "autoCodes", "autoOffline", "autoPotions", "useLuckyThrows",
 	"autoAdminAbuse", "autoAbuseDrops", "autoAbuseCrown", "autoPieFight", "autoHarvestMoon", "autoHarvestBasket", "autoHarvestShop", "autoHarvestMutate",
+	"autoStarfall", "autoStarfallShop", "autoStarfallMutate", "autoCosmic",
 	"notifications", "notifyMinRarity", "notifyNew", "notifyMutations",
 	"walkSpeed", "speed", "antiAfk", "autoReload", "disable3d",
 	"toggleKey", "hideOnStart", "hubSize", "windTheme", "redeemedCodes",
@@ -1470,6 +1479,78 @@ local function harvestPlan()
 	return best
 end
 
+local function starfallWave()
+	if not Balance.Starfall then
+		return nil
+	end
+	local raw = workspace:GetAttribute("StarCrystals")
+	if type(raw) ~= "string" or raw == "" then
+		return nil
+	end
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(raw)
+	end)
+	if not ok or type(data) ~= "table" or type(data.list) ~= "table" then
+		return nil
+	end
+	local endsAt = tonumber(data.ends) or 0
+	if workspace:GetServerTimeNow() >= endsAt then
+		return nil
+	end
+	return data, endsAt
+end
+
+local starfallTrack = { wave = nil, base = 0 }
+local function starfallPlan()
+	if STATE.autoStarfall ~= true or attr("StarfallOk") ~= true then
+		return nil
+	end
+	local data, endsAt = starfallWave()
+	if not data then
+		return nil
+	end
+	local waveKey = tostring(data.n or endsAt)
+	if starfallTrack.wave ~= waveKey then
+		starfallTrack.wave = waveKey
+		starfallTrack.base = tonumber(attr("StarfallHits")) or 0
+	end
+	local cap = tonumber(Balance.Starfall.HitsPerPlayer) or 10
+	if (tonumber(attr("StarfallHits")) or 0) - starfallTrack.base >= cap then
+		return nil
+	end
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
+	local scale = abuseOn("Throw") and (tonumber(Balance.AdminAbuse and Balance.AdminAbuse.ThrowStrength) or 25) or 1
+	local best
+	for _, crystal in ipairs(data.list) do
+		local hp = tonumber(crystal.hp) or 0
+		local zone = ZoneConfig.List[tonumber(crystal.zone) or 0]
+		if hp > 0 and type(zone) == "table" then
+			local power = zonePower(zone.name, scale)
+			if power then
+				local missing = 0
+				for _, plant in ipairs(Balance.Starfall.plants or {}) do
+					if plant.zone == zone.name and not have[plant.name] then
+						missing += 1
+					end
+				end
+				local score = missing * 1000 + ((tonumber(crystal.max) or hp) - hp)
+				if not best or score > best.score then
+					best = {
+						kind = "Starfall",
+						zone = zone.name,
+						power = power,
+						score = score,
+						endsAt = endsAt,
+						hp = hp,
+						max = tonumber(crystal.max) or hp,
+					}
+				end
+			end
+		end
+	end
+	return best
+end
+
 local function jackpotPlan()
 	if STATE.autoAdminAbuse ~= true or not abuseOn("Jackpot") then
 		return nil
@@ -1484,7 +1565,7 @@ local function jackpotPlan()
 end
 
 function eventAim.plan()
-	return jackpotPlan() or harvestPlan()
+	return jackpotPlan() or starfallPlan() or harvestPlan()
 end
 
 function eventAim.restore()
@@ -2821,6 +2902,257 @@ local function stepHarvest()
 	STATE.harvestStatus = table.concat(notes, "\n")
 end
 
+-- Starfall update --------------------------------------------------------------
+local starfallWait = 0
+
+local function starStandOpen()
+	if not Balance.Starfall or attr("StarfallStand") ~= true then
+		return false
+	end
+	local now = workspace:GetServerTimeNow()
+	local untilAt = tonumber(workspace:GetAttribute("StarfallUntil")) or 0
+	return now < untilAt + (tonumber(Balance.Starfall.StandDays) or 3) * 86400
+end
+
+local function starStandCFrame()
+	local at = Balance.Starfall and Balance.Starfall.StandAt
+	if typeof(at) ~= "CFrame" then
+		return nil
+	end
+	return CFrame.lookAt(at.Position + Vector3.new(0, 3, 6), at.Position + Vector3.new(0, 3, 0))
+end
+
+local function stepStarfall()
+	if not Balance.Starfall or os.clock() < starfallWait then
+		return
+	end
+	starfallWait = os.clock() + 4
+	local notes = {}
+	local now = workspace:GetServerTimeNow()
+	local dust = tonumber(attr("Stardust")) or 0
+	local step = tonumber(attr("StarfallStep")) or 0
+	local hits = tonumber(attr("StarfallHits")) or 0
+	local cap = tonumber(Balance.Starfall.HitsPerPlayer) or 10
+	local waveHits = math.max(0, hits - (starfallTrack.base or 0))
+	local found, total = 0, 0
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
+	for _, plant in ipairs(Balance.Starfall.plants or {}) do
+		total += 1
+		if have[plant.name] then
+			found += 1
+		end
+	end
+	table.insert(notes, string.format("Index %d/%d · %d Stardust · %d/%d hits this wave", found, total, dust, waveHits, cap))
+
+	local stand = Balance.Starfall.Stand or {}
+	local nextReward = stand[step + 1]
+	local standOpen = starStandOpen()
+	if STATE.autoStarfallShop == true and standOpen and nextReward and dust >= (tonumber(nextReward.price) or math.huge) then
+		withTrip(starStandCFrame(), function()
+			local bought = 0
+			while bought < #stand and running() do
+				local current = tonumber(attr("StarfallStep")) or 0
+				local reward = stand[current + 1]
+				if not reward or (tonumber(attr("Stardust")) or 0) < (tonumber(reward.price) or math.huge) then
+					break
+				end
+				local ok, result = request("StarfallBuy")
+				if not ok then
+					table.insert(notes, "Stand: " .. tostring(result or "not bought"))
+					break
+				end
+				bought += 1
+				noteActivity(reward.mutation and "Bought Starfall Mutation" or ("Bought Star Stand reward " .. (current + 1)))
+				table.insert(notes, reward.mutation and "Starfall Mutation bought" or ("Stand reward " .. (current + 1) .. " bought"))
+			end
+		end)
+		dust = tonumber(attr("Stardust")) or dust
+		step = tonumber(attr("StarfallStep")) or step
+		nextReward = stand[step + 1]
+		starfallWait = os.clock() + 8
+	end
+
+	if STATE.autoStarfallMutate == true then
+		local okItems, items = pcall(function()
+			return HttpService:JSONDecode(tostring(attr("Items") or "{}"))
+		end)
+		if okItems and type(items) == "table" and (tonumber(items.StarfallMutation) or 0) > 0 then
+			local plots = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Plots")
+			local plot = plots and plots:FindFirstChild(tostring(attr("Plot") or ""))
+			local garden = plot and plot:FindFirstChild("Plants")
+			local best
+			for _, record in ipairs(garden and garden:GetChildren() or {}) do
+				if record:IsA("Configuration") and record:GetAttribute("Owner") == LocalPlayer.UserId and record:GetAttribute("Starfall") ~= true
+					and (not best or (tonumber(record:GetAttribute("Income")) or 0) > (tonumber(best:GetAttribute("Income")) or 0)) then
+					best = record
+				end
+			end
+			if best then
+				local at = Vector3.new(tonumber(best:GetAttribute("PosX")) or 0, tonumber(best:GetAttribute("PosY")) or 0, tonumber(best:GetAttribute("PosZ")) or 0)
+				local name = tostring(best:GetAttribute("Plant") or "your best plant")
+				local plantId = best:GetAttribute("PlantId") or best.Name
+				withTrip(CFrame.lookAt(at + Vector3.new(0, 3, 5), at + Vector3.new(0, 3, 0)), function()
+					local ok, result = request("StarfallMutate", { id = plantId })
+					if ok then
+						noteActivity("Starfall Mutation put on " .. name .. " (x2 money)")
+						notify("Starfall Mutation", name .. " now makes double money")
+						table.insert(notes, "Starfall Mutation on " .. name)
+					else
+						table.insert(notes, "Starfall Mutation: " .. tostring(result or "try again"))
+					end
+				end)
+				starfallWait = os.clock() + 15
+			else
+				table.insert(notes, "Starfall Mutation ready: place a plant first")
+			end
+		end
+	end
+
+	if nextReward then
+		table.insert(notes, string.format("Next stand reward %d/%d: %d Stardust", step + 1, #stand, nextReward.price))
+	else
+		table.insert(notes, "Star Stand complete")
+	end
+
+	local data, endsAt = starfallWave()
+	if data then
+		local parts = {}
+		for _, crystal in ipairs(data.list) do
+			local zone = ZoneConfig.List[tonumber(crystal.zone) or 0]
+			table.insert(parts, string.format("%s %d/%d", zone and zone.name or "?", tonumber(crystal.hp) or 0, tonumber(crystal.max) or 0))
+		end
+		local left = math.max(0, math.floor(endsAt - now))
+		table.insert(notes, string.format("Wave %d:%02d · %s%s", left // 60, left % 60, table.concat(parts, " · "),
+			eventAim.kind == "Starfall" and eventAim.target and (" · throwing at " .. eventAim.target) or ""))
+	else
+		local untilAt = tonumber(workspace:GetAttribute("StarfallUntil")) or 0
+		if now < untilAt then
+			table.insert(notes, "No crystal wave right now")
+		elseif standOpen then
+			table.insert(notes, "Starfall ended · Stand still open")
+		else
+			table.insert(notes, "Starfall is closed")
+		end
+	end
+	if STATE.cosmicStatus and STATE.cosmicStatus ~= "" then
+		table.insert(notes, STATE.cosmicStatus)
+	end
+	STATE.starfallStatus = table.concat(notes, "\n")
+end
+
+local cosmicWait = 0
+local function runCosmic()
+	if STATE.autoCosmic ~= true or STATE.cosmicBusy == true or not Balance.CosmicRoad or not CosmicTrack then
+		return
+	end
+	if os.clock() < cosmicWait or STATE.onTrip == true then
+		return
+	end
+	if attr("CosmicRider") == true or starfallPlan() or jackpotPlan() then
+		STATE.cosmicStatus = starfallPlan() and "Waiting for this crystal wave" or "Waiting"
+		return
+	end
+	local pad = Balance.CosmicRoad.PadAt
+	local padCf = typeof(pad) == "Vector3" and CFrame.new(pad + Vector3.new(0, 4, 8))
+		or (typeof(pad) == "CFrame" and (pad * CFrame.new(0, 4, 8)) or nil)
+	if not padCf or type(CosmicTrack.CF) ~= "function" then
+		STATE.cosmicStatus = "Track not ready"
+		return
+	end
+	STATE.cosmicBusy = true
+	STATE.onTrip = true
+	STATE.cosmicStatus = "Walking to the launcher"
+	local ok, err = pcall(function()
+		moveTo(padCf, 6)
+		task.wait(0.5)
+		local _, _, rootNow = character()
+		local padPos = typeof(pad) == "Vector3" and pad or (typeof(pad) == "CFrame" and pad.Position or nil)
+		if not rootNow or not padPos or (Vector3.new(rootNow.Position.X, 0, rootNow.Position.Z) - Vector3.new(padPos.X, 0, padPos.Z)).Magnitude > 11 then
+			STATE.cosmicStatus = "Could not reach the launcher"
+			return
+		end
+		local invoked, joined, message = pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicJoin", nil)
+		elevate()
+		if not invoked or not joined then
+			STATE.cosmicStatus = "Launcher: " .. tostring(message or "not open")
+			return
+		end
+		noteActivity("Cosmic Road started")
+		notify("Cosmic Road", "Racing to the core")
+		local length = tonumber(CosmicTrack.Length) or 0
+		local speed = tonumber(Balance.CosmicRoad.Speed) or 100
+		local distance = 0
+		local started = os.clock()
+		local taken = {}
+		local lastReport = 0
+		local _, _, root = character()
+		if root then
+			root.Anchored = false
+		end
+		while running() and distance < length and os.clock() - started < 280 do
+			if starfallPlan() or jackpotPlan() then
+				STATE.cosmicStatus = "Left the race for a live event"
+				break
+			end
+			local _, hum, rootNow = character()
+			if not rootNow then
+				break
+			end
+			local dt = RunService.Heartbeat:Wait()
+			distance = math.min(length, distance + speed * math.clamp(dt, 0, 0.1))
+			local cf = CosmicTrack.CF(distance)
+			if typeof(cf) == "CFrame" then
+				rootNow.AssemblyLinearVelocity = Vector3.zero
+				if hum then
+					hum.PlatformStand = true
+				end
+				rootNow.CFrame = cf * CFrame.new(0, 3.2, 0)
+			end
+			if os.clock() - lastReport > 1 then
+				lastReport = os.clock()
+				local reported = distance
+				task.spawn(function()
+					pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicProgress", { s = reported })
+				end)
+			end
+			for _, pickup in ipairs(type(CosmicTrack.Pickups) == "table" and CosmicTrack.Pickups or {}) do
+				local id = pickup.id
+				local at = tonumber(pickup.s)
+				if id and at and not taken[id] and math.abs(at - distance) < 20 then
+					taken[id] = true
+					task.spawn(function()
+						pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicTake", { id = id })
+					end)
+				end
+			end
+			local left = math.max(0, length - distance)
+			STATE.cosmicStatus = string.format("Racing · %d%% · %ds left", length > 0 and math.floor(distance / length * 100) or 0, math.floor(left / speed))
+		end
+		pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicProgress", { s = length })
+		pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicLand")
+		local _, hum = character()
+		if hum then
+			hum.PlatformStand = false
+		end
+		noteActivity("Cosmic Road finished")
+		STATE.cosmicStatus = "Finished a race · " .. tostring(attr("Stardust") or 0) .. " Stardust"
+	end)
+	local _, hum = character()
+	if hum then
+		hum.PlatformStand = false
+	end
+	STATE.onTrip = false
+	STATE.cosmicBusy = false
+	elevate()
+	if not ok then
+		STATE.cosmicStatus = "Race error: " .. tostring(err)
+		warn("[Zinoos hub] Cosmic Road: " .. tostring(err))
+		cosmicWait = os.clock() + 45
+	else
+		cosmicWait = os.clock() + 25
+	end
+end
+
 local function abuseStatusText()
 	local now = workspace:GetServerTimeNow()
 	local lines, boosts, events = {}, {}, {}
@@ -3506,6 +3838,12 @@ local function installHub()
 	toggle(harvestBox, "Auto Collect Cranberry Basket", "autoHarvestBasket", "Collects the basket on your plot whenever it has Cranberries")
 	toggle(harvestBox, "Auto Buy Harvest Stand", "autoHarvestShop", "Buys all seven limited rewards in order whenever you have enough Cranberries, including the final Harvest Mutation")
 	toggle(harvestBox, "Auto Use Harvest Mutation", "autoHarvestMutate", "Walks to your best placed plant and gives it the Harvest Mutation (x2 money for good)")
+	local starBox = section(eventTab, "Starfall Update", "star")
+	local starInfo = info(starBox, "Live Status", "Checking Starfall...")
+	toggle(starBox, "Auto Starfall", "autoStarfall", "During a crystal wave, throws into a zone that still has a star crystal. A perfect throw counts as 2 hits, up to 10 a wave")
+	toggle(starBox, "Auto Buy Star Stand", "autoStarfallShop", "Spends Stardust on the Star Stand rewards in order, including the Starfall Mutation")
+	toggle(starBox, "Auto Use Starfall Mutation", "autoStarfallMutate", "Walks to your best placed plant and gives it the Starfall Mutation (x2 money for good, stacks)")
+	toggle(starBox, "Auto Cosmic Road", "autoCosmic", "Races the Cosmic Road for Stardust when no crystal wave or jackpot is up")
 
 	-- Upgrades
 	local upgradeBox = section(upgradeTab, "Auto Buy", "shopping-cart")
@@ -3659,6 +3997,7 @@ local function installHub()
 				autoDaily = true, autoGifts = true, autoCodes = true, autoOffline = true, autoPotions = false, useLuckyThrows = false,
 				autoAdminAbuse = true, autoAbuseDrops = true, autoAbuseCrown = true, autoPieFight = true,
 				autoHarvestMoon = true, autoHarvestBasket = true, autoHarvestShop = true, autoHarvestMutate = true,
+				autoStarfall = true, autoStarfallShop = true, autoStarfallMutate = true, autoCosmic = true,
 				notifications = true, notifyMinRarity = "Epic", notifyNew = true, notifyMutations = true,
 				walkSpeed = false, speed = 32, antiAfk = true, autoReload = true, disable3d = false, hideOnStart = false,
 			}
@@ -3783,6 +4122,7 @@ local function installHub()
 		setInfo(indexInfo, indexHunt.trackerText(found, total))
 		setInfo(abuseInfo, abuseStatusText())
 		setInfo(harvestInfo, tostring(STATE.harvestStatus))
+		setInfo(starInfo, tostring(STATE.starfallStatus))
 		pcall(STATE.drawHistory)
 		setInfo(rewardInfo, tostring(STATE.rewardStatus) .. string.format("\nCodes used: %d of %d", #STATE.redeemedCodes, (function()
 			local n = 0
@@ -3859,6 +4199,8 @@ task.spawn(function()
 		elevate()
 		pcall(stepHarvest)
 		elevate()
+		pcall(stepStarfall)
+		elevate()
 		task.wait(1)
 	end
 end)
@@ -3867,6 +4209,15 @@ task.spawn(function()
 	while running() do
 		pcall(stepSpeed)
 		task.wait(0.5)
+	end
+end)
+
+task.spawn(function()
+	task.wait(6)
+	while running() do
+		pcall(runCosmic)
+		elevate()
+		task.wait(2)
 	end
 end)
 
