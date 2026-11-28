@@ -890,6 +890,9 @@ end
 if STATE.antiAfk == nil then
 	STATE.antiAfk = true
 end
+if STATE.streamerMode == nil then
+	STATE.streamerMode = false
+end
 if STATE.phoneGames == nil then
 	STATE.phoneGames = false
 end
@@ -4487,6 +4490,7 @@ local FLAG_KEYS = {
 	LowEnd = "lowEnd",
 	WebhookAlerts = "webhookOn",
 	AntiAfk = "antiAfk",
+	StreamerMode = "streamerMode",
 	PhoneGames = "phoneGames",
 }
 
@@ -6385,8 +6389,170 @@ local function installHub()
 		end
 	end
 
+	local streamer = { names = {}, boards = {}, images = {} }
+	local function maskNames(hide)
+		local aliases = {}
+		if type(LocalPlayer.Name) == "string" and #LocalPlayer.Name >= 4 then
+			table.insert(aliases, LocalPlayer.Name)
+		end
+		if type(LocalPlayer.DisplayName) == "string" and #LocalPlayer.DisplayName >= 4 and LocalPlayer.DisplayName ~= LocalPlayer.Name then
+			table.insert(aliases, LocalPlayer.DisplayName)
+		end
+		local userId = tostring(LocalPlayer.UserId)
+		local function isPlayerThumb(image)
+			local at = string.find(image, userId, 1, true)
+			if not at then
+				return false
+			end
+			local after = string.sub(image, at + #userId, at + #userId)
+			return after == "" or string.match(after, "%d") == nil
+		end
+		local function hideInText(text)
+			local changed = false
+			for _, name in ipairs(aliases) do
+				if string.find(text, name, 1, true) then
+					local parts = {}
+					local startAt = 1
+					while true do
+						local found = string.find(text, name, startAt, true)
+						if not found then
+							table.insert(parts, string.sub(text, startAt))
+							break
+						end
+						table.insert(parts, string.sub(text, startAt, found - 1))
+						table.insert(parts, "Anonymous")
+						startAt = found + #name
+						changed = true
+					end
+					text = table.concat(parts)
+				end
+			end
+			return text, changed
+		end
+		local function cover(inst)
+			if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+				local text, changed = hideInText(inst.Text)
+				if changed then
+					if streamer.names[inst] == nil then
+						streamer.names[inst] = inst.Text
+					end
+					inst.Text = text
+				end
+			elseif (inst:IsA("ImageLabel") or inst:IsA("ImageButton")) and type(inst.Image) == "string" and isPlayerThumb(inst.Image) then
+				if streamer.images[inst] == nil then
+					streamer.images[inst] = inst.Image
+				end
+				inst.Image = "rbxthumb://type=AvatarHeadShot&id=1&w=420&h=420"
+			end
+		end
+		local function scan(root)
+			if typeof(root) ~= "Instance" then
+				return
+			end
+			for _, inst in root:GetDescendants() do
+				cover(inst)
+			end
+		end
+		local function scanHubs(root)
+			if typeof(root) ~= "Instance" then
+				return
+			end
+			for _, child in root:GetChildren() do
+				if child:IsA("ScreenGui") and string.sub(child.Name, 1, 6) == "Zinoos" then
+					scan(child)
+				end
+			end
+		end
+		if hide then
+			for inst in pairs(streamer.names) do
+				if typeof(inst) ~= "Instance" or inst.Parent == nil then
+					streamer.names[inst] = nil
+				end
+			end
+			for inst in pairs(streamer.images) do
+				if typeof(inst) ~= "Instance" or inst.Parent == nil then
+					streamer.images[inst] = nil
+				end
+			end
+			if type(Window) == "table" then
+				local user = Window.User
+				if type(user) == "table" and type(user.SetAnonymous) == "function" then
+					pcall(user.SetAnonymous, user, true)
+				end
+			end
+			local core = game:GetService("CoreGui")
+			scan(LocalPlayer:FindFirstChild("PlayerGui"))
+			scan(core:FindFirstChild("PlayerList"))
+			scan(core:FindFirstChild("ExperienceChat"))
+			scanHubs(core)
+			if typeof(gethui) == "function" then
+				pcall(function()
+					scanHubs(gethui())
+				end)
+			end
+			local character = LocalPlayer.Character
+			local hum = character and character:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			end
+			if character then
+				for _, board in character:GetDescendants() do
+					if board:IsA("BillboardGui") and board.Enabled then
+						board.Enabled = false
+						streamer.boards[board] = true
+					end
+				end
+			end
+		else
+			if type(Window) == "table" then
+				local user = Window.User
+				if type(user) == "table" and type(user.SetAnonymous) == "function" then
+					pcall(user.SetAnonymous, user, false)
+				end
+			end
+			for inst, text in pairs(streamer.names) do
+				if typeof(inst) == "Instance" and inst.Parent then
+					inst.Text = text
+				end
+			end
+			table.clear(streamer.names)
+			for inst, image in pairs(streamer.images) do
+				if typeof(inst) == "Instance" and inst.Parent then
+					inst.Image = image
+				end
+			end
+			table.clear(streamer.images)
+			for board in pairs(streamer.boards) do
+				if typeof(board) == "Instance" and board.Parent then
+					board.Enabled = true
+				end
+			end
+			table.clear(streamer.boards)
+			local character = LocalPlayer.Character
+			local hum = character and character:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+			end
+		end
+	end
+	local function applyStreamer(on)
+		maskNames(on == true)
+	end
+	STATE.applyStreamer = applyStreamer
+	task.spawn(function()
+		while running() do
+			if STATE.streamerMode == true then
+				maskNames(true)
+			end
+			task.wait(1)
+		end
+	end)
+
 	local function onToggle(key, on)
 		STATE[key] = on
+		if key == "streamerMode" and STATE.applyStreamer then
+			STATE.applyStreamer(on)
+		end
 		if key == "autoTrain" and not on then
 			lastSwitchAt = 0
 			releaseGym()
@@ -6923,6 +7089,7 @@ local function installHub()
 		saveConfig()
 	end, true)
 	makeSwitch(training, "Anti AFK", "antiAfk", "Stays in the game while you are idle")
+	makeSwitch(training, "Streamer Mode", "streamerMode", "Hides your username and display name on the hub, the player list and your nametag")
 	makeSwitch(training, "Auto-load on Rejoin", "autoReload", "Loads the newest hub again by itself after a rejoin or server hop")
 	makeSwitch(training, "Auto Rebirth", "rebirth")
 
