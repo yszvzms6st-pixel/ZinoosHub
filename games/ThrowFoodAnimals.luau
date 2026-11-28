@@ -109,7 +109,7 @@ local CASH_RESERVE_VALUES = {
 
 local STATE = {
 	_gen = token,
-	version = "3.6.2",
+	version = "3.6.3",
 	animalsCache = nil,
 	trainOnBoost = true,
 	autoRingRush = true,
@@ -117,6 +117,7 @@ local STATE = {
 	feastOrder = "Regular",
 	feastGoal = "Animals first",
 	autoDeepFreeze = true,
+	autoAdvent = true,
 	dreamBuy = false,
 	dreamPotionBuy = false,
 	dreamInfuse = false,
@@ -286,6 +287,7 @@ local FLAG_KEYS = {
 	AutoRingRush = "autoRingRush",
 	AutoFeast = "autoFeast",
 	AutoDeepFreeze = "autoDeepFreeze",
+	AutoAdvent = "autoAdvent",
 	DreamBuy = "dreamBuy",
 	DreamPotionBuy = "dreamPotionBuy",
 	DreamInfuse = "dreamInfuse",
@@ -2761,6 +2763,98 @@ do
 	end
 end
 
+-- Advent calendar. One reward a day from Dec 1 through Dec 25. The hub claims
+-- today's door when it is open and unclaimed. Days that have not opened yet
+-- are left alone.
+do
+	local Advent = optionalRequire(ReplicatedStorage:FindFirstChild("Shared"), "Advent")
+	local advent = { nextCheck = 0, claimed = 0, status = nil }
+	STATE.advent = advent
+
+	local function helper(name, ...)
+		local fn = Advent and Advent[name]
+		if type(fn) ~= "function" then
+			return nil
+		end
+		local ok, value = pcall(fn, ...)
+		elevate()
+		if ok then
+			return value
+		end
+		return nil
+	end
+
+	local function adventData()
+		local value = getData("Advent")
+		return type(value) == "table" and value or {}
+	end
+
+	local function clock(seconds)
+		seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+		if seconds >= 86400 then
+			return string.format("%dd %dh", seconds // 86400, seconds % 86400 // 3600)
+		end
+		if seconds >= 3600 then
+			return string.format("%dh %02dm", seconds // 3600, seconds % 3600 // 60)
+		end
+		return string.format("%d:%02d", seconds // 60, seconds % 60)
+	end
+
+	function advent.step()
+		if STATE.autoAdvent ~= true or not Advent or os.clock() < advent.nextCheck then
+			return false
+		end
+		advent.nextCheck = os.clock() + 20
+		if helper("IsReleased") ~= true or helper("IsOver") == true then
+			return false
+		end
+		local today = tonumber(helper("Today")) or 0
+		local data = adventData()
+		if today < 1 or helper("CanClaim", data, today) ~= true then
+			return false
+		end
+		if helper("DayState", data, today, today) ~= "Claimable" then
+			return false
+		end
+		local result = invoke("Advent_Action", "Claim", today)
+		if result.Ok then
+			advent.claimed += 1
+			advent.status = "Claimed Dec " .. tostring(today)
+			noteActivity("Advent: claimed Dec " .. tostring(today))
+			notify("Advent calendar", "Claimed December " .. tostring(today))
+			return true
+		end
+		advent.status = "Claim: " .. tostring(result.Reason or "rejected")
+		return false
+	end
+
+	function advent.text()
+		if not Advent then
+			return "Advent calendar isn't in this server"
+		end
+		if helper("IsReleased") ~= true then
+			return "Advent calendar isn't open"
+		end
+		if helper("IsOver") == true then
+			return "Advent calendar has ended"
+		end
+		local now = workspace:GetServerTimeNow()
+		local today = tonumber(helper("Today")) or 0
+		local data = adventData()
+		local lines = {}
+		if today < 1 then
+			local opens = tonumber(helper("OpensAt", 1)) or now
+			lines[1] = "First day opens in " .. clock(opens - now)
+		else
+			local claimed = helper("IsClaimed", data, today) == true
+			lines[1] = claimed and ("Dec " .. today .. " claimed") or ("Dec " .. today .. " ready to claim")
+		end
+		if advent.status then
+			lines[#lines + 1] = tostring(advent.status)
+		end
+		return table.concat(lines, "\n")
+	end
+end
 local lastObservedThrows = tonumber(getData("Throws")) or 0
 local nextThrowTrigger = 0
 local function shouldUseSuperThrow()
@@ -2858,6 +2952,10 @@ local function stepThrow()
 	end
 	if not ringPlay and STATE.freeze then
 		pcall(STATE.freeze.maintain)
+		elevate()
+	end
+	if not ringPlay and STATE.advent then
+		pcall(STATE.advent.step)
 		elevate()
 	end
 	-- Point this throw at a Dreamland habitat or an unfinished index area when
@@ -6119,7 +6217,7 @@ local function installHub()
 	local activityInfo = info(homeTab, "Activity", "Waiting for the next thing the hub does.")
 
 	-- Farming --------------------------------------------------------------
-	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo, feastInfo, freezeInfo
+	local throwInfo, superInfo, trainInfo, boostInfo, aimInfo, ringInfo, feastInfo, freezeInfo, adventInfo
 	-- Admin Abuse ----------------------------------------------------------
 	do
 		local ringBox = section(abuseTab, "Ring Rush", "orbit")
@@ -6141,6 +6239,9 @@ local function installHub()
 		local freezeBox = section(abuseTab, "Deep Freeze", "snowflake")
 		toggle(freezeBox, "Auto Deep Freeze", "autoDeepFreeze", "While a freeze is on, throws into a frozen zone and places ice pieces on the cryo chamber")
 		freezeInfo = info(freezeBox, "Deep Freeze", "Checking...")
+		local adventBox = section(abuseTab, "Advent Calendar", "calendar")
+		toggle(adventBox, "Auto Advent Calendar", "autoAdvent", "Claims the day's reward when that door opens, Dec 1 through Dec 25")
+		adventInfo = info(adventBox, "Advent", "Checking...")
 		local liveBox = section(abuseTab, "Live Boosts", "sparkles")
 		toggle(liveBox, "Train During Training Boosts", "trainOnBoost", "Trains while a training boost lasts. Skipped at max level and during Ring Rush")
 		boostInfo = info(liveBox, "Boosts", tostring(STATE.boostStatus))
@@ -6668,6 +6769,11 @@ local function installHub()
 			local ok, text = pcall(STATE.freeze.text)
 			elevate()
 			setInfo(freezeInfo, ok and tostring(text) or "Checking...")
+		end
+		if STATE.advent then
+			local ok, text = pcall(STATE.advent.text)
+			elevate()
+			setInfo(adventInfo, ok and tostring(text) or "Checking...")
 		end
 		setInfo(aimInfo, tostring(STATE.aimStatus))
 		setInfo(upgradeInfo, string.format("%s\nFood %s · Stand %s · Fence %s", publicStatus(STATE.upgradeStatus), tostring(food), tostring(stand), tostring(fence)))
