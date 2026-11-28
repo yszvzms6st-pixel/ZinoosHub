@@ -102,7 +102,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.5"
+local VERSION = "1.5.6"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -375,6 +375,42 @@ local function request(name, args)
 		requestGate.nextAt = os.clock() + 2.5 * attempt
 	end
 	return false, "Slow down"
+end
+
+-- The gear next to strength shows a local percent. Changing PowerPct on the
+-- server does not update it, so a Starfall aim left it stuck (21%) after the
+-- wave. Write the label and the game's own settings table as well.
+local function syncPowerDisplay(power)
+	power = math.clamp(math.floor(tonumber(power) or 100), 1, 100)
+	local pg = LocalPlayer:FindFirstChild("PlayerGui")
+	local hud = pg and pg:FindFirstChild("HudArgent")
+	local gear = hud and hud:FindFirstChild("PowerGear", true)
+	local label = gear and gear:FindFirstChild("Pct")
+	if label then
+		label.Text = power .. "%"
+		label.Visible = power < 100
+	end
+	if typeof(filtergc) ~= "function" then
+		return
+	end
+	local ok, list = pcall(filtergc, "table", { Keys = { "power", "music", "sfx", "declineGifts" } }, false)
+	elevate()
+	if not ok or type(list) ~= "table" then
+		return
+	end
+	for _, settings in ipairs(list) do
+		if type(settings) == "table" and type(settings.power) == "number" then
+			settings.power = power
+		end
+	end
+end
+
+local function setThrowPower(power)
+	power = math.clamp(math.floor(tonumber(power) or 100), 1, 100)
+	if tonumber(attr("PowerPct")) ~= power then
+		request("Settings", { power = power })
+	end
+	syncPowerDisplay(power)
 end
 
 STATE.activity = {}
@@ -1333,9 +1369,7 @@ function indexHunt.restore()
 	if not indexHunt.touched then
 		return
 	end
-	if tonumber(attr("PowerPct")) ~= 100 then
-		request("Settings", { power = 100 })
-	end
+	setThrowPower(100)
 	indexHunt.touched = false
 	-- stepUpgrades equips the best seed again.
 end
@@ -1350,11 +1384,8 @@ function indexHunt.apply()
 	if not plan then
 		return indexHunt.restore()
 	end
-	if tonumber(attr("PowerPct")) ~= plan.power then
-		if request("Settings", { power = plan.power }) then
-			indexHunt.touched = true
-		end
-	end
+	setThrowPower(plan.power)
+	indexHunt.touched = true
 	if tonumber(attr("Seed")) ~= plan.seed then
 		if request("EquipSeed", { i = plan.seed }) then
 			indexHunt.touched = true
@@ -1569,8 +1600,10 @@ function eventAim.plan()
 end
 
 function eventAim.restore()
-	if eventAim.touched and tonumber(attr("PowerPct")) ~= (eventAim.originalPower or 100) then
-		request("Settings", { power = eventAim.originalPower or 100 })
+	if eventAim.touched or tonumber(attr("PowerPct")) ~= (eventAim.originalPower or 100) then
+		setThrowPower(eventAim.originalPower or 100)
+	else
+		syncPowerDisplay(eventAim.originalPower or 100)
 	end
 	eventAim.active, eventAim.kind, eventAim.target, eventAim.power = false, nil, nil, nil
 	eventAim.originalPower, eventAim.touched = nil, false
@@ -1586,9 +1619,8 @@ function eventAim.apply()
 		eventAim.originalPower = tonumber(attr("PowerPct")) or 100
 	end
 	eventAim.active, eventAim.kind, eventAim.target, eventAim.power = true, plan.kind, plan.zone, plan.power
-	if tonumber(attr("PowerPct")) ~= plan.power and request("Settings", { power = plan.power }) then
-		eventAim.touched = true
-	end
+	setThrowPower(plan.power)
+	eventAim.touched = true
 	local seed = bestEventSeed()
 	if seed and tonumber(attr("Seed")) ~= seed then
 		request("EquipSeed", { i = seed })
@@ -4239,6 +4271,12 @@ if running() then
 		warn("[Zinoos hub] " .. tostring(err))
 	end
 end
+
+task.defer(function()
+	if running() and not eventAim.plan() then
+		setThrowPower(100)
+	end
+end)
 
 -- Throwing / training loop.
 task.spawn(function()
