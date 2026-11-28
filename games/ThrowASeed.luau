@@ -102,7 +102,7 @@ local function rarityTier(name)
 	return table.find(RARITIES, name) or 1
 end
 
-local VERSION = "1.5.3"
+local VERSION = "1.5.4"
 local STATE = {
 	_gen = token,
 	version = VERSION,
@@ -1551,6 +1551,40 @@ local function starfallPlan()
 	return best
 end
 
+local function starfallIndexPlan()
+	if STATE.autoStarfall ~= true or attr("StarfallOk") ~= true or not Balance.Starfall then
+		return nil
+	end
+	local now = workspace:GetServerTimeNow()
+	local untilAt = tonumber(workspace:GetAttribute("StarfallUntil")) or 0
+	if now > untilAt + (tonumber(Balance.Starfall.StandDays) or 3) * 86400 then
+		return nil
+	end
+	if abuseOn("Throw") or abuseOn("Luck") or abuseOn("Mutation") then
+		return nil
+	end
+	local have = type(ClientState.index) == "table" and ClientState.index or {}
+	local reach = tonumber(attr("ZoneReach")) or #ZoneConfig.List
+	local best
+	for _, plant in ipairs(Balance.Starfall.plants or {}) do
+		if not have[plant.name] then
+			local zoneIndex
+			for index, zone in ipairs(ZoneConfig.List or {}) do
+				if zone.name == plant.zone then
+					zoneIndex = index
+					break
+				end
+			end
+			local power = zoneIndex and zoneIndex <= reach and zonePower(plant.zone, 1) or nil
+			local odds = tonumber(plant.odds) or math.huge
+			if power and (not best or odds < best.odds) then
+				best = { kind = "Starfall Index", zone = plant.zone, power = power, odds = odds, endsAt = untilAt }
+			end
+		end
+	end
+	return best
+end
+
 local function jackpotPlan()
 	if STATE.autoAdminAbuse ~= true or not abuseOn("Jackpot") then
 		return nil
@@ -1565,7 +1599,7 @@ local function jackpotPlan()
 end
 
 function eventAim.plan()
-	return jackpotPlan() or starfallPlan() or harvestPlan()
+	return jackpotPlan() or starfallPlan() or harvestPlan() or starfallIndexPlan()
 end
 
 function eventAim.restore()
@@ -2942,7 +2976,7 @@ local function stepStarfall()
 			found += 1
 		end
 	end
-	table.insert(notes, string.format("Index %d/%d · %d Stardust · %d/%d hits this wave", found, total, dust, waveHits, cap))
+	table.insert(notes, string.format("Index %d/%d · %d Stardust", found, total, dust))
 
 	local stand = Balance.Starfall.Stand or {}
 	local nextReward = stand[step + 1]
@@ -3022,7 +3056,7 @@ local function stepStarfall()
 			table.insert(parts, string.format("%s %d/%d", zone and zone.name or "?", tonumber(crystal.hp) or 0, tonumber(crystal.max) or 0))
 		end
 		local left = math.max(0, math.floor(endsAt - now))
-		table.insert(notes, string.format("Wave %d:%02d · %s%s", left // 60, left % 60, table.concat(parts, " · "),
+		table.insert(notes, string.format("Wave %d:%02d · %d/%d hits · %s%s", left // 60, left % 60, waveHits, cap, table.concat(parts, " · "),
 			eventAim.kind == "Starfall" and eventAim.target and (" · throwing at " .. eventAim.target) or ""))
 	else
 		local untilAt = tonumber(workspace:GetAttribute("StarfallUntil")) or 0
@@ -3041,6 +3075,23 @@ local function stepStarfall()
 end
 
 local cosmicWait = 0
+local function cosmicWindow()
+	local startAt = tonumber(workspace:GetAttribute("CosmicRoad"))
+	if not startAt or not Balance.CosmicRoad then
+		return nil
+	end
+	local elapsed = workspace:GetServerTimeNow() - startAt + (tonumber(workspace:GetAttribute("CosmicRoadShift")) or 0)
+	local openAt = tonumber(Balance.CosmicRoad.Race0) or 43.5
+	local closeAt = (tonumber(Balance.CosmicRoad.Smash0) or 153.5) - (tonumber(Balance.CosmicRoad.LateJoin) or 25)
+	if elapsed < openAt then
+		return { state = "soon", left = openAt - elapsed }
+	end
+	if elapsed > closeAt then
+		return { state = "closed" }
+	end
+	return { state = "open", left = closeAt - elapsed }
+end
+
 local function runCosmic()
 	if STATE.autoCosmic ~= true or STATE.cosmicBusy == true or not Balance.CosmicRoad or not CosmicTrack then
 		return
@@ -3050,6 +3101,20 @@ local function runCosmic()
 	end
 	if attr("CosmicRider") == true or starfallPlan() or jackpotPlan() then
 		STATE.cosmicStatus = starfallPlan() and "Waiting for this crystal wave" or "Waiting"
+		return
+	end
+	local window = cosmicWindow()
+	if not window then
+		STATE.cosmicStatus = "No race up"
+		return
+	end
+	if window.state == "closed" then
+		STATE.cosmicStatus = "Race already going"
+		return
+	end
+	if window.state == "soon" and window.left > 12 then
+		local left = math.max(0, math.floor(window.left))
+		STATE.cosmicStatus = string.format("Race opens in %d:%02d", left // 60, left % 60)
 		return
 	end
 	local pad = Balance.CosmicRoad.PadAt
@@ -3129,6 +3194,46 @@ local function runCosmic()
 			STATE.cosmicStatus = string.format("Racing · %d%% · %ds left", length > 0 and math.floor(distance / length * 100) or 0, math.floor(left / speed))
 		end
 		pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicProgress", { s = length })
+		local diveOk, dive = pcall(function()
+			return CosmicTrack.Dive and CosmicTrack.Dive()
+		end)
+		local core = Balance.CosmicRoad.Core
+		if diveOk and type(dive) == "table" and typeof(core) == "Vector3" then
+			local claimed = {}
+			local diveStarted = os.clock()
+			while running() and os.clock() - diveStarted < 45 do
+				local _, humNow, rootNow = character()
+				if not rootNow then
+					break
+				end
+				local dt = RunService.Heartbeat:Wait()
+				local offset = core - rootNow.Position
+				if offset.Magnitude < 40 then
+					break
+				end
+				local step = math.min(offset.Magnitude, speed * math.clamp(dt, 0, 0.1))
+				rootNow.AssemblyLinearVelocity = Vector3.zero
+				if humNow then
+					humNow.PlatformStand = true
+				end
+				rootNow.CFrame = CFrame.lookAt(rootNow.Position + offset.Unit * step, core)
+				local function claim(list, action)
+					for _, item in ipairs(type(list) == "table" and list or {}) do
+						if item.id and typeof(item.pos) == "Vector3" and not claimed[action .. item.id]
+							and (item.pos - rootNow.Position).Magnitude < 36 then
+							claimed[action .. item.id] = true
+							local itemId = item.id
+							task.spawn(function()
+								pcall(RequestRemote.InvokeServer, RequestRemote, action, { id = itemId })
+							end)
+						end
+					end
+				end
+				claim(dive.rings, "CosmicRing")
+				claim(dive.stars, "CosmicStar")
+				STATE.cosmicStatus = "Diving to the core"
+			end
+		end
 		pcall(RequestRemote.InvokeServer, RequestRemote, "CosmicLand")
 		local _, hum = character()
 		if hum then
@@ -3840,7 +3945,7 @@ local function installHub()
 	toggle(harvestBox, "Auto Use Harvest Mutation", "autoHarvestMutate", "Walks to your best placed plant and gives it the Harvest Mutation (x2 money for good)")
 	local starBox = section(eventTab, "Starfall Update", "star")
 	local starInfo = info(starBox, "Live Status", "Checking Starfall...")
-	toggle(starBox, "Auto Starfall", "autoStarfall", "During a crystal wave, throws into a zone that still has a star crystal. A perfect throw counts as 2 hits, up to 10 a wave")
+	toggle(starBox, "Auto Starfall", "autoStarfall", "During a crystal wave, throws into a zone that still has a star crystal. A perfect throw counts as 2 hits, up to 10 a wave. Between waves, throws for Starfall plants you are missing unless an admin boost is on")
 	toggle(starBox, "Auto Buy Star Stand", "autoStarfallShop", "Spends Stardust on the Star Stand rewards in order, including the Starfall Mutation")
 	toggle(starBox, "Auto Use Starfall Mutation", "autoStarfallMutate", "Walks to your best placed plant and gives it the Starfall Mutation (x2 money for good, stacks)")
 	toggle(starBox, "Auto Cosmic Road", "autoCosmic", "Races the Cosmic Road for Stardust when no crystal wave or jackpot is up")
